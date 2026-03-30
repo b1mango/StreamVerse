@@ -185,7 +185,9 @@
       return;
     }
 
-    const format = preview.formats.find((item) => item.id === selectedFormatId);
+    const format = dedupeVisibleFormats(preview.formats).find(
+      (item) => item.id === selectedFormatId
+    );
     if (!format) {
       return;
     }
@@ -375,10 +377,14 @@
 
     const usableFormats =
       bootstrap?.authState === "active"
-        ? [...asset.formats]
-        : asset.formats.filter((item) => !item.requiresLogin);
+        ? dedupeVisibleFormats(asset.formats)
+        : dedupeVisibleFormats(asset.formats).filter(
+            (item) => !item.requiresLogin
+          );
     const candidateFormats =
-      usableFormats.length > 0 ? usableFormats : [...asset.formats];
+      usableFormats.length > 0
+        ? usableFormats
+        : dedupeVisibleFormats(asset.formats);
     const rankedFormats = [...candidateFormats].sort((left, right) => {
       const heightDelta = formatHeight(right) - formatHeight(left);
       if (heightDelta !== 0) {
@@ -411,6 +417,38 @@
     return Number.parseInt(format.resolution.split("x")[1] ?? "0", 10) || 0;
   }
 
+  function dedupeVisibleFormats(formats: VideoFormat[]) {
+    const deduped = new Map<string, VideoFormat>();
+
+    for (const format of formats) {
+      const key = [
+        format.label.trim().toUpperCase(),
+        format.resolution.trim().toUpperCase(),
+        format.codec.trim().toUpperCase(),
+        format.container.trim().toUpperCase(),
+        format.noWatermark ? "NOWM" : "WM",
+        format.requiresLogin ? "LOGIN" : "PUBLIC"
+      ].join("|");
+      const existing = deduped.get(key);
+
+      if (!existing) {
+        deduped.set(key, format);
+        continue;
+      }
+
+      const shouldReplace =
+        (format.recommended && !existing.recommended) ||
+        (Boolean(format.directUrl) && !existing.directUrl) ||
+        format.bitrateKbps > existing.bitrateKbps;
+
+      if (shouldReplace) {
+        deduped.set(key, format);
+      }
+    }
+
+    return Array.from(deduped.values());
+  }
+
   function formatDuration(totalSeconds: number) {
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
@@ -438,7 +476,9 @@
   }
 
   function selectedFormat(asset: VideoAsset | null): VideoFormat | undefined {
-    return asset?.formats.find((item) => item.id === selectedFormatId);
+    return dedupeVisibleFormats(asset?.formats ?? []).find(
+      (item) => item.id === selectedFormatId
+    );
   }
 </script>
 
@@ -589,11 +629,13 @@
                 <p class="eyebrow">Formats</p>
                 <h3>选择清晰度</h3>
               </div>
-              <span class="chip subtle">{preview.formats.length} 个格式</span>
+              <span class="chip subtle">
+                {dedupeVisibleFormats(preview.formats).length} 个格式
+              </span>
             </div>
 
             <div class="format-list">
-              {#each preview.formats as format}
+              {#each dedupeVisibleFormats(preview.formats) as format}
                 <button
                   class:selected={selectedFormatId === format.id}
                   class="format-row"

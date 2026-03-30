@@ -24,12 +24,16 @@ pub fn dedupe_formats(formats: Vec<VideoFormat>) -> Vec<VideoFormat> {
 }
 
 fn same_profile(left: &VideoFormat, right: &VideoFormat) -> bool {
-    left.label == right.label
-        && left.resolution == right.resolution
-        && left.codec == right.codec
-        && left.container == right.container
+    normalized(&left.label) == normalized(&right.label)
+        && normalized(&left.resolution) == normalized(&right.resolution)
+        && normalized(&left.codec) == normalized(&right.codec)
+        && normalized(&left.container) == normalized(&right.container)
         && left.no_watermark == right.no_watermark
         && left.requires_login == right.requires_login
+}
+
+fn normalized(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
 }
 
 fn merge_formats(existing: VideoFormat, candidate: VideoFormat) -> VideoFormat {
@@ -80,6 +84,22 @@ mod tests {
         assert_eq!(deduped.len(), 2);
         assert!(deduped.iter().any(|format| format.recommended));
         assert_eq!(deduped[0].bitrate_kbps, 4200);
+        assert_eq!(deduped[0].id, "fmt-2");
+    }
+
+    #[test]
+    fn treats_spacing_and_case_as_same_visible_format() {
+        let mut first = sample_format("fmt-1", false, false, 4000, false);
+        first.label = "1080p ".to_string();
+        first.codec = " h.265".to_string();
+
+        let mut second = sample_format("fmt-2", false, false, 4200, true);
+        second.label = " 1080P".to_string();
+        second.codec = "H.265 ".to_string();
+
+        let deduped = dedupe_formats(vec![first, second]);
+        assert_eq!(deduped.len(), 1);
+        assert!(deduped[0].recommended);
         assert_eq!(deduped[0].id, "fmt-2");
     }
 
