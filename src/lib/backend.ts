@@ -1,7 +1,9 @@
 import { mockState } from "./mock";
 import type {
   AnalyzeInputPayload,
+  BatchDownloadResult,
   BootstrapState,
+  CreateProfileDownloadTasksPayload,
   CreateTaskPayload,
   DownloadTask,
   SaveSettingsPayload,
@@ -64,6 +66,24 @@ export async function createDownloadTask(
   }
 
   return maybeInvoke<DownloadTask>("create_download_task", payload);
+}
+
+export async function createProfileDownloadTasks(
+  payload: CreateProfileDownloadTasksPayload
+): Promise<BatchDownloadResult> {
+  if (!hasTauriRuntime()) {
+    return {
+      profileTitle: "示例主页",
+      sourceUrl: payload.rawInput,
+      totalAvailable: payload.limit ?? 12,
+      fetchedCount: payload.limit ?? 12,
+      enqueuedCount: payload.limit ?? 12,
+      skippedCount: 0,
+      message: "浏览器预览模式使用模拟批量入队结果"
+    };
+  }
+
+  return maybeInvoke<BatchDownloadResult>("create_profile_download_tasks", payload);
 }
 
 export async function listDownloadTasks(): Promise<DownloadTask[]> {

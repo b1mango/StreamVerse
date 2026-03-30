@@ -509,6 +509,24 @@ input {
   white-space: nowrap;
 }
 
+.inline-count-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.inline-count-input {
+  width: 84px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(7, 10, 15, 0.84);
+  color: var(--text);
+  padding: 9px 12px;
+  outline: none;
+}
+
 .settings-help {
   margin: 0;
   color: var(--muted);

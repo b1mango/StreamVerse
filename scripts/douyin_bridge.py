@@ -44,6 +44,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     analyze_parser.add_argument("--url", required=True)
     analyze_parser.add_argument("--cookie-file")
 
+    profile_parser = subparsers.add_parser("profile")
+    profile_parser.add_argument("--url", required=True)
+    profile_parser.add_argument("--cookie-file")
+    profile_parser.add_argument("--limit", type=int, default=24)
+
     return parser.parse_args(argv)
 
 
@@ -194,6 +199,48 @@ def collect_formats(detail: dict[str, Any], using_login: bool) -> list[dict[str,
     return formats
 
 
+def build_source_url(detail: dict[str, Any], fallback_url: str) -> str:
+    aweme_id = str(detail.get("aweme_id") or "").strip()
+    if not aweme_id:
+        return fallback_url
+
+    if detail.get("share_url"):
+        return str(detail["share_url"])
+
+    aweme_type = int(detail.get("aweme_type") or 0)
+    if aweme_type in IMAGE_AWEME_TYPES:
+        return f"https://www.douyin.com/note/{aweme_id}"
+
+    return f"https://www.douyin.com/video/{aweme_id}"
+
+
+def build_asset_from_detail(
+    detail: dict[str, Any], source_url: str, using_login: bool
+) -> dict[str, Any] | None:
+    aweme_id = str(detail.get("aweme_id") or "").strip()
+    if not aweme_id:
+        return None
+
+    formats = collect_formats(detail, using_login=using_login)
+    if not formats:
+        return None
+
+    author = (detail.get("author") or {}).get("nickname") or "未知作者"
+    title = (detail.get("desc") or detail.get("item_title") or "").strip() or aweme_id
+
+    return {
+        "awemeId": aweme_id,
+        "sourceUrl": source_url,
+        "title": title,
+        "author": author,
+        "durationSeconds": compute_duration_seconds(detail),
+        "publishDate": format_publish_date(detail.get("create_time")),
+        "caption": build_caption(detail, using_login, bool(formats)),
+        "coverGradient": "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))",
+        "formats": formats,
+    }
+
+
 def compute_duration_seconds(detail: dict[str, Any]) -> int:
     max_duration_ms = int(detail.get("duration") or 0)
     for _source_key, video in collect_video_sources(detail):
@@ -226,34 +273,109 @@ async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:
     response = await crawler.fetch_one_video(aweme_id)
     detail = response.get("aweme_detail") or {}
 
-    formats = collect_formats(detail, using_login=bool(cookie_file))
-    if not formats:
+    asset = build_asset_from_detail(
+        detail,
+        source_url=build_source_url(detail, url),
+        using_login=bool(cookie_file),
+    )
+    if not asset:
         raise RuntimeError("当前链接是图文笔记或受限内容，暂时没有可下载的视频格式。")
 
-    author = (detail.get("author") or {}).get("nickname") or "未知作者"
-    title = (detail.get("desc") or detail.get("item_title") or "").strip() or aweme_id
+    return asset
+
+
+async def analyze_profile(
+    url: str, cookie_file: Path | None, limit: int
+) -> dict[str, Any]:
+    patch_cookie_config(build_cookie_header(cookie_file))
+    using_login = bool(cookie_file)
+    normalized_limit = max(1, min(limit, 100))
+
+    crawler = DouyinWebCrawler()
+    sec_user_id = await crawler.get_sec_user_id(url)
+    profile_response = await crawler.handler_user_profile(sec_user_id)
+    user = (
+        profile_response.get("user")
+        or profile_response.get("user_info")
+        or profile_response.get("user_detail")
+        or {}
+    )
+
+    profile_title = (
+        user.get("nickname")
+        or user.get("unique_id")
+        or user.get("sec_uid")
+        or sec_user_id
+    )
+    total_available = int(user.get("aweme_count") or 0)
+
+    items: list[dict[str, Any]] = []
+    seen_aweme_ids: set[str] = set()
+    skipped_count = 0
+    max_cursor = 0
+    has_more = True
+
+    while has_more and len(items) < normalized_limit:
+        response = await crawler.fetch_user_post_videos(
+            sec_user_id=sec_user_id,
+            max_cursor=max_cursor,
+            count=min(18, normalized_limit - len(items)),
+        )
+
+        aweme_list = response.get("aweme_list") or []
+        if not aweme_list:
+            break
+
+        for detail in aweme_list:
+            aweme_id = str(detail.get("aweme_id") or "").strip()
+            if not aweme_id or aweme_id in seen_aweme_ids:
+                continue
+
+            seen_aweme_ids.add(aweme_id)
+            asset = build_asset_from_detail(
+                detail,
+                source_url=build_source_url(detail, url),
+                using_login=using_login,
+            )
+            if asset:
+                items.append(asset)
+                if len(items) >= normalized_limit:
+                    break
+            else:
+                skipped_count += 1
+
+        next_cursor = int(response.get("max_cursor") or 0)
+        has_more = bool(response.get("has_more")) and next_cursor != max_cursor
+        max_cursor = next_cursor
+
+    if not items:
+        raise RuntimeError("当前主页暂时没有可批量下载的视频作品，或需要更新登录状态后重试。")
 
     return {
-        "awemeId": aweme_id,
+        "profileTitle": str(profile_title),
         "sourceUrl": url,
-        "title": title,
-        "author": author,
-        "durationSeconds": compute_duration_seconds(detail),
-        "publishDate": format_publish_date(detail.get("create_time")),
-        "caption": build_caption(detail, bool(cookie_file), bool(formats)),
-        "coverGradient": "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))",
-        "formats": formats,
+        "secUserId": sec_user_id,
+        "totalAvailable": total_available or len(items),
+        "fetchedCount": len(items),
+        "skippedCount": skipped_count,
+        "items": items,
     }
 
 
 async def async_main(args: argparse.Namespace) -> int:
-    if args.command != "analyze":
+    cookie_file = Path(args.cookie_file) if args.cookie_file else None
+
+    if args.command == "analyze":
+        payload = await analyze(url=args.url, cookie_file=cookie_file)
+    elif args.command == "profile":
+        payload = await analyze_profile(
+            url=args.url,
+            cookie_file=cookie_file,
+            limit=args.limit,
+        )
+    else:
         raise RuntimeError(f"Unsupported command: {args.command}")
 
-    payload = await analyze(
-        url=args.url,
-        cookie_file=Path(args.cookie_file) if args.cookie_file else None,
-    )
     print(json.dumps(payload, ensure_ascii=False))
     return 0
 

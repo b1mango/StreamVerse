@@ -113,3 +113,19 @@ export interface SaveSettingsPayload {
   qualityPreference: QualityPreference;
   autoRevealInFinder: boolean;
 }
+
+export interface CreateProfileDownloadTasksPayload {
+  rawInput: string;
+  limit?: number;
+  saveDirectoryOverride?: string | null;
+}
+
+export interface BatchDownloadResult {
+  profileTitle: string;
+  sourceUrl: string;
+  totalAvailable: number;
+  fetchedCount: number;
+  enqueuedCount: number;
+  skippedCount: number;
+  message: string;
+}

@@ -23,6 +23,50 @@ pub fn dedupe_formats(formats: Vec<VideoFormat>) -> Vec<VideoFormat> {
     deduped
 }
 
+pub fn pick_preferred_format(
+    formats: &[VideoFormat],
+    quality_preference: &str,
+    include_login_formats: bool,
+) -> Option<VideoFormat> {
+    let deduped = dedupe_formats(formats.to_vec());
+    let visible = if include_login_formats {
+        deduped
+    } else {
+        deduped
+            .into_iter()
+            .filter(|format| !format.requires_login)
+            .collect()
+    };
+    let candidates = if visible.is_empty() {
+        dedupe_formats(formats.to_vec())
+    } else {
+        visible
+    };
+
+    let mut ranked = candidates.clone();
+    ranked.sort_by(|left, right| {
+        profile_height(right)
+            .cmp(&profile_height(left))
+            .then_with(|| right.bitrate_kbps.cmp(&left.bitrate_kbps))
+    });
+
+    match quality_preference {
+        "highest" => ranked.first().cloned(),
+        "smallest" => ranked.last().cloned().or_else(|| ranked.first().cloned()),
+        "no_watermark" => ranked
+            .iter()
+            .find(|format| format.no_watermark)
+            .cloned()
+            .or_else(|| ranked.iter().find(|format| format.recommended).cloned())
+            .or_else(|| ranked.first().cloned()),
+        _ => candidates
+            .iter()
+            .find(|format| format.recommended)
+            .cloned()
+            .or_else(|| ranked.first().cloned()),
+    }
+}
+
 fn same_profile(left: &VideoFormat, right: &VideoFormat) -> bool {
     normalized(&left.label) == normalized(&right.label)
         && normalized(&left.resolution) == normalized(&right.resolution)
@@ -34,6 +78,15 @@ fn same_profile(left: &VideoFormat, right: &VideoFormat) -> bool {
 
 fn normalized(value: &str) -> String {
     value.trim().to_ascii_uppercase()
+}
+
+fn profile_height(format: &VideoFormat) -> u32 {
+    format
+        .resolution
+        .split('x')
+        .nth(1)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_default()
 }
 
 fn merge_formats(existing: VideoFormat, candidate: VideoFormat) -> VideoFormat {
@@ -69,7 +122,7 @@ fn merge_formats(existing: VideoFormat, candidate: VideoFormat) -> VideoFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::dedupe_formats;
+    use super::{dedupe_formats, pick_preferred_format};
     use crate::VideoFormat;
 
     #[test]
@@ -101,6 +154,24 @@ mod tests {
         assert_eq!(deduped.len(), 1);
         assert!(deduped[0].recommended);
         assert_eq!(deduped[0].id, "fmt-2");
+    }
+
+    #[test]
+    fn prefers_no_watermark_when_requested() {
+        let mut standard = sample_format("fmt-1", false, false, 5200, false);
+        standard.label = "1080P".to_string();
+
+        let mut no_watermark = sample_format("fmt-2", true, false, 4800, false);
+        no_watermark.label = "1080P 高码率".to_string();
+
+        let selected = pick_preferred_format(
+            &[standard, no_watermark.clone()],
+            "no_watermark",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(selected.id, no_watermark.id);
     }
 
     fn sample_format(

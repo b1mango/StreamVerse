@@ -1,4 +1,4 @@
-use crate::{formats, VideoAsset, VideoFormat, DEFAULT_GRADIENT};
+use crate::{formats, ProfileBatch, VideoAsset, VideoFormat, DEFAULT_GRADIENT};
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -18,6 +18,17 @@ struct BridgeAsset {
     caption: String,
     cover_gradient: String,
     formats: Vec<BridgeFormat>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeProfileBatch {
+    profile_title: String,
+    source_url: String,
+    total_available: u32,
+    fetched_count: u32,
+    skipped_count: u32,
+    items: Vec<BridgeAsset>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -74,6 +85,39 @@ pub fn analyze_url(source_url: &str, cookie_browser: &str) -> Result<VideoAsset,
     })
 }
 
+pub fn analyze_profile(
+    source_url: &str,
+    cookie_browser: Option<&str>,
+    limit: u32,
+) -> Result<ProfileBatch, String> {
+    let python_bin = ensure_helper_runtime()?;
+    let cookie_file = match cookie_browser {
+        Some(browser) => Some(export_browser_cookies(browser)?),
+        None => None,
+    };
+    let output = run_bridge_profile_command(&python_bin, source_url, cookie_file.as_deref(), limit);
+    if let Some(cookie_file) = cookie_file {
+        let _ = fs::remove_file(cookie_file);
+    }
+    let output = output?;
+
+    if !output.status.success() {
+        return Err(read_bridge_error(&output.stderr, "抖音主页解析失败"));
+    }
+
+    let bridge: BridgeProfileBatch = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("解析主页批量结果失败：{error}"))?;
+
+    Ok(ProfileBatch {
+        profile_title: bridge.profile_title,
+        source_url: bridge.source_url,
+        total_available: bridge.total_available,
+        fetched_count: bridge.fetched_count,
+        skipped_count: bridge.skipped_count,
+        items: bridge.items.into_iter().map(map_asset).collect(),
+    })
+}
+
 fn map_format(format: BridgeFormat) -> VideoFormat {
     VideoFormat {
         id: format.id,
@@ -88,6 +132,24 @@ fn map_format(format: BridgeFormat) -> VideoFormat {
         direct_url: format.direct_url,
         referer: format.referer,
         user_agent: format.user_agent,
+    }
+}
+
+fn map_asset(asset: BridgeAsset) -> VideoAsset {
+    VideoAsset {
+        aweme_id: asset.aweme_id,
+        source_url: asset.source_url,
+        title: asset.title,
+        author: asset.author,
+        duration_seconds: asset.duration_seconds,
+        publish_date: asset.publish_date,
+        caption: asset.caption,
+        cover_gradient: if asset.cover_gradient.trim().is_empty() {
+            DEFAULT_GRADIENT.to_string()
+        } else {
+            asset.cover_gradient
+        },
+        formats: formats::dedupe_formats(asset.formats.into_iter().map(map_format).collect()),
     }
 }
 
@@ -118,6 +180,38 @@ fn run_bridge_command(
     command
         .output()
         .map_err(|error| format!("启动抖音桥接脚本失败：{error}"))
+}
+
+fn run_bridge_profile_command(
+    python_bin: &Path,
+    source_url: &str,
+    cookie_file: Option<&Path>,
+    limit: u32,
+) -> Result<std::process::Output, String> {
+    let helper_script = helper_script_path();
+    if !helper_script.exists() {
+        return Err(format!(
+            "未找到抖音桥接脚本：{}",
+            helper_script.to_string_lossy()
+        ));
+    }
+
+    let mut command = Command::new(python_bin);
+    command
+        .arg(&helper_script)
+        .arg("profile")
+        .arg("--url")
+        .arg(source_url)
+        .arg("--limit")
+        .arg(limit.to_string());
+
+    if let Some(cookie_file) = cookie_file {
+        command.arg("--cookie-file").arg(cookie_file);
+    }
+
+    command
+        .output()
+        .map_err(|error| format!("启动抖音主页桥接脚本失败：{error}"))
 }
 
 fn export_browser_cookies(browser: &str) -> Result<PathBuf, String> {
@@ -231,6 +325,9 @@ fn unique_suffix() -> u128 {
 fn read_bridge_error(stderr: &[u8], fallback: &str) -> String {
     let message = String::from_utf8_lossy(stderr);
     let trimmed = message.trim();
+    if trimmed.contains("获取数据失败") || trimmed.contains("无效响应类型") {
+        return "当前抖音主页请求被风控或返回空响应。请先在设置中选择 Chrome 等浏览器 Cookie 后，再重试主页批量下载。".to_string();
+    }
     if trimmed.is_empty() {
         fallback.to_string()
     } else {

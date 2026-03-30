@@ -4,6 +4,7 @@
     analyzeInput,
     clearFinishedTasks,
     createDownloadTask,
+    createProfileDownloadTasks,
     getBootstrapState,
     listDownloadTasks,
     openInFileManager,
@@ -24,6 +25,7 @@
   let loading = true;
   let analyzing = false;
   let downloading = false;
+  let batchDownloading = false;
   let pasting = false;
   let clearingFinished = false;
   let bootstrap: BootstrapState | null = null;
@@ -31,6 +33,7 @@
   let tasks: DownloadTask[] = [];
   let shareInput = "";
   let selectedFormatId = "";
+  let profileBatchLimit = 24;
   let errorMessage = "";
   let successMessage = "";
   let cookieBrowser = "";
@@ -193,6 +196,26 @@
     }
 
     await startDownload(preview, format, false);
+  }
+
+  async function handleCreateProfileTasks() {
+    batchDownloading = true;
+    errorMessage = "";
+    successMessage = "";
+
+    try {
+      const result = await createProfileDownloadTasks({
+        rawInput: shareInput,
+        limit: clampBatchLimit(profileBatchLimit),
+        saveDirectoryOverride: resolvedTargetDirectory()
+      });
+      tasks = await listDownloadTasks();
+      successMessage = result.message;
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    } finally {
+      batchDownloading = false;
+    }
   }
 
   async function startDownload(
@@ -457,6 +480,14 @@
       .padStart(2, "0")}`;
   }
 
+  function clampBatchLimit(value: number) {
+    if (!Number.isFinite(value)) {
+      return 24;
+    }
+
+    return Math.max(1, Math.min(100, Math.round(value)));
+  }
+
   function finishedTaskCount(items: DownloadTask[]) {
     return items.filter(
       (task) => task.status === "completed" || task.status === "failed"
@@ -537,17 +568,29 @@
           </div>
 
           <div class="path-actions">
+            <label class="inline-count-field">
+              <span>主页批量上限</span>
+              <input
+                bind:value={profileBatchLimit}
+                class="inline-count-input"
+                max="100"
+                min="1"
+                type="number"
+              />
+            </label>
             <button
               class="ghost-button"
               onclick={handlePickTargetDirectory}
-              disabled={pickingTargetDirectory}
+              disabled={pickingTargetDirectory || batchDownloading}
             >
               {pickingTargetDirectory ? "选择中…" : "更改目录"}
             </button>
             <button
               class="ghost-button"
               onclick={() => (targetDirectory = bootstrap!.saveDirectory)}
-              disabled={resolvedTargetDirectory() === bootstrap!.saveDirectory}
+              disabled={
+                resolvedTargetDirectory() === bootstrap!.saveDirectory || batchDownloading
+              }
             >
               恢复默认
             </button>
@@ -574,9 +617,24 @@
           <button
             class="secondary-button"
             onclick={handleCreateTask}
-            disabled={!preview || !selectedFormatId || analyzing || downloading || pasting}
+            disabled={
+              !preview ||
+              !selectedFormatId ||
+              analyzing ||
+              downloading ||
+              batchDownloading ||
+              pasting
+            }
           >
             {downloading ? "创建任务…" : "开始下载"}
+          </button>
+
+          <button
+            class="secondary-button"
+            onclick={handleCreateProfileTasks}
+            disabled={analyzing || downloading || batchDownloading || pasting}
+          >
+            {batchDownloading ? "批量入队中…" : "主页批量下载"}
           </button>
         </div>
 

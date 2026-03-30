@@ -44,6 +44,16 @@ pub(crate) struct VideoAsset {
     pub(crate) formats: Vec<VideoFormat>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ProfileBatch {
+    pub(crate) profile_title: String,
+    pub(crate) source_url: String,
+    pub(crate) total_available: u32,
+    pub(crate) fetched_count: u32,
+    pub(crate) skipped_count: u32,
+    pub(crate) items: Vec<VideoAsset>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DownloadTask {
@@ -92,6 +102,18 @@ struct SettingsProfile {
     download_mode: String,
     quality_preference: String,
     auto_reveal_in_finder: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchDownloadResult {
+    profile_title: String,
+    source_url: String,
+    total_available: u32,
+    fetched_count: u32,
+    enqueued_count: u32,
+    skipped_count: u32,
+    message: String,
 }
 
 #[derive(Clone)]
@@ -193,6 +215,87 @@ fn create_download_task(
         referer.as_deref(),
         user_agent.as_deref(),
     )
+}
+
+#[tauri::command]
+fn create_profile_download_tasks(
+    state: tauri::State<'_, AppState>,
+    raw_input: String,
+    limit: Option<u32>,
+    save_directory_override: Option<String>,
+) -> Result<BatchDownloadResult, String> {
+    let source_url = parser::extract_first_url(raw_input.trim())
+        .ok_or_else(|| "未在输入内容里找到可用主页链接，请粘贴完整主页分享文案或主页链接。".to_string())?;
+    let settings = state.settings.lock().unwrap().clone();
+    let save_directory = match save_directory_override {
+        Some(path) => settings::normalize_save_directory(path)?,
+        None => settings.save_directory.clone(),
+    };
+    let profile = douyin::analyze_profile(
+        &source_url,
+        settings.cookie_browser.as_deref(),
+        limit.unwrap_or(24),
+    )?;
+
+    let mut enqueued_count = 0u32;
+    let mut skipped_count = profile.skipped_count;
+    let mut first_error = None::<String>;
+
+    for asset in &profile.items {
+        let Some(format) = formats::pick_preferred_format(
+            &asset.formats,
+            &settings.quality_preference,
+            settings.cookie_browser.is_some(),
+        ) else {
+            skipped_count += 1;
+            continue;
+        };
+
+        match ytdlp::download_video(
+            Arc::clone(&state.tasks),
+            &asset.source_url,
+            &asset.aweme_id,
+            &asset.title,
+            &format.id,
+            &format.label,
+            &save_directory,
+            settings.auto_reveal_in_finder,
+            settings.cookie_browser.as_deref(),
+            format.direct_url.as_deref(),
+            format.referer.as_deref(),
+            format.user_agent.as_deref(),
+        ) {
+            Ok(_) => enqueued_count += 1,
+            Err(error) => {
+                skipped_count += 1;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if enqueued_count == 0 {
+        return Err(first_error.unwrap_or_else(|| "主页作品批量下载入队失败。".to_string()));
+    }
+
+    Ok(BatchDownloadResult {
+        profile_title: profile.profile_title,
+        source_url: profile.source_url,
+        total_available: profile.total_available,
+        fetched_count: profile.fetched_count,
+        enqueued_count,
+        skipped_count,
+        message: format!(
+            "已将 {} 个作品加入下载队列{}。",
+            enqueued_count,
+            if skipped_count > 0 {
+                format!("，跳过 {} 个", skipped_count)
+            } else {
+                String::new()
+            }
+        ),
+    })
 }
 
 #[tauri::command]
@@ -320,6 +423,7 @@ fn main() {
             get_bootstrap_state,
             analyze_input,
             create_download_task,
+            create_profile_download_tasks,
             list_download_tasks,
             save_settings,
             pick_save_directory,
