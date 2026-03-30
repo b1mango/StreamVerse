@@ -105,7 +105,7 @@ fn settings_path() -> PathBuf {
 
 fn default_save_directory() -> String {
     let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{home}/Movies/Douyin")
+    format!("{home}/Movies/StreamVerse")
 }
 
 fn expand_home(input: &str) -> String {

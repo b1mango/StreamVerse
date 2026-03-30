@@ -1,11 +1,13 @@
 import { mockState } from "./mock";
 import type {
   AnalyzeInputPayload,
+  AnalyzeProfilePayload,
   BatchDownloadResult,
   BootstrapState,
   CreateProfileDownloadTasksPayload,
   CreateTaskPayload,
   DownloadTask,
+  ProfileBatch,
   SaveSettingsPayload,
   SettingsProfile,
   VideoAsset
@@ -57,15 +59,39 @@ export async function createDownloadTask(
       title: payload.title,
       progress: 100,
       speedText: "-",
-      formatLabel: payload.formatLabel,
+      formatLabel: payload.formatLabel ?? "视频",
       status: "completed",
       etaText: "已完成",
       message: "浏览器预览模式使用模拟下载结果",
-      outputPath: `${payload.saveDirectoryOverride ?? mockState.saveDirectory}/${payload.title}`
+      outputPath: `${payload.saveDirectoryOverride ?? mockState.saveDirectory}/${payload.title}`,
+      supportsPause: false,
+      supportsCancel: false
     };
   }
 
   return maybeInvoke<DownloadTask>("create_download_task", payload);
+}
+
+export async function analyzeProfileInput(
+  payload: AnalyzeProfilePayload
+): Promise<ProfileBatch> {
+  if (!hasTauriRuntime()) {
+    return {
+      profileTitle: "示例主页",
+      sourceUrl: payload.rawInput,
+      totalAvailable: payload.limit ?? 12,
+      fetchedCount: payload.limit ?? 12,
+      skippedCount: 0,
+      items: Array.from({ length: payload.limit ?? 12 }).map((_, index) => ({
+        ...mockState.preview,
+        awemeId: `${mockState.preview.awemeId}-${index + 1}`,
+        title: `${mockState.preview.title} ${index + 1}`,
+        sourceUrl: `${mockState.preview.sourceUrl}?item=${index + 1}`
+      }))
+    };
+  }
+
+  return maybeInvoke<ProfileBatch>("analyze_profile_input", payload);
 }
 
 export async function createProfileDownloadTasks(
@@ -74,10 +100,10 @@ export async function createProfileDownloadTasks(
   if (!hasTauriRuntime()) {
     return {
       profileTitle: "示例主页",
-      sourceUrl: payload.rawInput,
-      totalAvailable: payload.limit ?? 12,
-      fetchedCount: payload.limit ?? 12,
-      enqueuedCount: payload.limit ?? 12,
+      sourceUrl: payload.sourceUrl,
+      totalAvailable: payload.items.length,
+      fetchedCount: payload.items.length,
+      enqueuedCount: payload.items.length,
       skippedCount: 0,
       message: "浏览器预览模式使用模拟批量入队结果"
     };
@@ -138,9 +164,36 @@ export async function openInFileManager(
 export async function clearFinishedTasks(): Promise<DownloadTask[]> {
   if (!hasTauriRuntime()) {
     return mockState.tasks.filter(
-      (task) => task.status !== "completed" && task.status !== "failed"
+      (task) =>
+        task.status !== "completed" &&
+        task.status !== "failed" &&
+        task.status !== "cancelled"
     );
   }
 
   return maybeInvoke<DownloadTask[]>("clear_finished_tasks");
+}
+
+export async function pauseDownloadTask(taskId: string): Promise<DownloadTask> {
+  if (!hasTauriRuntime()) {
+    throw new Error("浏览器预览模式不支持暂停任务。");
+  }
+
+  return maybeInvoke<DownloadTask>("pause_download_task", { taskId });
+}
+
+export async function resumeDownloadTask(taskId: string): Promise<DownloadTask> {
+  if (!hasTauriRuntime()) {
+    throw new Error("浏览器预览模式不支持继续任务。");
+  }
+
+  return maybeInvoke<DownloadTask>("resume_download_task", { taskId });
+}
+
+export async function cancelDownloadTask(taskId: string): Promise<DownloadTask> {
+  if (!hasTauriRuntime()) {
+    throw new Error("浏览器预览模式不支持取消任务。");
+  }
+
+  return maybeInvoke<DownloadTask>("cancel_download_task", { taskId });
 }

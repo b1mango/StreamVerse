@@ -4,7 +4,7 @@ export const mockState: BootstrapState = {
   authState: "guest",
   accountLabel: "未登录",
   cookieBrowser: null,
-  saveDirectory: "~/Movies/Douyin",
+  saveDirectory: "~/Movies/StreamVerse",
   downloadMode: "manual",
   qualityPreference: "recommended",
   autoRevealInFinder: false,
@@ -23,6 +23,7 @@ export const mockState: BootstrapState = {
     publishDate: "2026-03-28",
     caption:
       "支持分享文本、短链、普通作品链接的统一解析。桌面模式会使用真实解析结果，这里只是浏览器预览时的占位数据。",
+    coverUrl: null,
     coverGradient:
       "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))",
     formats: [

@@ -12,8 +12,16 @@ export type DownloadStatus =
   | "queued"
   | "downloading"
   | "paused"
+  | "cancelled"
   | "completed"
   | "failed";
+
+export interface DownloadContentSelection {
+  downloadVideo: boolean;
+  downloadCover: boolean;
+  downloadCaption: boolean;
+  downloadMetadata: boolean;
+}
 
 export interface VideoFormat {
   id: string;
@@ -38,6 +46,7 @@ export interface VideoAsset {
   durationSeconds: number;
   publishDate: string;
   caption: string;
+  coverUrl?: string | null;
   coverGradient: string;
   formats: VideoFormat[];
 }
@@ -52,6 +61,8 @@ export interface DownloadTask {
   etaText: string;
   message?: string;
   outputPath?: string;
+  supportsPause: boolean;
+  supportsCancel: boolean;
 }
 
 export interface AppMetrics {
@@ -98,9 +109,14 @@ export interface CreateTaskPayload {
   awemeId: string;
   sourceUrl: string;
   title: string;
-  formatId: string;
-  formatLabel: string;
+  author: string;
+  publishDate: string;
+  caption: string;
+  coverUrl?: string | null;
+  formatId?: string | null;
+  formatLabel?: string | null;
   saveDirectoryOverride?: string | null;
+  downloadOptions: DownloadContentSelection;
   directUrl?: string | null;
   referer?: string | null;
   userAgent?: string | null;
@@ -115,9 +131,25 @@ export interface SaveSettingsPayload {
 }
 
 export interface CreateProfileDownloadTasksPayload {
+  profileTitle: string;
+  sourceUrl: string;
+  items: VideoAsset[];
+  saveDirectoryOverride?: string | null;
+  downloadOptions: DownloadContentSelection;
+}
+
+export interface AnalyzeProfilePayload {
   rawInput: string;
   limit?: number;
-  saveDirectoryOverride?: string | null;
+}
+
+export interface ProfileBatch {
+  profileTitle: string;
+  sourceUrl: string;
+  totalAvailable: number;
+  fetchedCount: number;
+  skippedCount: number;
+  items: VideoAsset[];
 }
 
 export interface BatchDownloadResult {

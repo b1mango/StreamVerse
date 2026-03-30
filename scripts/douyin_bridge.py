@@ -107,6 +107,46 @@ def choose_direct_url(url_list: list[str]) -> str | None:
     return url_list[0]
 
 
+def first_url_from_candidate(candidate: Any) -> str | None:
+    if isinstance(candidate, dict):
+        url_list = candidate.get("url_list") or candidate.get("urlList") or []
+        if isinstance(url_list, list):
+            for item in url_list:
+                if isinstance(item, str) and item.strip():
+                    return item
+
+    if isinstance(candidate, list):
+        for item in candidate:
+            if isinstance(item, str) and item.strip():
+                return item
+
+    return None
+
+
+def extract_cover_url(detail: dict[str, Any]) -> str | None:
+    top_video = detail.get("video") or {}
+    for key in ("origin_cover", "cover", "dynamic_cover", "animated_cover"):
+        cover_url = first_url_from_candidate(top_video.get(key))
+        if cover_url:
+            return cover_url
+
+    for image in detail.get("images") or []:
+        if not isinstance(image, dict):
+            continue
+
+        for key in ("url_list", "download_url_list"):
+            cover_url = first_url_from_candidate(image.get(key))
+            if cover_url:
+                return cover_url
+
+        display_image = image.get("display_image") or {}
+        cover_url = first_url_from_candidate(display_image)
+        if cover_url:
+            return cover_url
+
+    return None
+
+
 def pick_display_height(width: int, height: int, gear_name: str) -> int:
     if gear_name:
         match = re.search(r"(\d{3,4})", gear_name)
@@ -236,6 +276,7 @@ def build_asset_from_detail(
         "durationSeconds": compute_duration_seconds(detail),
         "publishDate": format_publish_date(detail.get("create_time")),
         "caption": build_caption(detail, using_login, bool(formats)),
+        "coverUrl": extract_cover_url(detail),
         "coverGradient": "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))",
         "formats": formats,
     }

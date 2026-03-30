@@ -7,13 +7,13 @@ mod settings;
 mod ytdlp;
 
 use rfd::FileDialog;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 pub(crate) const DEFAULT_GRADIENT: &str =
     "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))";
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoFormat {
     pub(crate) id: String,
@@ -30,7 +30,7 @@ pub(crate) struct VideoFormat {
     pub(crate) user_agent: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoAsset {
     pub(crate) aweme_id: String,
@@ -40,11 +40,13 @@ pub(crate) struct VideoAsset {
     pub(crate) duration_seconds: u32,
     pub(crate) publish_date: String,
     pub(crate) caption: String,
+    pub(crate) cover_url: Option<String>,
     pub(crate) cover_gradient: String,
     pub(crate) formats: Vec<VideoFormat>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ProfileBatch {
     pub(crate) profile_title: String,
     pub(crate) source_url: String,
@@ -52,6 +54,15 @@ pub(crate) struct ProfileBatch {
     pub(crate) fetched_count: u32,
     pub(crate) skipped_count: u32,
     pub(crate) items: Vec<VideoAsset>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DownloadContentSelection {
+    pub(crate) download_video: bool,
+    pub(crate) download_cover: bool,
+    pub(crate) download_caption: bool,
+    pub(crate) download_metadata: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -66,6 +77,8 @@ pub(crate) struct DownloadTask {
     pub(crate) eta_text: String,
     pub(crate) message: Option<String>,
     pub(crate) output_path: Option<String>,
+    pub(crate) supports_pause: bool,
+    pub(crate) supports_cancel: bool,
 }
 
 #[derive(Serialize)]
@@ -120,6 +133,7 @@ struct BatchDownloadResult {
 struct AppState {
     tasks: Arc<Mutex<Vec<DownloadTask>>>,
     settings: Arc<Mutex<settings::AppSettings>>,
+    controllers: ytdlp::TaskControllerStore,
 }
 
 fn sample_preview() -> VideoAsset {
@@ -131,6 +145,7 @@ fn sample_preview() -> VideoAsset {
         duration_seconds: 42,
         publish_date: "2026-03-28".into(),
         caption: "浏览器预览模式下会显示这个占位作品；桌面应用里会改成实时解析结果。".into(),
+        cover_url: None,
         cover_gradient: DEFAULT_GRADIENT.into(),
         formats: vec![
             VideoFormat {
@@ -183,14 +198,36 @@ fn analyze_input(
 }
 
 #[tauri::command]
+fn analyze_profile_input(
+    raw_input: String,
+    limit: Option<u32>,
+    state: tauri::State<'_, AppState>,
+) -> Result<ProfileBatch, String> {
+    let source_url = parser::extract_first_url(raw_input.trim())
+        .ok_or_else(|| "未在输入内容里找到可用主页链接，请粘贴完整主页分享文案或主页链接。".to_string())?;
+    let settings = state.settings.lock().unwrap().clone();
+
+    douyin::analyze_profile(
+        &source_url,
+        settings.cookie_browser.as_deref(),
+        limit.unwrap_or(24),
+    )
+}
+
+#[tauri::command]
 fn create_download_task(
     state: tauri::State<'_, AppState>,
     aweme_id: String,
     source_url: String,
     title: String,
-    format_id: String,
-    format_label: String,
+    author: String,
+    publish_date: String,
+    caption: String,
+    cover_url: Option<String>,
+    format_id: Option<String>,
+    format_label: Option<String>,
     save_directory_override: Option<String>,
+    download_options: DownloadContentSelection,
     direct_url: Option<String>,
     referer: Option<String>,
     user_agent: Option<String>,
@@ -203,12 +240,18 @@ fn create_download_task(
 
     ytdlp::download_video(
         Arc::clone(&state.tasks),
+        Arc::clone(&state.controllers),
         &source_url,
         &aweme_id,
         &title,
-        &format_id,
-        &format_label,
+        &author,
+        &publish_date,
+        &caption,
+        cover_url.as_deref(),
+        format_id.as_deref(),
+        format_label.as_deref(),
         &save_directory,
+        download_options,
         settings.auto_reveal_in_finder,
         settings.cookie_browser.as_deref(),
         direct_url.as_deref(),
@@ -220,50 +263,69 @@ fn create_download_task(
 #[tauri::command]
 fn create_profile_download_tasks(
     state: tauri::State<'_, AppState>,
-    raw_input: String,
-    limit: Option<u32>,
+    profile_title: String,
+    source_url: String,
+    items: Vec<VideoAsset>,
     save_directory_override: Option<String>,
+    download_options: DownloadContentSelection,
 ) -> Result<BatchDownloadResult, String> {
-    let source_url = parser::extract_first_url(raw_input.trim())
-        .ok_or_else(|| "未在输入内容里找到可用主页链接，请粘贴完整主页分享文案或主页链接。".to_string())?;
     let settings = state.settings.lock().unwrap().clone();
     let save_directory = match save_directory_override {
         Some(path) => settings::normalize_save_directory(path)?,
         None => settings.save_directory.clone(),
     };
-    let profile = douyin::analyze_profile(
-        &source_url,
-        settings.cookie_browser.as_deref(),
-        limit.unwrap_or(24),
-    )?;
+
+    if items.is_empty() {
+        return Err("请先在主页列表里至少勾选一个作品。".to_string());
+    }
+
+    if !download_options.download_video
+        && !download_options.download_cover
+        && !download_options.download_caption
+        && !download_options.download_metadata
+    {
+        return Err("至少要选择一种要保存的内容。".to_string());
+    }
 
     let mut enqueued_count = 0u32;
-    let mut skipped_count = profile.skipped_count;
+    let mut skipped_count = 0u32;
     let mut first_error = None::<String>;
 
-    for asset in &profile.items {
-        let Some(format) = formats::pick_preferred_format(
-            &asset.formats,
-            &settings.quality_preference,
-            settings.cookie_browser.is_some(),
-        ) else {
+    for asset in &items {
+        let selected_format = if download_options.download_video {
+            formats::pick_preferred_format(
+                &asset.formats,
+                &settings.quality_preference,
+                settings.cookie_browser.is_some(),
+            )
+        } else {
+            None
+        };
+
+        if download_options.download_video && selected_format.is_none() {
             skipped_count += 1;
             continue;
-        };
+        }
 
         match ytdlp::download_video(
             Arc::clone(&state.tasks),
+            Arc::clone(&state.controllers),
             &asset.source_url,
             &asset.aweme_id,
             &asset.title,
-            &format.id,
-            &format.label,
+            &asset.author,
+            &asset.publish_date,
+            &asset.caption,
+            asset.cover_url.as_deref(),
+            selected_format.as_ref().map(|format| format.id.as_str()),
+            selected_format.as_ref().map(|format| format.label.as_str()),
             &save_directory,
+            download_options.clone(),
             settings.auto_reveal_in_finder,
             settings.cookie_browser.as_deref(),
-            format.direct_url.as_deref(),
-            format.referer.as_deref(),
-            format.user_agent.as_deref(),
+            selected_format.as_ref().and_then(|format| format.direct_url.as_deref()),
+            selected_format.as_ref().and_then(|format| format.referer.as_deref()),
+            selected_format.as_ref().and_then(|format| format.user_agent.as_deref()),
         ) {
             Ok(_) => enqueued_count += 1,
             Err(error) => {
@@ -280,10 +342,10 @@ fn create_profile_download_tasks(
     }
 
     Ok(BatchDownloadResult {
-        profile_title: profile.profile_title,
-        source_url: profile.source_url,
-        total_available: profile.total_available,
-        fetched_count: profile.fetched_count,
+        profile_title,
+        source_url,
+        total_available: items.len() as u32,
+        fetched_count: items.len() as u32,
         enqueued_count,
         skipped_count,
         message: format!(
@@ -301,6 +363,30 @@ fn create_profile_download_tasks(
 #[tauri::command]
 fn list_download_tasks(state: tauri::State<'_, AppState>) -> Vec<DownloadTask> {
     state.tasks.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn pause_download_task(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DownloadTask, String> {
+    ytdlp::pause_task(Arc::clone(&state.tasks), Arc::clone(&state.controllers), &task_id)
+}
+
+#[tauri::command]
+fn resume_download_task(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DownloadTask, String> {
+    ytdlp::resume_task(Arc::clone(&state.tasks), Arc::clone(&state.controllers), &task_id)
+}
+
+#[tauri::command]
+fn cancel_download_task(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DownloadTask, String> {
+    ytdlp::cancel_task(Arc::clone(&state.tasks), Arc::clone(&state.controllers), &task_id)
 }
 
 #[tauri::command]
@@ -353,7 +439,9 @@ fn open_in_file_manager(path: String, reveal_parent: bool) -> Result<(), String>
 #[tauri::command]
 fn clear_finished_tasks(state: tauri::State<'_, AppState>) -> Vec<DownloadTask> {
     let mut tasks = state.tasks.lock().unwrap();
-    tasks.retain(|task| task.status != "completed" && task.status != "failed");
+    tasks.retain(|task| {
+        task.status != "completed" && task.status != "failed" && task.status != "cancelled"
+    });
     tasks.clone()
 }
 
@@ -415,6 +503,7 @@ fn main() {
     let app_state = AppState {
         tasks: Arc::new(Mutex::new(Vec::new())),
         settings: Arc::new(Mutex::new(settings::load_settings())),
+        controllers: ytdlp::new_task_controller_store(),
     };
 
     tauri::Builder::default()
@@ -422,9 +511,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_bootstrap_state,
             analyze_input,
+            analyze_profile_input,
             create_download_task,
             create_profile_download_tasks,
             list_download_tasks,
+            pause_download_task,
+            resume_download_task,
+            cancel_download_task,
             save_settings,
             pick_save_directory,
             open_in_file_manager,

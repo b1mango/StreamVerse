@@ -77,7 +77,12 @@ fn same_profile(left: &VideoFormat, right: &VideoFormat) -> bool {
 }
 
 fn normalized(value: &str) -> String {
-    value.trim().to_ascii_uppercase()
+    value
+        .trim()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase()
 }
 
 fn profile_height(format: &VideoFormat) -> u32 {

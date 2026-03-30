@@ -2,36 +2,54 @@
   import { onMount } from "svelte";
   import {
     analyzeInput,
+    analyzeProfileInput,
+    cancelDownloadTask,
     clearFinishedTasks,
     createDownloadTask,
     createProfileDownloadTasks,
     getBootstrapState,
     listDownloadTasks,
     openInFileManager,
+    pauseDownloadTask,
     pickSaveDirectory,
+    resumeDownloadTask,
     saveSettings
   } from "./lib/backend";
   import type {
     AuthState,
     BootstrapState,
+    DownloadContentSelection,
     DownloadMode,
     DownloadTask,
+    ProfileBatch,
     QualityPreference,
     SettingsProfile,
     VideoAsset,
     VideoFormat
   } from "./lib/types";
 
+  type WorkspacePage = "single" | "profile";
+
   let loading = true;
-  let analyzing = false;
-  let downloading = false;
-  let batchDownloading = false;
-  let pasting = false;
+  let analyzingSingle = false;
+  let downloadingSingle = false;
+  let analyzingProfile = false;
+  let batchEnqueuing = false;
+  let pastingSingle = false;
+  let pastingProfile = false;
   let clearingFinished = false;
+  let settingsOpen = false;
+  let settingsSaving = false;
+  let pickingDirectory = false;
+  let pickingTargetDirectory = false;
+  let openingFolder = false;
+  let activePage: WorkspacePage = "single";
   let bootstrap: BootstrapState | null = null;
-  let preview: VideoAsset | null = null;
+  let singlePreview: VideoAsset | null = null;
+  let profilePreview: ProfileBatch | null = null;
   let tasks: DownloadTask[] = [];
-  let shareInput = "";
+  let singleInput = "";
+  let profileInput = "";
   let selectedFormatId = "";
   let profileBatchLimit = 24;
   let errorMessage = "";
@@ -42,12 +60,12 @@
   let downloadMode: DownloadMode = "manual";
   let qualityPreference: QualityPreference = "recommended";
   let autoRevealInFinder = false;
-  let settingsOpen = false;
-  let settingsSaving = false;
-  let pickingDirectory = false;
-  let pickingTargetDirectory = false;
-  let openingFolder = false;
+  let selectedProfileIds: string[] = [];
+  let taskActionPendingIds: string[] = [];
   let pollTimer: number | undefined;
+  let singleDownloadOptions: DownloadContentSelection = createDefaultDownloadOptions();
+  let profileDownloadOptions: DownloadContentSelection =
+    createDefaultDownloadOptions();
 
   const isDesktopRuntime =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -66,14 +84,28 @@
     { value: "smart", label: "智能模式" }
   ];
 
-  const qualityOptions: Array<{
-    value: QualityPreference;
-    label: string;
-  }> = [
+  const qualityOptions: Array<{ value: QualityPreference; label: string }> = [
     { value: "recommended", label: "推荐优先" },
     { value: "highest", label: "最高质量" },
     { value: "no_watermark", label: "无水印优先" },
     { value: "smallest", label: "最小体积" }
+  ];
+
+  const pageOptions: Array<{
+    value: WorkspacePage;
+    label: string;
+    summary: string;
+  }> = [
+    {
+      value: "single",
+      label: "单视频下载",
+      summary: "针对单条分享链接，先解析，再选内容和清晰度。"
+    },
+    {
+      value: "profile",
+      label: "主页批量下载",
+      summary: "先读取主页作品，再勾选需要下载的内容与视频。"
+    }
   ];
 
   const authMap: Record<AuthState, string> = {
@@ -88,6 +120,7 @@
     queued: "排队中",
     downloading: "下载中",
     paused: "已暂停",
+    cancelled: "已取消",
     completed: "已完成",
     failed: "失败"
   };
@@ -113,9 +146,9 @@
     syncSettings(bootstrap);
 
     if (!isDesktopRuntime) {
-      preview = bootstrap.preview;
+      singlePreview = bootstrap.preview;
+      singleInput = bootstrap.preview.sourceUrl;
       selectedFormatId = pickPreferredFormat(bootstrap.preview)?.id ?? "";
-      shareInput = bootstrap.preview.sourceUrl;
     }
 
     if (isDesktopRuntime) {
@@ -127,6 +160,15 @@
     loading = false;
   }
 
+  function createDefaultDownloadOptions(): DownloadContentSelection {
+    return {
+      downloadVideo: true,
+      downloadCover: false,
+      downloadCaption: false,
+      downloadMetadata: false
+    };
+  }
+
   function syncSettings(next: BootstrapState | SettingsProfile) {
     cookieBrowser = next.cookieBrowser ?? "";
     saveDirectoryDraft = next.saveDirectory;
@@ -136,31 +178,59 @@
     autoRevealInFinder = next.autoRevealInFinder;
   }
 
-  async function handleAnalyze() {
-    analyzing = true;
+  async function handleAnalyzeSingle() {
+    analyzingSingle = true;
     errorMessage = "";
     successMessage = "";
 
     try {
-      const nextPreview = await analyzeInput({ rawInput: shareInput });
-      const preferredFormat = pickPreferredFormat(nextPreview);
-      preview = nextPreview;
-      selectedFormatId = preferredFormat?.id ?? "";
+      const nextPreview = await analyzeInput({ rawInput: singleInput });
+      singlePreview = nextPreview;
+      selectedFormatId = pickPreferredFormat(nextPreview)?.id ?? "";
 
-      if (downloadMode === "smart" && preferredFormat) {
-        await startDownload(nextPreview, preferredFormat, true);
-      } else {
-        successMessage = "解析完成，可以直接选择清晰度并开始下载。";
+      if (downloadMode === "smart" && singleDownloadOptions.downloadVideo) {
+        const preferredFormat = pickPreferredFormat(nextPreview);
+        if (preferredFormat) {
+          await startSingleDownload(nextPreview, preferredFormat, true);
+          return;
+        }
       }
+
+      successMessage = "作品解析完成，可以开始单条下载。";
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
-      analyzing = false;
+      analyzingSingle = false;
     }
   }
 
-  async function handlePasteAndAnalyze() {
-    pasting = true;
+  async function handleAnalyzeProfile() {
+    analyzingProfile = true;
+    errorMessage = "";
+    successMessage = "";
+
+    try {
+      const result = await analyzeProfileInput({
+        rawInput: profileInput,
+        limit: clampBatchLimit(profileBatchLimit)
+      });
+      profilePreview = result;
+      selectedProfileIds = result.items.map((item) => item.awemeId);
+      successMessage = "主页作品已载入，请勾选后再加入下载队列。";
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    } finally {
+      analyzingProfile = false;
+    }
+  }
+
+  async function handlePasteIntoPage(page: WorkspacePage) {
+    if (page === "single") {
+      pastingSingle = true;
+    } else {
+      pastingProfile = true;
+    }
+
     errorMessage = "";
     successMessage = "";
 
@@ -174,56 +244,52 @@
         throw new Error("剪贴板里没有可解析的内容。");
       }
 
-      shareInput = text;
-      await handleAnalyze();
+      if (page === "single") {
+        singleInput = text;
+        await handleAnalyzeSingle();
+      } else {
+        profileInput = text;
+        await handleAnalyzeProfile();
+      }
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
-      pasting = false;
+      if (page === "single") {
+        pastingSingle = false;
+      } else {
+        pastingProfile = false;
+      }
     }
   }
 
-  async function handleCreateTask() {
-    if (!preview || !selectedFormatId) {
+  async function handleCreateSingleTask() {
+    if (!singlePreview) {
       return;
     }
 
-    const format = dedupeVisibleFormats(preview.formats).find(
-      (item) => item.id === selectedFormatId
-    );
-    if (!format) {
+    if (!hasSelectedDownloadOptions(singleDownloadOptions)) {
+      errorMessage = "至少要选择一种要保存的内容。";
       return;
     }
 
-    await startDownload(preview, format, false);
-  }
+    const format = singleDownloadOptions.downloadVideo
+      ? visibleFormats(singlePreview).find((item) => item.id === selectedFormatId)
+      : undefined;
 
-  async function handleCreateProfileTasks() {
-    batchDownloading = true;
-    errorMessage = "";
-    successMessage = "";
-
-    try {
-      const result = await createProfileDownloadTasks({
-        rawInput: shareInput,
-        limit: clampBatchLimit(profileBatchLimit),
-        saveDirectoryOverride: resolvedTargetDirectory()
-      });
-      tasks = await listDownloadTasks();
-      successMessage = result.message;
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      batchDownloading = false;
+    if (singleDownloadOptions.downloadVideo && !format) {
+      errorMessage = "请先选择一个可用清晰度。";
+      return;
     }
+
+    await startSingleDownload(singlePreview, format, false);
   }
 
-  async function startDownload(
+  async function startSingleDownload(
     asset: VideoAsset,
-    format: VideoFormat,
+    format: VideoFormat | undefined,
     launchedBySmartMode: boolean
   ) {
-    downloading = true;
+    downloadingSingle = true;
     errorMessage = "";
     successMessage = "";
 
@@ -232,22 +298,89 @@
         awemeId: asset.awemeId,
         sourceUrl: asset.sourceUrl,
         title: asset.title,
-        formatId: format.id,
-        formatLabel: format.label,
+        author: asset.author,
+        publishDate: asset.publishDate,
+        caption: asset.caption,
+        coverUrl: asset.coverUrl ?? null,
+        formatId: format?.id ?? null,
+        formatLabel: format?.label ?? null,
         saveDirectoryOverride: resolvedTargetDirectory(),
-        directUrl: format.directUrl ?? null,
-        referer: format.referer ?? null,
-        userAgent: format.userAgent ?? null
+        downloadOptions: singleDownloadOptions,
+        directUrl: format?.directUrl ?? null,
+        referer: format?.referer ?? null,
+        userAgent: format?.userAgent ?? null
       });
 
-      tasks = [task, ...tasks.filter((item) => item.id !== task.id)];
+      upsertTask(task);
       successMessage = launchedBySmartMode
-        ? "解析完成，已按默认策略直接开始下载。"
+        ? "作品解析完成，已按默认策略直接创建下载任务。"
         : task.message ?? "下载任务已开始。";
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
-      downloading = false;
+      downloadingSingle = false;
+    }
+  }
+
+  async function handleEnqueueProfileTasks() {
+    if (!profilePreview) {
+      return;
+    }
+
+    const items = profilePreview.items.filter((item) =>
+      selectedProfileIds.includes(item.awemeId)
+    );
+
+    if (!items.length) {
+      errorMessage = "请至少勾选一个主页作品。";
+      return;
+    }
+
+    if (!hasSelectedDownloadOptions(profileDownloadOptions)) {
+      errorMessage = "至少要选择一种要保存的内容。";
+      return;
+    }
+
+    batchEnqueuing = true;
+    errorMessage = "";
+    successMessage = "";
+
+    try {
+      const result = await createProfileDownloadTasks({
+        profileTitle: profilePreview.profileTitle,
+        sourceUrl: profilePreview.sourceUrl,
+        items,
+        saveDirectoryOverride: resolvedTargetDirectory(),
+        downloadOptions: profileDownloadOptions
+      });
+      tasks = await listDownloadTasks();
+      successMessage = result.message;
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    } finally {
+      batchEnqueuing = false;
+    }
+  }
+
+  async function handleTaskControl(
+    task: DownloadTask,
+    action: "pause" | "resume" | "cancel"
+  ) {
+    taskActionPendingIds = [...taskActionPendingIds, task.id];
+    errorMessage = "";
+
+    try {
+      const nextTask =
+        action === "pause"
+          ? await pauseDownloadTask(task.id)
+          : action === "resume"
+            ? await resumeDownloadTask(task.id)
+            : await cancelDownloadTask(task.id);
+      upsertTask(nextTask);
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    } finally {
+      taskActionPendingIds = taskActionPendingIds.filter((id) => id !== task.id);
     }
   }
 
@@ -371,9 +504,7 @@
       successMessage = "设置已保存。新的解析和下载任务会使用这些默认值。";
     } catch (error) {
       bootstrap = await getBootstrapState();
-      if (bootstrap) {
-        syncSettings(bootstrap);
-      }
+      syncSettings(bootstrap);
       errorMessage = resolveErrorMessage(error);
     } finally {
       settingsSaving = false;
@@ -389,25 +520,71 @@
     settingsOpen = true;
   }
 
+  function switchPage(nextPage: WorkspacePage) {
+    activePage = nextPage;
+    errorMessage = "";
+    successMessage = "";
+  }
+
+  function toggleProfileSelection(awemeId: string, checked: boolean) {
+    selectedProfileIds = checked
+      ? Array.from(new Set([...selectedProfileIds, awemeId]))
+      : selectedProfileIds.filter((id) => id !== awemeId);
+  }
+
+  function selectAllProfileItems() {
+    selectedProfileIds = profilePreview?.items.map((item) => item.awemeId) ?? [];
+  }
+
+  function clearProfileSelection() {
+    selectedProfileIds = [];
+  }
+
+  function closeProfileSelection() {
+    profilePreview = null;
+    selectedProfileIds = [];
+  }
+
+  function upsertTask(task: DownloadTask) {
+    tasks = [task, ...tasks.filter((item) => item.id !== task.id)];
+  }
+
   function resolvedTargetDirectory() {
     return targetDirectory.trim() || bootstrap?.saveDirectory || "";
   }
 
-  function pickPreferredFormat(asset: VideoAsset | null) {
-    if (!asset) {
-      return undefined;
+  function hasSelectedDownloadOptions(options: DownloadContentSelection) {
+    return (
+      options.downloadVideo ||
+      options.downloadCover ||
+      options.downloadCaption ||
+      options.downloadMetadata
+    );
+  }
+
+  function summarizeDownloadOptions(options: DownloadContentSelection) {
+    return [
+      options.downloadVideo ? "视频" : null,
+      options.downloadCover ? "封面" : null,
+      options.downloadCaption ? "文案" : null,
+      options.downloadMetadata ? "元数据" : null
+    ]
+      .filter(Boolean)
+      .join(" / ");
+  }
+
+  function visibleFormats(asset: VideoAsset | null) {
+    const formats = dedupeVisibleFormats(asset?.formats ?? []);
+    if (bootstrap?.authState === "active") {
+      return formats;
     }
 
-    const usableFormats =
-      bootstrap?.authState === "active"
-        ? dedupeVisibleFormats(asset.formats)
-        : dedupeVisibleFormats(asset.formats).filter(
-            (item) => !item.requiresLogin
-          );
-    const candidateFormats =
-      usableFormats.length > 0
-        ? usableFormats
-        : dedupeVisibleFormats(asset.formats);
+    const publicFormats = formats.filter((item) => !item.requiresLogin);
+    return publicFormats.length ? publicFormats : formats;
+  }
+
+  function pickPreferredFormat(asset: VideoAsset | null) {
+    const candidateFormats = visibleFormats(asset);
     const rankedFormats = [...candidateFormats].sort((left, right) => {
       const heightDelta = formatHeight(right) - formatHeight(left);
       if (heightDelta !== 0) {
@@ -436,8 +613,19 @@
     }
   }
 
+  function selectedFormat(asset: VideoAsset | null): VideoFormat | undefined {
+    return visibleFormats(asset).find((item) => item.id === selectedFormatId);
+  }
+
   function formatHeight(format: VideoFormat) {
     return Number.parseInt(format.resolution.split("x")[1] ?? "0", 10) || 0;
+  }
+
+  function normalizeFormatKey(value: string) {
+    return value
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
   }
 
   function dedupeVisibleFormats(formats: VideoFormat[]) {
@@ -445,10 +633,10 @@
 
     for (const format of formats) {
       const key = [
-        format.label.trim().toUpperCase(),
-        format.resolution.trim().toUpperCase(),
-        format.codec.trim().toUpperCase(),
-        format.container.trim().toUpperCase(),
+        normalizeFormatKey(format.label),
+        normalizeFormatKey(format.resolution),
+        normalizeFormatKey(format.codec),
+        normalizeFormatKey(format.container),
         format.noWatermark ? "NOWM" : "WM",
         format.requiresLogin ? "LOGIN" : "PUBLIC"
       ].join("|");
@@ -472,6 +660,18 @@
     return Array.from(deduped.values());
   }
 
+  function isProfileItemSelected(awemeId: string) {
+    return selectedProfileIds.includes(awemeId);
+  }
+
+  function pendingTaskAction(taskId: string) {
+    return taskActionPendingIds.includes(taskId);
+  }
+
+  function selectedBatchCount() {
+    return selectedProfileIds.length;
+  }
+
   function formatDuration(totalSeconds: number) {
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
@@ -480,18 +680,18 @@
       .padStart(2, "0")}`;
   }
 
+  function finishedTaskCount(items: DownloadTask[]) {
+    return items.filter((task) =>
+      ["completed", "failed", "cancelled"].includes(task.status)
+    ).length;
+  }
+
   function clampBatchLimit(value: number) {
     if (!Number.isFinite(value)) {
       return 24;
     }
 
     return Math.max(1, Math.min(100, Math.round(value)));
-  }
-
-  function finishedTaskCount(items: DownloadTask[]) {
-    return items.filter(
-      (task) => task.status === "completed" || task.status === "failed"
-    ).length;
   }
 
   function resolveErrorMessage(error: unknown) {
@@ -504,12 +704,6 @@
     }
 
     return "操作失败，请稍后再试。";
-  }
-
-  function selectedFormat(asset: VideoAsset | null): VideoFormat | undefined {
-    return dedupeVisibleFormats(asset?.formats ?? []).find(
-      (item) => item.id === selectedFormatId
-    );
   }
 </script>
 
@@ -544,183 +738,374 @@
         </div>
       </header>
 
-      <article class="panel composer-panel">
-        <div class="composer-copy">
-          <p class="eyebrow">Paste Link</p>
-          <h2>粘贴链接，选格式，下载到本地。</h2>
-          <p class="lede">
-            视觉退到后台，只保留解析、目录、清晰度和下载结果这些高频动作。
-          </p>
+      <section class="page-nav">
+        {#each pageOptions as page}
+          <button
+            class:active={activePage === page.value}
+            class="page-tab"
+            onclick={() => switchPage(page.value)}
+            type="button"
+          >
+            <strong>{page.label}</strong>
+            <span>{page.summary}</span>
+          </button>
+        {/each}
+      </section>
+
+      <div class="shared-strip">
+        <div class="path-copy">
+          <span>当前保存位置</span>
+          <strong title={resolvedTargetDirectory()}>{resolvedTargetDirectory()}</strong>
         </div>
 
-        <label class="input-wrap">
-          <textarea
-            bind:value={shareInput}
-            rows="4"
-            placeholder="粘贴抖音分享口令、短链或作品页链接"
-          ></textarea>
-        </label>
+        <div class="path-actions">
+          <button
+            class="ghost-button"
+            onclick={handlePickTargetDirectory}
+            disabled={pickingTargetDirectory || batchEnqueuing || downloadingSingle}
+          >
+            {pickingTargetDirectory ? "选择中…" : "更改目录"}
+          </button>
+          <button
+            class="ghost-button"
+            onclick={() => (targetDirectory = bootstrap!.saveDirectory)}
+            disabled={resolvedTargetDirectory() === bootstrap!.saveDirectory}
+          >
+            恢复默认
+          </button>
+        </div>
+      </div>
 
-        <div class="path-strip">
-          <div class="path-copy">
-            <span>本次保存到</span>
-            <strong title={resolvedTargetDirectory()}>{resolvedTargetDirectory()}</strong>
-          </div>
+      {#if errorMessage}
+        <p class="notice error">{errorMessage}</p>
+      {/if}
 
-          <div class="path-actions">
-            <label class="inline-count-field">
-              <span>主页批量上限</span>
-              <input
-                bind:value={profileBatchLimit}
-                class="inline-count-input"
-                max="100"
-                min="1"
-                type="number"
-              />
+      {#if successMessage}
+        <p class="notice success">{successMessage}</p>
+      {/if}
+
+      {#if activePage === "single"}
+        <section class="page-shell">
+          <article class="panel page-hero">
+            <div class="composer-copy">
+              <p class="eyebrow">Single Video</p>
+              <h2>单条视频下载</h2>
+              <p class="lede">
+                单视频页只关注一条分享链接：解析作品、选择下载内容、确认清晰度，然后立即开始下载。
+              </p>
+            </div>
+
+            <label class="input-wrap">
+              <textarea
+                bind:value={singleInput}
+                rows="4"
+                placeholder="粘贴抖音分享文案、短链或作品页链接"
+              ></textarea>
             </label>
-            <button
-              class="ghost-button"
-              onclick={handlePickTargetDirectory}
-              disabled={pickingTargetDirectory || batchDownloading}
-            >
-              {pickingTargetDirectory ? "选择中…" : "更改目录"}
-            </button>
-            <button
-              class="ghost-button"
-              onclick={() => (targetDirectory = bootstrap!.saveDirectory)}
-              disabled={
-                resolvedTargetDirectory() === bootstrap!.saveDirectory || batchDownloading
-              }
-            >
-              恢复默认
-            </button>
-          </div>
-        </div>
 
-        <div class="action-row">
-          <button
-            class="primary-button"
-            onclick={handleAnalyze}
-            disabled={analyzing || downloading || pasting}
-          >
-            {analyzing ? "解析中…" : "解析链接"}
-          </button>
-
-          <button
-            class="secondary-button"
-            onclick={handlePasteAndAnalyze}
-            disabled={analyzing || downloading || pasting}
-          >
-            {pasting ? "读取中…" : "粘贴并解析"}
-          </button>
-
-          <button
-            class="secondary-button"
-            onclick={handleCreateTask}
-            disabled={
-              !preview ||
-              !selectedFormatId ||
-              analyzing ||
-              downloading ||
-              batchDownloading ||
-              pasting
-            }
-          >
-            {downloading ? "创建任务…" : "开始下载"}
-          </button>
-
-          <button
-            class="secondary-button"
-            onclick={handleCreateProfileTasks}
-            disabled={analyzing || downloading || batchDownloading || pasting}
-          >
-            {batchDownloading ? "批量入队中…" : "主页批量下载"}
-          </button>
-        </div>
-
-        <div class="meta-row">
-          <span class="meta-item">默认目录：{bootstrap.saveDirectory}</span>
-          <span class="meta-item">
-            默认策略：{qualityOptions.find((item) => item.value === qualityPreference)?.label}
-          </span>
-          <span class="meta-item">解析器：自动（抖音桥接 / yt-dlp）</span>
-          <span class="meta-item">
-            当前格式：{selectedFormat(preview)?.label ?? "等待解析"}
-          </span>
-        </div>
-
-        {#if errorMessage}
-          <p class="notice error">{errorMessage}</p>
-        {/if}
-
-        {#if successMessage}
-          <p class="notice success">{successMessage}</p>
-        {/if}
-      </article>
-
-      {#if preview}
-        <section class="analysis-grid">
-          <article class="panel preview-panel">
-            <p class="eyebrow">Preview</p>
-            <h3>{preview.title}</h3>
-            <p class="preview-caption">{preview.caption}</p>
-
-            <div class="facts">
-              <div>
-                <span>作者</span>
-                <strong>{preview.author}</strong>
+            <div class="selection-block">
+              <div class="section-head compact">
+                <div>
+                  <p class="eyebrow">Download Items</p>
+                  <h3>下载内容</h3>
+                </div>
+                <span class="chip subtle">
+                  {hasSelectedDownloadOptions(singleDownloadOptions)
+                    ? summarizeDownloadOptions(singleDownloadOptions)
+                    : "未选择"}
+                </span>
               </div>
-              <div>
-                <span>时长</span>
-                <strong>{formatDuration(preview.durationSeconds)}</strong>
+
+              <div class="option-grid">
+                <label class="option-chip">
+                  <input bind:checked={singleDownloadOptions.downloadVideo} type="checkbox" />
+                  <span>视频</span>
+                </label>
+                <label class="option-chip">
+                  <input bind:checked={singleDownloadOptions.downloadCover} type="checkbox" />
+                  <span>封面</span>
+                </label>
+                <label class="option-chip">
+                  <input bind:checked={singleDownloadOptions.downloadCaption} type="checkbox" />
+                  <span>文案</span>
+                </label>
+                <label class="option-chip subtle-option">
+                  <input bind:checked={singleDownloadOptions.downloadMetadata} type="checkbox" />
+                  <span>元数据 JSON</span>
+                </label>
               </div>
-              <div>
-                <span>发布日期</span>
-                <strong>{preview.publishDate}</strong>
+
+              <div class="option-notes">
+                <span class="meta-item">只勾选单项时直接保存单文件。</span>
+                <span class="meta-item">勾选多项时自动创建以标题命名的文件夹。</span>
+                <span class="meta-item">`JSON` 只用于保存结构化元数据，默认可不选。</span>
               </div>
             </div>
-          </article>
 
-          <article class="panel formats-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">Formats</p>
-                <h3>选择清晰度</h3>
-              </div>
-              <span class="chip subtle">
-                {dedupeVisibleFormats(preview.formats).length} 个格式
+            <div class="action-row">
+              <button
+                class="primary-button"
+                onclick={handleAnalyzeSingle}
+                disabled={analyzingSingle || downloadingSingle || pastingSingle}
+              >
+                {analyzingSingle ? "解析中…" : "解析作品"}
+              </button>
+              <button
+                class="secondary-button"
+                onclick={() => handlePasteIntoPage("single")}
+                disabled={analyzingSingle || downloadingSingle || pastingSingle}
+              >
+                {pastingSingle ? "读取中…" : "粘贴并解析"}
+              </button>
+              <button
+                class="secondary-button"
+                onclick={handleCreateSingleTask}
+                disabled={!singlePreview || analyzingSingle || downloadingSingle}
+              >
+                {downloadingSingle ? "创建任务…" : "开始下载"}
+              </button>
+            </div>
+
+            <div class="meta-row">
+              <span class="meta-item">
+                默认策略：{qualityOptions.find((item) => item.value === qualityPreference)?.label}
+              </span>
+              <span class="meta-item">解析器：自动（抖音桥接 / yt-dlp）</span>
+              <span class="meta-item">
+                当前格式：{selectedFormat(singlePreview)?.label ?? "等待解析"}
               </span>
             </div>
+          </article>
 
-            <div class="format-list">
-              {#each dedupeVisibleFormats(preview.formats) as format}
-                <button
-                  class:selected={selectedFormatId === format.id}
-                  class="format-row"
-                  onclick={() => (selectedFormatId = format.id)}
-                >
-                  <div class="format-copy">
-                    <strong>{format.label}</strong>
-                    <span>
-                      {format.resolution} · {format.codec} · {format.container}
-                    </span>
-                  </div>
+          {#if singlePreview}
+            <section class="analysis-grid">
+              <article class="panel preview-panel">
+                <p class="eyebrow">Preview</p>
+                <h3>{singlePreview.title}</h3>
+                <p class="preview-caption">{singlePreview.caption}</p>
 
-                  <div class="format-tags">
-                    {#if format.recommended}
-                      <span class="mini-tag accent">推荐</span>
-                    {/if}
-                    {#if format.noWatermark}
-                      <span class="mini-tag">无水印</span>
-                    {/if}
-                    {#if format.requiresLogin}
-                      <span class="mini-tag">登录后</span>
-                    {/if}
+                <div class="facts">
+                  <div>
+                    <span>作者</span>
+                    <strong>{singlePreview.author}</strong>
                   </div>
-                </button>
-              {/each}
+                  <div>
+                    <span>时长</span>
+                    <strong>{formatDuration(singlePreview.durationSeconds)}</strong>
+                  </div>
+                  <div>
+                    <span>发布日期</span>
+                    <strong>{singlePreview.publishDate}</strong>
+                  </div>
+                </div>
+              </article>
+
+              <article class="panel formats-panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">Formats</p>
+                    <h3>选择清晰度</h3>
+                  </div>
+                  <span class="chip subtle">{visibleFormats(singlePreview).length} 个格式</span>
+                </div>
+
+                {#if singleDownloadOptions.downloadVideo}
+                  <div class="format-list">
+                    {#each visibleFormats(singlePreview) as format}
+                      <button
+                        class:selected={selectedFormatId === format.id}
+                        class="format-row"
+                        onclick={() => (selectedFormatId = format.id)}
+                        type="button"
+                      >
+                        <div class="format-copy">
+                          <strong>{format.label}</strong>
+                          <span>
+                            {format.resolution} · {format.codec} · {format.container}
+                          </span>
+                        </div>
+
+                        <div class="format-tags">
+                          {#if format.recommended}
+                            <span class="mini-tag accent">推荐</span>
+                          {/if}
+                          {#if format.noWatermark}
+                            <span class="mini-tag">无水印</span>
+                          {/if}
+                          {#if format.requiresLogin}
+                            <span class="mini-tag">登录后</span>
+                          {/if}
+                        </div>
+                      </button>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="empty-state">
+                    当前只保存附加内容，所以这里不需要选择清晰度。
+                  </p>
+                {/if}
+              </article>
+            </section>
+          {/if}
+        </section>
+      {:else}
+        <section class="page-shell">
+          <article class="panel page-hero">
+            <div class="composer-copy">
+              <p class="eyebrow">Profile Batch</p>
+              <h2>主页批量下载</h2>
+              <p class="lede">
+                主页批量页先读取主页作品列表，再让你勾选想下载的视频和附加内容，最后统一入队。
+              </p>
+            </div>
+
+            <label class="input-wrap">
+              <textarea
+                bind:value={profileInput}
+                rows="4"
+                placeholder="粘贴抖音个人主页分享文案或主页链接"
+              ></textarea>
+            </label>
+
+            <div class="profile-topline">
+              <label class="inline-count-field">
+                <span>主页批量上限</span>
+                <input
+                  bind:value={profileBatchLimit}
+                  class="inline-count-input"
+                  max="100"
+                  min="1"
+                  type="number"
+                />
+              </label>
+
+              <div class="meta-row page-meta">
+                <span class="meta-item">
+                  批量会按“{qualityOptions.find((item) => item.value === qualityPreference)?.label}”自动选格式
+                </span>
+              </div>
+            </div>
+
+            <div class="selection-block">
+              <div class="section-head compact">
+                <div>
+                  <p class="eyebrow">Batch Items</p>
+                  <h3>批量下载内容</h3>
+                </div>
+                <span class="chip subtle">
+                  {hasSelectedDownloadOptions(profileDownloadOptions)
+                    ? summarizeDownloadOptions(profileDownloadOptions)
+                    : "未选择"}
+                </span>
+              </div>
+
+              <div class="option-grid">
+                <label class="option-chip">
+                  <input bind:checked={profileDownloadOptions.downloadVideo} type="checkbox" />
+                  <span>视频</span>
+                </label>
+                <label class="option-chip">
+                  <input bind:checked={profileDownloadOptions.downloadCover} type="checkbox" />
+                  <span>封面</span>
+                </label>
+                <label class="option-chip">
+                  <input bind:checked={profileDownloadOptions.downloadCaption} type="checkbox" />
+                  <span>文案</span>
+                </label>
+                <label class="option-chip subtle-option">
+                  <input
+                    bind:checked={profileDownloadOptions.downloadMetadata}
+                    type="checkbox"
+                  />
+                  <span>元数据 JSON</span>
+                </label>
+              </div>
+
+              <div class="option-notes">
+                <span class="meta-item">只保留视频时不会额外建文件夹。</span>
+                <span class="meta-item">勾选多项内容后，每个作品都会创建自己的文件夹。</span>
+              </div>
+            </div>
+
+            <div class="action-row">
+              <button
+                class="primary-button"
+                onclick={handleAnalyzeProfile}
+                disabled={analyzingProfile || batchEnqueuing || pastingProfile}
+              >
+                {analyzingProfile ? "读取主页…" : "读取主页作品"}
+              </button>
+              <button
+                class="secondary-button"
+                onclick={() => handlePasteIntoPage("profile")}
+                disabled={analyzingProfile || batchEnqueuing || pastingProfile}
+              >
+                {pastingProfile ? "读取中…" : "粘贴并读取"}
+              </button>
+              <button
+                class="secondary-button"
+                onclick={handleEnqueueProfileTasks}
+                disabled={!profilePreview || batchEnqueuing || !selectedBatchCount()}
+              >
+                {batchEnqueuing ? "加入队列中…" : "将所选作品加入队列"}
+              </button>
             </div>
           </article>
+
+          {#if profilePreview}
+            <article class="panel profile-panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Profile Result</p>
+                  <h3>{profilePreview.profileTitle}</h3>
+                </div>
+
+                <div class="section-actions">
+                  <span class="chip subtle">
+                    已选 {selectedBatchCount()} / {profilePreview.items.length}
+                  </span>
+                  <button class="text-button" onclick={selectAllProfileItems} type="button">
+                    全选
+                  </button>
+                  <button class="text-button" onclick={clearProfileSelection} type="button">
+                    清空
+                  </button>
+                  <button class="text-button" onclick={closeProfileSelection} type="button">
+                    关闭
+                  </button>
+                </div>
+              </div>
+
+              <div class="meta-row">
+                <span class="meta-item">本次读取 {profilePreview.fetchedCount} 个作品</span>
+                <span class="meta-item">勾选后的作品会统一使用当前批量下载内容设置</span>
+              </div>
+
+              <div class="profile-list">
+                {#each profilePreview.items as item}
+                  <label class="profile-row">
+                    <input
+                      checked={isProfileItemSelected(item.awemeId)}
+                      onchange={(event) =>
+                        toggleProfileSelection(
+                          item.awemeId,
+                          (event.currentTarget as HTMLInputElement).checked
+                        )}
+                      type="checkbox"
+                    />
+
+                    <div class="profile-copy">
+                      <strong>{item.title}</strong>
+                      <span>
+                        {item.publishDate} · {formatDuration(item.durationSeconds)} ·
+                        {pickPreferredFormat(item)?.label ?? "无视频格式"}
+                      </span>
+                    </div>
+                  </label>
+                {/each}
+              </div>
+            </article>
+          {/if}
         </section>
       {/if}
 
@@ -746,7 +1131,7 @@
         </div>
 
         {#if tasks.length === 0}
-          <p class="empty-state">还没有下载任务。先解析一个链接试试。</p>
+          <p class="empty-state">还没有下载任务。先在上面的页面里创建一个试试。</p>
         {:else}
           <div class="task-list">
             {#each tasks as task}
@@ -757,7 +1142,7 @@
                   <div class="task-progress">
                     <div
                       class:completed={task.status === "completed"}
-                      class:failed={task.status === "failed"}
+                      class:failed={task.status === "failed" || task.status === "cancelled"}
                       class="task-progress-fill"
                       style={`width: ${task.progress}%`}
                     ></div>
@@ -774,8 +1159,42 @@
                   <span>{task.progress}%</span>
                   <strong>{taskLabelMap[task.status]}</strong>
                   <small>{task.speedText} · ETA {task.etaText}</small>
-                  {#if task.outputPath}
-                    <div class="task-actions">
+
+                  <div class="task-actions">
+                    {#if task.status === "downloading" && task.supportsPause}
+                      <button
+                        class="text-button"
+                        onclick={() => handleTaskControl(task, "pause")}
+                        disabled={pendingTaskAction(task.id)}
+                        type="button"
+                      >
+                        暂停
+                      </button>
+                    {/if}
+
+                    {#if task.status === "paused" && task.supportsPause}
+                      <button
+                        class="text-button"
+                        onclick={() => handleTaskControl(task, "resume")}
+                        disabled={pendingTaskAction(task.id)}
+                        type="button"
+                      >
+                        继续
+                      </button>
+                    {/if}
+
+                    {#if ["queued", "downloading", "paused"].includes(task.status) && task.supportsCancel}
+                      <button
+                        class="text-button danger"
+                        onclick={() => handleTaskControl(task, "cancel")}
+                        disabled={pendingTaskAction(task.id)}
+                        type="button"
+                      >
+                        取消
+                      </button>
+                    {/if}
+
+                    {#if task.outputPath}
                       <button
                         class="text-button"
                         onclick={() => handleRevealTask(task)}
@@ -783,8 +1202,8 @@
                       >
                         定位文件
                       </button>
-                    </div>
-                  {/if}
+                    {/if}
+                  </div>
                 </div>
               </div>
             {/each}
@@ -814,8 +1233,8 @@
             <label class="settings-field">
               <span class="settings-label">默认下载路径</span>
               <input
-                class="settings-input"
                 bind:value={saveDirectoryDraft}
+                class="settings-input"
                 placeholder="选择或输入默认下载目录"
                 type="text"
               />
@@ -829,9 +1248,7 @@
               >
                 {pickingDirectory ? "选择中…" : "选择目录"}
               </button>
-              <span class="meta-item subtle">
-                新任务默认保存到这里
-              </span>
+              <span class="meta-item subtle">新任务默认保存到这里</span>
             </div>
 
             <label class="settings-field">
@@ -867,7 +1284,7 @@
             </label>
 
             <p class="settings-help">
-              当前状态：{bootstrap.accountLabel}。智能模式会在解析完成后直接按默认策略创建下载任务。
+              当前状态：{bootstrap.accountLabel}。智能模式只会在单视频页生效，主页批量页始终会先展示可选作品。
             </p>
 
             <div class="settings-submit">

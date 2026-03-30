@@ -16,6 +16,7 @@ struct BridgeAsset {
     duration_seconds: u32,
     publish_date: String,
     caption: String,
+    cover_url: Option<String>,
     cover_gradient: String,
     formats: Vec<BridgeFormat>,
 }
@@ -76,6 +77,7 @@ pub fn analyze_url(source_url: &str, cookie_browser: &str) -> Result<VideoAsset,
         duration_seconds: bridge.duration_seconds,
         publish_date: bridge.publish_date,
         caption: bridge.caption,
+        cover_url: normalize_optional_string(bridge.cover_url),
         cover_gradient: if bridge.cover_gradient.trim().is_empty() {
             DEFAULT_GRADIENT.to_string()
         } else {
@@ -144,6 +146,7 @@ fn map_asset(asset: BridgeAsset) -> VideoAsset {
         duration_seconds: asset.duration_seconds,
         publish_date: asset.publish_date,
         caption: asset.caption,
+        cover_url: normalize_optional_string(asset.cover_url),
         cover_gradient: if asset.cover_gradient.trim().is_empty() {
             DEFAULT_GRADIENT.to_string()
         } else {
@@ -151,6 +154,17 @@ fn map_asset(asset: BridgeAsset) -> VideoAsset {
         },
         formats: formats::dedupe_formats(asset.formats.into_iter().map(map_format).collect()),
     }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn run_bridge_command(
