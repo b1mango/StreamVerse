@@ -14,6 +14,14 @@
 - 当前仓库已在 `macOS` 上完成开发与打包验证
 - `Windows` 代码路径已按双平台准备，后续继续补实机验证与安装包体验
 
+## 文档导航
+
+- 项目路线图：[docs/roadmap.md](docs/roadmap.md)
+- 贡献说明：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 维护规则：[docs/project-rules.md](docs/project-rules.md)
+- 维护上下文：[docs/maintainer-context.md](docs/maintainer-context.md)
+- 变更记录：[CHANGELOG.md](CHANGELOG.md)
+
 ## 当前能力
 
 - 支持粘贴抖音分享文案、短链、作品链接和主页链接
@@ -112,6 +120,13 @@ npm run tauri:build
 - 设置页支持修改默认下载目录
 - 设置页支持切换浏览器 Cookie 来源
 - 设置页支持默认下载模式、默认清晰度策略与完成后定位文件
+
+## 当前限制
+
+- 当前正式接入并持续验证的站点只有 `抖音`
+- 部分抖音链接仍然依赖浏览器 Cookie 才能稳定解析
+- 主页批量下载当前面向“已发布作品”，不包含喜欢、收藏、合集和直播
+- 主页批量下载当前按全局策略自动选格式，尚未做到“每条视频单独选清晰度”
 
 ## 路线图
 
