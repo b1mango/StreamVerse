@@ -3,6 +3,7 @@
 mod douyin;
 mod formats;
 mod parser;
+mod platforms;
 mod settings;
 mod ytdlp;
 
@@ -24,6 +25,7 @@ pub(crate) struct VideoFormat {
     pub(crate) container: String,
     pub(crate) no_watermark: bool,
     pub(crate) requires_login: bool,
+    pub(crate) requires_processing: bool,
     pub(crate) recommended: bool,
     pub(crate) direct_url: Option<String>,
     pub(crate) referer: Option<String>,
@@ -33,7 +35,8 @@ pub(crate) struct VideoFormat {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoAsset {
-    pub(crate) aweme_id: String,
+    pub(crate) asset_id: String,
+    pub(crate) platform: String,
     pub(crate) source_url: String,
     pub(crate) title: String,
     pub(crate) author: String,
@@ -69,6 +72,7 @@ pub(crate) struct DownloadContentSelection {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DownloadTask {
     pub(crate) id: String,
+    pub(crate) platform: String,
     pub(crate) title: String,
     pub(crate) progress: u32,
     pub(crate) speed_text: String,
@@ -100,6 +104,7 @@ struct BootstrapState {
     download_mode: String,
     quality_preference: String,
     auto_reveal_in_finder: bool,
+    ffmpeg_available: bool,
     metrics: Metrics,
     preview: VideoAsset,
     tasks: Vec<DownloadTask>,
@@ -115,6 +120,7 @@ struct SettingsProfile {
     download_mode: String,
     quality_preference: String,
     auto_reveal_in_finder: bool,
+    ffmpeg_available: bool,
 }
 
 #[derive(Serialize)]
@@ -138,7 +144,8 @@ struct AppState {
 
 fn sample_preview() -> VideoAsset {
     VideoAsset {
-        aweme_id: "7481035099182375478".into(),
+        asset_id: "7481035099182375478".into(),
+        platform: "douyin".into(),
         source_url: "https://v.douyin.com/XXXXXX/".into(),
         title: "春夜街景的风从镜头里吹过".into(),
         author: "镜头笔记".into(),
@@ -157,6 +164,7 @@ fn sample_preview() -> VideoAsset {
                 container: "MP4".into(),
                 no_watermark: false,
                 requires_login: false,
+                requires_processing: false,
                 recommended: true,
                 direct_url: None,
                 referer: None,
@@ -171,6 +179,7 @@ fn sample_preview() -> VideoAsset {
                 container: "MP4".into(),
                 no_watermark: true,
                 requires_login: true,
+                requires_processing: false,
                 recommended: false,
                 direct_url: None,
                 referer: None,
@@ -217,7 +226,8 @@ fn analyze_profile_input(
 #[tauri::command]
 fn create_download_task(
     state: tauri::State<'_, AppState>,
-    aweme_id: String,
+    asset_id: String,
+    platform: String,
     source_url: String,
     title: String,
     author: String,
@@ -241,8 +251,9 @@ fn create_download_task(
     ytdlp::download_video(
         Arc::clone(&state.tasks),
         Arc::clone(&state.controllers),
+        &platform,
         &source_url,
-        &aweme_id,
+        &asset_id,
         &title,
         &author,
         &publish_date,
@@ -310,8 +321,9 @@ fn create_profile_download_tasks(
         match ytdlp::download_video(
             Arc::clone(&state.tasks),
             Arc::clone(&state.controllers),
+            &asset.platform,
             &asset.source_url,
-            &asset.aweme_id,
+            &asset.asset_id,
             &asset.title,
             &asset.author,
             &asset.publish_date,
@@ -472,6 +484,7 @@ fn build_bootstrap_state(state: &tauri::State<'_, AppState>) -> BootstrapState {
         download_mode: settings.download_mode,
         quality_preference: settings.quality_preference,
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
+        ffmpeg_available: ytdlp::ffmpeg_available(),
         metrics: Metrics {
             today_downloads: completed,
             success_rate,
@@ -496,6 +509,7 @@ fn build_settings_profile(settings: &settings::AppSettings) -> SettingsProfile {
         download_mode: settings.download_mode.clone(),
         quality_preference: settings.quality_preference.clone(),
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
+        ffmpeg_available: ytdlp::ffmpeg_available(),
     }
 }
 

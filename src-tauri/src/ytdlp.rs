@@ -1,5 +1,6 @@
 use crate::{
-    douyin, formats, parser, DownloadContentSelection, DownloadTask, VideoAsset, VideoFormat,
+    douyin, formats, parser, platforms, DownloadContentSelection, DownloadTask, VideoAsset,
+    VideoFormat,
     DEFAULT_GRADIENT,
 };
 use reqwest::blocking::Client;
@@ -32,8 +33,9 @@ struct RawInfo {
 
 #[derive(Clone)]
 struct DownloadArtifacts {
+    platform: String,
     source_url: String,
-    aweme_id: String,
+    asset_id: String,
     title: String,
     author: String,
     publish_date: String,
@@ -74,7 +76,8 @@ pub type TaskControllerStore = Arc<Mutex<HashMap<String, Arc<TaskController>>>>;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MetadataSidecar<'a> {
-    aweme_id: &'a str,
+    asset_id: &'a str,
+    platform: &'a str,
     title: &'a str,
     author: &'a str,
     publish_date: &'a str,
@@ -225,6 +228,7 @@ pub fn new_task_controller_store() -> TaskControllerStore {
 
 pub fn analyze_url(source_url: &str, cookie_browser: Option<&str>) -> Result<VideoAsset, String> {
     ensure_ytdlp_available()?;
+    let platform = platforms::detect_platform(source_url).to_string();
 
     let mut douyin_bridge_error = None::<String>;
     if douyin::is_douyin_url(source_url) {
@@ -256,10 +260,11 @@ pub fn analyze_url(source_url: &str, cookie_browser: Option<&str>) -> Result<Vid
     let raw: RawInfo = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("解析 yt-dlp 响应失败：{error}"))?;
 
-    let formats = formats::dedupe_formats(map_formats(raw.formats.unwrap_or_default()));
+    let formats = formats::dedupe_formats(map_formats(&platform, raw.formats.unwrap_or_default()));
 
     Ok(VideoAsset {
-        aweme_id: raw.id.unwrap_or_else(|| "unknown".to_string()),
+        asset_id: raw.id.unwrap_or_else(|| "unknown".to_string()),
+        platform,
         source_url: source_url.to_string(),
         title: raw.title.unwrap_or_else(|| "未命名作品".to_string()),
         author: raw
@@ -285,8 +290,9 @@ pub fn analyze_url(source_url: &str, cookie_browser: Option<&str>) -> Result<Vid
 pub fn download_video(
     task_store: Arc<Mutex<Vec<DownloadTask>>>,
     controller_store: TaskControllerStore,
+    platform: &str,
     source_url: &str,
-    aweme_id: &str,
+    asset_id: &str,
     title: &str,
     author: &str,
     publish_date: &str,
@@ -310,22 +316,32 @@ pub fn download_video(
     fs::create_dir_all(&output_dir).map_err(|error| format!("创建下载目录失败：{error}"))?;
 
     let safe_title = parser::sanitize_filename(title);
-    let output_layout = prepare_output_layout(&output_dir, &safe_title, aweme_id, &download_options)?;
+    let output_layout =
+        prepare_output_layout(&output_dir, &safe_title, asset_id, &download_options)?;
     let supports_pause = download_options.download_video && direct_url.is_some();
     let supports_cancel = true;
     let format_display = build_task_format_label(format_label, &download_options);
     let task_id = if download_options.download_video {
         format!(
-            "task-{aweme_id}-{}",
+            "task-{asset_id}-{}",
             format_id.unwrap_or("best").trim().replace(['/', ' '], "-")
         )
     } else {
-        format!("task-{aweme_id}-extras")
+        format!("task-{asset_id}-extras")
     };
+
+    if download_options.download_video && format_requires_processing(format_id) && !ffmpeg_available() {
+        return Err(format!(
+            "{} 当前选中的清晰度需要 FFmpeg 合并音视频流。请先安装 FFmpeg，或切换到可直接保存的格式后再下载。",
+            platforms::human_platform_name(platform)
+        ));
+    }
+
     let controller = Arc::new(TaskController::new(supports_pause, supports_cancel));
     register_controller(&controller_store, &task_id, Arc::clone(&controller));
     let task = DownloadTask {
         id: task_id.clone(),
+        platform: platform.to_string(),
         title: title.to_string(),
         progress: 0,
         speed_text: "-".to_string(),
@@ -344,12 +360,13 @@ pub fn download_video(
     let title = title.to_string();
     let format_id_text = format_id.map(str::to_string);
     let format_label_text = format_label.map(str::to_string);
-    let aweme_id_text = aweme_id.to_string();
+    let asset_id_text = asset_id.to_string();
     let referer = referer.map(str::to_string);
     let user_agent = user_agent.map(str::to_string);
     let artifacts = DownloadArtifacts {
+        platform: platform.to_string(),
         source_url: source_url.to_string(),
-        aweme_id: aweme_id_text.clone(),
+        asset_id: asset_id_text.clone(),
         title: title.clone(),
         author: author.to_string(),
         publish_date: publish_date.to_string(),
@@ -462,6 +479,7 @@ pub fn download_video(
             &task_store,
             DownloadTask {
                 id: task_id.clone(),
+                platform: artifacts.platform.clone(),
                 title: title.clone(),
                 progress: 0,
                 speed_text: "-".to_string(),
@@ -477,6 +495,7 @@ pub fn download_video(
 
         let output_path = Arc::new(Mutex::new(None::<String>));
         let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let task_platform = artifacts.platform.clone();
 
         let stdout_handle = child.stdout.take().map(|stdout| {
             let output_path = Arc::clone(&output_path);
@@ -496,6 +515,7 @@ pub fn download_video(
             let task_id = task_id.clone();
             let title = title.clone();
             let format_display = format_display.clone();
+            let task_platform = task_platform.clone();
 
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
@@ -512,6 +532,7 @@ pub fn download_video(
                             &task_store,
                             DownloadTask {
                                 id: task_id.clone(),
+                                platform: task_platform.clone(),
                                 title: title.clone(),
                                 progress: progress.percent,
                                 speed_text: progress.speed_text,
@@ -591,6 +612,7 @@ pub fn download_video(
                 &task_store,
                 DownloadTask {
                     id: task_id.clone(),
+                    platform: task_platform.clone(),
                     title: title.clone(),
                     progress: 100,
                     speed_text: "-".to_string(),
@@ -648,6 +670,7 @@ fn metadata_only_worker(
         &task_store,
         DownloadTask {
             id: task_id.clone(),
+            platform: artifacts.platform.clone(),
             title: title.clone(),
             progress: 0,
             speed_text: "-".to_string(),
@@ -687,6 +710,7 @@ fn metadata_only_worker(
         &task_store,
         DownloadTask {
             id: task_id,
+            platform: artifacts.platform.clone(),
             title,
             progress: 100,
             speed_text: "-".to_string(),
@@ -729,6 +753,7 @@ fn direct_download_worker(
         &task_store,
         DownloadTask {
             id: task_id.clone(),
+            platform: artifacts.platform.clone(),
             title: title.clone(),
             progress: 0,
             speed_text: "-".to_string(),
@@ -817,6 +842,7 @@ fn direct_download_worker(
                 &task_store,
                 DownloadTask {
                     id: task_id.clone(),
+                    platform: artifacts.platform.clone(),
                     title: title.clone(),
                     progress: compute_percent(downloaded_bytes, total_bytes),
                     speed_text: human_speed(
@@ -853,6 +879,7 @@ fn direct_download_worker(
                 &task_store,
                 DownloadTask {
                     id: task_id.clone(),
+                    platform: artifacts.platform.clone(),
                     title: title.clone(),
                     progress: compute_percent(downloaded_bytes, total_bytes),
                     speed_text: human_speed(
@@ -902,6 +929,7 @@ fn direct_download_worker(
                 &task_store,
                 DownloadTask {
                     id: task_id.clone(),
+                    platform: artifacts.platform.clone(),
                     title: title.clone(),
                     progress: compute_percent(downloaded_bytes, total_bytes),
                     speed_text: human_speed(downloaded_bytes, active_elapsed),
@@ -948,6 +976,7 @@ fn direct_download_worker(
         &task_store,
         DownloadTask {
             id: task_id,
+            platform: artifacts.platform.clone(),
             title,
             progress: 100,
             speed_text: "-".to_string(),
@@ -984,10 +1013,22 @@ fn ensure_ytdlp_available() -> Result<(), String> {
     }
 }
 
+pub fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn format_requires_processing(format_id: Option<&str>) -> bool {
+    format_id.is_some_and(|value| value.contains('+'))
+}
+
 fn prepare_output_layout(
     base_dir: &Path,
     safe_title: &str,
-    aweme_id: &str,
+    asset_id: &str,
     download_options: &DownloadContentSelection,
 ) -> Result<OutputLayout, String> {
     if download_options.needs_bundle_directory() {
@@ -997,14 +1038,14 @@ fn prepare_output_layout(
         return Ok(OutputLayout {
             base_dir: base_dir.to_path_buf(),
             bundle_dir: Some(bundle_dir),
-            single_stem: format!("{safe_title} [{aweme_id}]"),
+            single_stem: format!("{safe_title} [{asset_id}]"),
         });
     }
 
     Ok(OutputLayout {
         base_dir: base_dir.to_path_buf(),
         bundle_dir: None,
-        single_stem: format!("{safe_title} [{aweme_id}]"),
+        single_stem: format!("{safe_title} [{asset_id}]"),
     })
 }
 
@@ -1044,7 +1085,8 @@ fn persist_download_artifacts(
     if download_options.download_metadata {
         let json_path = output_layout.metadata_path();
         let metadata = MetadataSidecar {
-            aweme_id: &artifacts.aweme_id,
+            asset_id: &artifacts.asset_id,
+            platform: &artifacts.platform,
             title: &artifacts.title,
             author: &artifacts.author,
             publish_date: &artifacts.publish_date,
@@ -1094,10 +1136,11 @@ fn persist_download_artifacts(
 
 fn build_text_sidecar(artifacts: &DownloadArtifacts, format_label: Option<&str>) -> String {
     let mut sections = vec![
+        format!("平台：{}", platforms::human_platform_name(&artifacts.platform)),
         format!("标题：{}", artifacts.title),
         format!("作者：{}", artifacts.author),
         format!("发布日期：{}", artifacts.publish_date),
-        format!("作品 ID：{}", artifacts.aweme_id),
+        format!("资源 ID：{}", artifacts.asset_id),
         format!("来源链接：{}", artifacts.source_url),
     ];
 
@@ -1538,7 +1581,14 @@ fn cancel_task_update(task_store: &Arc<Mutex<Vec<DownloadTask>>>, task_id: &str)
     }
 }
 
-fn map_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
+fn map_formats(platform: &str, raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
+    match platform {
+        "bilibili" => map_bilibili_formats(raw_formats),
+        _ => map_generic_formats(raw_formats),
+    }
+}
+
+fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
     let mut formats = raw_formats
         .into_iter()
         .filter(has_muxed_video)
@@ -1558,6 +1608,7 @@ fn map_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
                 .unwrap_or_else(|| "AUTO".to_string()),
             no_watermark: false,
             requires_login: false,
+            requires_processing: false,
             recommended: false,
             direct_url: None,
             referer: None,
@@ -1586,11 +1637,115 @@ fn map_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             container: "AUTO".to_string(),
             no_watermark: false,
             requires_login: false,
+            requires_processing: false,
             recommended: true,
             direct_url: None,
             referer: None,
             user_agent: None,
         });
+    }
+
+    formats
+}
+
+fn map_bilibili_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
+    let muxed = raw_formats
+        .iter()
+        .filter(|format| has_muxed_video(format))
+        .map(|format| build_video_format(format, false, None))
+        .collect::<Vec<_>>();
+
+    if !muxed.is_empty() {
+        return finalize_mapped_formats(muxed);
+    }
+
+    let best_audio = raw_formats
+        .iter()
+        .filter(|format| is_audio_only(format))
+        .max_by_key(|format| format.tbr.unwrap_or_default().round() as u32);
+
+    let mut dash_formats = raw_formats
+        .iter()
+        .filter(|format| is_video_only(format))
+        .map(|format| build_video_format(format, best_audio.is_some(), best_audio))
+        .collect::<Vec<_>>();
+
+    if dash_formats.is_empty() {
+        dash_formats.push(VideoFormat {
+            id: "best".to_string(),
+            label: "自动选择".to_string(),
+            resolution: "Auto".to_string(),
+            bitrate_kbps: 0,
+            codec: "Auto".to_string(),
+            container: "AUTO".to_string(),
+            no_watermark: false,
+            requires_login: false,
+            requires_processing: false,
+            recommended: true,
+            direct_url: None,
+            referer: None,
+            user_agent: None,
+        });
+    }
+
+    finalize_mapped_formats(dash_formats)
+}
+
+fn build_video_format(
+    format: &RawFormat,
+    requires_processing: bool,
+    best_audio: Option<&RawFormat>,
+) -> VideoFormat {
+    let mut format_id = format
+        .format_id
+        .clone()
+        .unwrap_or_else(|| "best".to_string());
+    let audio_bitrate = best_audio
+        .and_then(|audio| audio.tbr)
+        .unwrap_or_default()
+        .round() as u32;
+
+    if requires_processing {
+        if let Some(audio_id) = best_audio.and_then(|audio| audio.format_id.as_deref()) {
+            format_id = format!("{format_id}+{audio_id}");
+        }
+    }
+
+    VideoFormat {
+        id: format_id,
+        label: build_label(format),
+        resolution: build_resolution(format),
+        bitrate_kbps: format.tbr.unwrap_or_default().round() as u32 + audio_bitrate,
+        codec: human_codec_name(format.vcodec.as_deref()),
+        container: format
+            .ext
+            .as_deref()
+            .map(|ext| ext.to_ascii_uppercase())
+            .unwrap_or_else(|| "AUTO".to_string()),
+        no_watermark: false,
+        requires_login: false,
+        requires_processing,
+        recommended: false,
+        direct_url: None,
+        referer: None,
+        user_agent: None,
+    }
+}
+
+fn finalize_mapped_formats(mut formats: Vec<VideoFormat>) -> Vec<VideoFormat> {
+    formats.sort_by_key(|format| {
+        let height = format
+            .resolution
+            .split('x')
+            .nth(1)
+            .and_then(|item| item.parse::<u32>().ok())
+            .unwrap_or_default();
+
+        (Reverse(height), Reverse(format.bitrate_kbps))
+    });
+
+    if let Some(first) = formats.first_mut() {
+        first.recommended = true;
     }
 
     formats
@@ -1606,6 +1761,30 @@ fn has_muxed_video(format: &RawFormat) -> bool {
         .as_deref()
         .is_some_and(|codec| codec != "none");
     has_video && has_audio
+}
+
+fn is_video_only(format: &RawFormat) -> bool {
+    let has_video = format
+        .vcodec
+        .as_deref()
+        .is_some_and(|codec| codec != "none");
+    let has_audio = format
+        .acodec
+        .as_deref()
+        .is_some_and(|codec| codec != "none");
+    has_video && !has_audio
+}
+
+fn is_audio_only(format: &RawFormat) -> bool {
+    let has_video = format
+        .vcodec
+        .as_deref()
+        .is_some_and(|codec| codec != "none");
+    let has_audio = format
+        .acodec
+        .as_deref()
+        .is_some_and(|codec| codec != "none");
+    !has_video && has_audio
 }
 
 fn build_label(format: &RawFormat) -> String {
@@ -1693,8 +1872,9 @@ fn parse_progress_line(line: &str) -> Option<ProgressLine> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_percent, direct_download_worker, new_task_controller_store,
-        persist_download_artifacts, prepare_output_layout, DownloadArtifacts, TaskController,
+        compute_percent, direct_download_worker, map_formats, new_task_controller_store,
+        persist_download_artifacts, prepare_output_layout, DownloadArtifacts, RawFormat,
+        TaskController,
     };
     use crate::{DownloadContentSelection, DownloadTask};
     use std::fs;
@@ -1837,8 +2017,9 @@ mod tests {
 
     fn sample_artifacts(cover_url: Option<String>) -> DownloadArtifacts {
         DownloadArtifacts {
+            platform: "douyin".to_string(),
             source_url: "https://example.com/video".to_string(),
-            aweme_id: "aweme-1".to_string(),
+            asset_id: "asset-1".to_string(),
             title: "测试下载".to_string(),
             author: "测试作者".to_string(),
             publish_date: "2026-03-30".to_string(),
@@ -1865,5 +2046,40 @@ mod tests {
             download_caption: true,
             download_metadata: true,
         }
+    }
+
+    #[test]
+    fn builds_bilibili_dash_formats_with_audio_pairing() {
+        let formats = map_formats(
+            "bilibili",
+            vec![
+                RawFormat {
+                    format_id: Some("30080".to_string()),
+                    format_note: Some("1080P".to_string()),
+                    ext: Some("mp4".to_string()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    vcodec: Some("avc1.640032".to_string()),
+                    acodec: Some("none".to_string()),
+                    tbr: Some(2509.0),
+                },
+                RawFormat {
+                    format_id: Some("30280".to_string()),
+                    format_note: Some("高码率音频".to_string()),
+                    ext: Some("m4a".to_string()),
+                    width: None,
+                    height: None,
+                    vcodec: Some("none".to_string()),
+                    acodec: Some("mp4a.40.2".to_string()),
+                    tbr: Some(319.0),
+                },
+            ],
+        );
+
+        assert_eq!(formats.len(), 1);
+        assert_eq!(formats[0].id, "30080+30280");
+        assert!(formats[0].requires_processing);
+        assert!(formats[0].recommended);
+        assert_eq!(formats[0].codec, "H.264");
     }
 }

@@ -1,6 +1,6 @@
 # StreamVerse
 
-`StreamVerse` 是一个桌面端多平台视频下载器，当前优先打磨抖音下载体验，后续会扩展到 `Bilibili`、`YouTube` 等站点。
+`StreamVerse` 是一个桌面端多平台视频下载器，当前优先打磨抖音体验，并已接入 `Bilibili` 单视频下载 Beta，后续会继续扩展到 `YouTube` 等站点。
 
 它现在已经具备两条清晰的工作流：
 
@@ -9,10 +9,25 @@
 
 ## 当前状态
 
-- 当前已实现并持续打磨的是 `抖音`
+- 当前最成熟的是 `抖音`
+- `Bilibili` 已接入单视频下载 Beta
 - 桌面目标平台为 `macOS` 与 `Windows`
 - 当前仓库已在 `macOS` 上完成开发与打包验证
 - `Windows` 代码路径已按双平台准备，后续继续补实机验证与安装包体验
+
+## 界面截图
+
+### 平台首页
+
+![StreamVerse 平台首页](docs/screenshots/home.png)
+
+### 抖音工作区
+
+![StreamVerse 抖音工作区](docs/screenshots/douyin-workspace.png)
+
+### Bilibili 工作区
+
+![StreamVerse Bilibili 工作区](docs/screenshots/bilibili-workspace.png)
 
 ## 文档导航
 
@@ -25,6 +40,9 @@
 ## 当前能力
 
 - 支持粘贴抖音分享文案、短链、作品链接和主页链接
+- 支持在首页先选择平台，再进入对应工作区
+- 支持 `抖音` 工作区内切换 `单视频下载` 与 `主页批量下载`
+- 支持 `Bilibili` 单视频下载 Beta
 - 支持浏览器 Cookie 登录态：`Chrome`、`Safari`、`Firefox`、`Edge`、`Brave`
 - 支持两种下载模式：`手动模式` 与 `智能模式`
 - 支持默认清晰度策略：`recommended`、`highest`、`smallest`、`no_watermark`
@@ -44,7 +62,7 @@
 
 ### 单视频下载
 
-适合下载单条抖音作品。
+适合下载单条抖音或 Bilibili 视频。
 
 1. 粘贴分享文案、短链或作品链接
 2. 解析作品信息与可用清晰度
@@ -85,6 +103,7 @@
 - 后端：`Rust`
 - 前端：`Svelte 5 + TypeScript`
 - 抖音解析链路：`Douyin bridge + 直链下载 + yt-dlp fallback`
+- Bilibili 解析链路：`yt-dlp + 浏览器 Cookie + FFmpeg 合并高质量 DASH`
 - 配置存储：本地 JSON 设置文件
 
 ## 本地开发
@@ -97,6 +116,7 @@
 - `yt-dlp`
 
 应用会自动准备抖音桥接脚本所需的 Python 依赖，但系统里仍需要可用的 `Python 3` 与 `yt-dlp`。
+如果要下载 `Bilibili` 的高质量 DASH 视频，建议额外安装 `FFmpeg`，否则应用会提示你先补齐环境。
 
 ### 启动
 
@@ -123,10 +143,12 @@ npm run tauri:build
 
 ## 当前限制
 
-- 当前正式接入并持续验证的站点只有 `抖音`
+- 当前最完整的链路仍然是 `抖音`
+- `Bilibili` 目前优先支持单视频下载，`UP 主批量下载` 页面已预留但尚未实现
 - 部分抖音链接仍然依赖浏览器 Cookie 才能稳定解析
 - 主页批量下载当前面向“已发布作品”，不包含喜欢、收藏、合集和直播
 - 主页批量下载当前按全局策略自动选格式，尚未做到“每条视频单独选清晰度”
+- `Bilibili` 的高质量格式通常需要 `FFmpeg` 合并音视频流
 
 ## 路线图
 

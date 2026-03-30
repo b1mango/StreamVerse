@@ -8,6 +8,7 @@ export const mockState: BootstrapState = {
   downloadMode: "manual",
   qualityPreference: "recommended",
   autoRevealInFinder: false,
+  ffmpegAvailable: false,
   metrics: {
     todayDownloads: 18,
     successRate: "98.4%",
@@ -15,7 +16,8 @@ export const mockState: BootstrapState = {
     maxQuality: "1080P"
   },
   preview: {
-    awemeId: "7481035099182375478",
+    assetId: "7481035099182375478",
+    platform: "douyin",
     sourceUrl: "https://v.douyin.com/XXXXXX/",
     title: "春夜街景的风从镜头里吹过",
     author: "镜头笔记",
@@ -36,6 +38,7 @@ export const mockState: BootstrapState = {
         container: "MP4",
         noWatermark: false,
         requiresLogin: false,
+        requiresProcessing: false,
         recommended: true
       },
       {
@@ -46,7 +49,8 @@ export const mockState: BootstrapState = {
         codec: "H.264",
         container: "MP4",
         noWatermark: false,
-        requiresLogin: false
+        requiresLogin: false,
+        requiresProcessing: false
       },
       {
         id: "fhd_plus",
@@ -56,7 +60,8 @@ export const mockState: BootstrapState = {
         codec: "H.265",
         container: "MP4",
         noWatermark: true,
-        requiresLogin: true
+        requiresLogin: true,
+        requiresProcessing: false
       },
       {
         id: "uhd_plus",
@@ -66,7 +71,8 @@ export const mockState: BootstrapState = {
         codec: "H.265",
         container: "MP4",
         noWatermark: true,
-        requiresLogin: true
+        requiresLogin: true,
+        requiresProcessing: false
       }
     ]
   },

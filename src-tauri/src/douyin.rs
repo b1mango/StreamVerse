@@ -70,7 +70,8 @@ pub fn analyze_url(source_url: &str, cookie_browser: &str) -> Result<VideoAsset,
         .map_err(|error| format!("解析抖音桥接结果失败：{error}"))?;
 
     Ok(VideoAsset {
-        aweme_id: bridge.aweme_id,
+        asset_id: bridge.aweme_id,
+        platform: "douyin".to_string(),
         source_url: bridge.source_url,
         title: bridge.title,
         author: bridge.author,
@@ -130,6 +131,7 @@ fn map_format(format: BridgeFormat) -> VideoFormat {
         container: format.container,
         no_watermark: format.no_watermark,
         requires_login: format.requires_login,
+        requires_processing: false,
         recommended: format.recommended,
         direct_url: format.direct_url,
         referer: format.referer,
@@ -139,7 +141,8 @@ fn map_format(format: BridgeFormat) -> VideoFormat {
 
 fn map_asset(asset: BridgeAsset) -> VideoAsset {
     VideoAsset {
-        aweme_id: asset.aweme_id,
+        asset_id: asset.aweme_id,
+        platform: "douyin".to_string(),
         source_url: asset.source_url,
         title: asset.title,
         author: asset.author,

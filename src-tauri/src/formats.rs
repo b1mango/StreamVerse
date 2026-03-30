@@ -195,6 +195,7 @@ mod tests {
             container: "MP4".to_string(),
             no_watermark,
             requires_login,
+            requires_processing: false,
             recommended,
             direct_url: Some(format!("https://example.com/{id}.mp4")),
             referer: None,

@@ -56,6 +56,7 @@ export async function createDownloadTask(
   if (!hasTauriRuntime()) {
     return {
       id: `task-${Date.now()}`,
+      platform: payload.platform,
       title: payload.title,
       progress: 100,
       speedText: "-",
@@ -84,7 +85,7 @@ export async function analyzeProfileInput(
       skippedCount: 0,
       items: Array.from({ length: payload.limit ?? 12 }).map((_, index) => ({
         ...mockState.preview,
-        awemeId: `${mockState.preview.awemeId}-${index + 1}`,
+        assetId: `${mockState.preview.assetId}-${index + 1}`,
         title: `${mockState.preview.title} ${index + 1}`,
         sourceUrl: `${mockState.preview.sourceUrl}?item=${index + 1}`
       }))
@@ -133,7 +134,8 @@ export async function saveSettings(
       saveDirectory: payload.saveDirectory,
       downloadMode: payload.downloadMode,
       qualityPreference: payload.qualityPreference,
-      autoRevealInFinder: payload.autoRevealInFinder
+      autoRevealInFinder: payload.autoRevealInFinder,
+      ffmpegAvailable: false
     };
   }
 

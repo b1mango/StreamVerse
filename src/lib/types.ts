@@ -1,5 +1,6 @@
 export type AuthState = "guest" | "active" | "expired";
 export type DownloadMode = "manual" | "smart";
+export type PlatformId = "douyin" | "bilibili" | "youtube";
 export type QualityPreference =
   | "recommended"
   | "highest"
@@ -32,6 +33,7 @@ export interface VideoFormat {
   container: string;
   noWatermark: boolean;
   requiresLogin: boolean;
+  requiresProcessing: boolean;
   recommended?: boolean;
   directUrl?: string | null;
   referer?: string | null;
@@ -39,7 +41,8 @@ export interface VideoFormat {
 }
 
 export interface VideoAsset {
-  awemeId: string;
+  assetId: string;
+  platform: PlatformId;
   sourceUrl: string;
   title: string;
   author: string;
@@ -53,6 +56,7 @@ export interface VideoAsset {
 
 export interface DownloadTask {
   id: string;
+  platform: PlatformId;
   title: string;
   progress: number;
   speedText: string;
@@ -80,6 +84,7 @@ export interface BootstrapState {
   downloadMode: DownloadMode;
   qualityPreference: QualityPreference;
   autoRevealInFinder: boolean;
+  ffmpegAvailable: boolean;
   metrics: AppMetrics;
   preview: VideoAsset;
   tasks: DownloadTask[];
@@ -99,6 +104,7 @@ export interface SettingsProfile {
   downloadMode: DownloadMode;
   qualityPreference: QualityPreference;
   autoRevealInFinder: boolean;
+  ffmpegAvailable: boolean;
 }
 
 export interface AnalyzeInputPayload {
@@ -106,7 +112,8 @@ export interface AnalyzeInputPayload {
 }
 
 export interface CreateTaskPayload {
-  awemeId: string;
+  assetId: string;
+  platform: PlatformId;
   sourceUrl: string;
   title: string;
   author: string;
