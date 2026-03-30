@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.venv/
+logs/
+.DS_Store
+npm-debug.log*
+
+src-tauri/target/
+src-tauri/gen/
+
+vendor/douyin_api/**/__pycache__/
+vendor/douyin_api/**/*.pyc

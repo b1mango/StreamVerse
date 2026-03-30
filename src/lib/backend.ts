@@ -1,0 +1,126 @@
+import { mockState } from "./mock";
+import type {
+  AnalyzeInputPayload,
+  BootstrapState,
+  CreateTaskPayload,
+  DownloadTask,
+  SaveSettingsPayload,
+  SettingsProfile,
+  VideoAsset
+} from "./types";
+
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: unknown;
+  }
+}
+
+function hasTauriRuntime() {
+  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+}
+
+async function maybeInvoke<T>(command: string, payload?: unknown): Promise<T> {
+  if (!hasTauriRuntime()) {
+    throw new Error(`Tauri runtime unavailable for command: ${command}`);
+  }
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(command, payload as Record<string, unknown> | undefined);
+}
+
+export async function getBootstrapState(): Promise<BootstrapState> {
+  if (!hasTauriRuntime()) {
+    return mockState;
+  }
+
+  return maybeInvoke<BootstrapState>("get_bootstrap_state");
+}
+
+export async function analyzeInput(
+  payload: AnalyzeInputPayload
+): Promise<VideoAsset> {
+  if (!hasTauriRuntime()) {
+    return mockState.preview;
+  }
+
+  return maybeInvoke<VideoAsset>("analyze_input", payload);
+}
+
+export async function createDownloadTask(
+  payload: CreateTaskPayload
+): Promise<DownloadTask> {
+  if (!hasTauriRuntime()) {
+    return {
+      id: `task-${Date.now()}`,
+      title: payload.title,
+      progress: 100,
+      speedText: "-",
+      formatLabel: payload.formatLabel,
+      status: "completed",
+      etaText: "已完成",
+      message: "浏览器预览模式使用模拟下载结果",
+      outputPath: `${payload.saveDirectoryOverride ?? mockState.saveDirectory}/${payload.title}`
+    };
+  }
+
+  return maybeInvoke<DownloadTask>("create_download_task", payload);
+}
+
+export async function listDownloadTasks(): Promise<DownloadTask[]> {
+  if (!hasTauriRuntime()) {
+    return mockState.tasks;
+  }
+
+  return maybeInvoke<DownloadTask[]>("list_download_tasks");
+}
+
+export async function saveSettings(
+  payload: SaveSettingsPayload
+): Promise<SettingsProfile> {
+  if (!hasTauriRuntime()) {
+    return {
+      authState: payload.cookieBrowser ? "active" : "guest",
+      accountLabel: payload.cookieBrowser
+        ? `浏览器 Cookie · ${payload.cookieBrowser}`
+        : "未登录",
+      cookieBrowser: payload.cookieBrowser,
+      saveDirectory: payload.saveDirectory,
+      downloadMode: payload.downloadMode,
+      qualityPreference: payload.qualityPreference,
+      autoRevealInFinder: payload.autoRevealInFinder
+    };
+  }
+
+  return maybeInvoke<SettingsProfile>("save_settings", payload);
+}
+
+export async function pickSaveDirectory(
+  currentDirectory: string | null
+): Promise<string | null> {
+  if (!hasTauriRuntime()) {
+    return currentDirectory ?? mockState.saveDirectory;
+  }
+
+  return maybeInvoke<string | null>("pick_save_directory", { currentDirectory });
+}
+
+export async function openInFileManager(
+  path: string,
+  revealParent = false
+): Promise<void> {
+  if (!hasTauriRuntime()) {
+    return;
+  }
+
+  return maybeInvoke<void>("open_in_file_manager", { path, revealParent });
+}
+
+export async function clearFinishedTasks(): Promise<DownloadTask[]> {
+  if (!hasTauriRuntime()) {
+    return mockState.tasks.filter(
+      (task) => task.status !== "completed" && task.status !== "failed"
+    );
+  }
+
+  return maybeInvoke<DownloadTask[]>("clear_finished_tasks");
+}
