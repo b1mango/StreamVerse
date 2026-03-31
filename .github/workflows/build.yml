@@ -49,6 +49,10 @@ jobs:
       - name: Frontend typecheck
         run: npm run check
 
+      - name: Build pack binaries
+        run: cargo build --release --bin streamverse-pack-douyin --bin streamverse-pack-bilibili --bin streamverse-pack-youtube
+        working-directory: src-tauri
+
       - name: Rust tests
         run: cargo test
         working-directory: src-tauri

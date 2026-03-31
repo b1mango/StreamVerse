@@ -82,7 +82,7 @@ fn download_standalone_ytdlp(target: &Path) -> Result<(), String> {
         .arg("--retry-delay")
         .arg("2")
         .arg("-A")
-        .arg("StreamVerse/0.1.0")
+        .arg(format!("StreamVerse/{}", env!("CARGO_PKG_VERSION")))
         .arg("-o")
         .arg(target)
         .arg(ytdlp_download_url())

@@ -3,7 +3,7 @@
     {
       "id": "browser-bridge",
       "binaryName": "browser-bridge",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "resourceOnly": true,
       "target": "macos-aarch64",
       "source": {
@@ -13,7 +13,7 @@
     {
       "id": "download-engine",
       "binaryName": "yt-dlp",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "resourceOnly": true,
       "target": "macos-aarch64",
       "source": {
@@ -23,7 +23,7 @@
     {
       "id": "media-engine",
       "binaryName": "media-engine",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "resourceOnly": true,
       "target": "macos-aarch64",
       "source": {
@@ -33,7 +33,7 @@
     {
       "id": "douyin-pack",
       "binaryName": "streamverse-pack-douyin",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "target": "macos-aarch64",
       "source": {
         "kind": "localBuild"
@@ -42,7 +42,7 @@
     {
       "id": "bilibili-pack",
       "binaryName": "streamverse-pack-bilibili",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "target": "macos-aarch64",
       "source": {
         "kind": "localBuild"
@@ -51,7 +51,7 @@
     {
       "id": "youtube-pack",
       "binaryName": "streamverse-pack-youtube",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "target": "macos-aarch64",
       "source": {
         "kind": "localBuild"
