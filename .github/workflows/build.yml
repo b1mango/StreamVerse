@@ -22,8 +22,10 @@ jobs:
         include:
           - os: macos-latest
             bundles: app,dmg
+            exe_suffix: ""
           - os: windows-latest
             bundles: nsis
+            exe_suffix: ".exe"
 
     steps:
       - name: Checkout
@@ -48,6 +50,14 @@ jobs:
 
       - name: Frontend typecheck
         run: npm run check
+
+      - name: Prepare pack placeholders
+        shell: bash
+        run: |
+          mkdir -p src-tauri/target/release
+          touch "src-tauri/target/release/streamverse-pack-douyin${{ matrix.exe_suffix }}"
+          touch "src-tauri/target/release/streamverse-pack-bilibili${{ matrix.exe_suffix }}"
+          touch "src-tauri/target/release/streamverse-pack-youtube${{ matrix.exe_suffix }}"
 
       - name: Build pack binaries
         run: cargo build --release --bin streamverse-pack-douyin --bin streamverse-pack-bilibili --bin streamverse-pack-youtube
