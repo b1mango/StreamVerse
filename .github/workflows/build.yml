@@ -51,6 +51,9 @@ jobs:
       - name: Frontend typecheck
         run: npm run check
 
+      - name: Build frontend bundle
+        run: npm run build
+
       - name: Prepare pack placeholders
         shell: bash
         run: |
