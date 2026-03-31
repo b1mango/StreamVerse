@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Desktop downloader for Douyin, Bilibili, YouTube and more"
 authors = ["Codex"]
 edition = "2021"
+default-run = "streamverse"
+autobins = false
 
 [build-dependencies]
 tauri-build = { version = "2.0.2", features = [] }
@@ -13,8 +15,26 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2.1.1", features = [] }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[[bin]]
+name = "streamverse"
+path = "src/main.rs"
+
+[[bin]]
+name = "streamverse-pack-douyin"
+path = "src/bin/streamverse-pack-douyin.rs"
+
+[[bin]]
+name = "streamverse-pack-bilibili"
+path = "src/bin/streamverse-pack-bilibili.rs"
+
+[[bin]]
+name = "streamverse-pack-youtube"
+path = "src/bin/streamverse-pack-youtube.rs"

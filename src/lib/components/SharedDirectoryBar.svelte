@@ -15,7 +15,7 @@
 
 <div class="shared-strip">
   <div class="path-copy">
-    <span>当前保存位置</span>
+    <span>保存到</span>
     <strong title={currentDirectory}>{currentDirectory}</strong>
   </div>
 

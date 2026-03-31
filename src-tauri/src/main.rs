@@ -1,74 +1,30 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod douyin;
 mod formats;
+mod media_contract;
+mod pack_host;
+mod pack_manager;
+mod pack_registry;
 mod parser;
 mod platforms;
+mod providers;
 mod settings;
+mod task_store;
 mod ytdlp;
 
+pub(crate) use media_contract::{
+    BatchItemSelection, BrowserLaunchResult, DownloadContentSelection, ProfileBatch, VideoAsset,
+    VideoFormat, DEFAULT_GRADIENT,
+};
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-
-pub(crate) const DEFAULT_GRADIENT: &str =
-    "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))";
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct VideoFormat {
-    pub(crate) id: String,
-    pub(crate) label: String,
-    pub(crate) resolution: String,
-    pub(crate) bitrate_kbps: u32,
-    pub(crate) codec: String,
-    pub(crate) container: String,
-    pub(crate) no_watermark: bool,
-    pub(crate) requires_login: bool,
-    pub(crate) requires_processing: bool,
-    pub(crate) recommended: bool,
-    pub(crate) direct_url: Option<String>,
-    pub(crate) referer: Option<String>,
-    pub(crate) user_agent: Option<String>,
-}
+use std::thread;
+use tauri::Manager;
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct VideoAsset {
-    pub(crate) asset_id: String,
-    pub(crate) platform: String,
-    pub(crate) source_url: String,
-    pub(crate) title: String,
-    pub(crate) author: String,
-    pub(crate) duration_seconds: u32,
-    pub(crate) publish_date: String,
-    pub(crate) caption: String,
-    pub(crate) cover_url: Option<String>,
-    pub(crate) cover_gradient: String,
-    pub(crate) formats: Vec<VideoFormat>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ProfileBatch {
-    pub(crate) profile_title: String,
-    pub(crate) source_url: String,
-    pub(crate) total_available: u32,
-    pub(crate) fetched_count: u32,
-    pub(crate) skipped_count: u32,
-    pub(crate) items: Vec<VideoAsset>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DownloadContentSelection {
-    pub(crate) download_video: bool,
-    pub(crate) download_cover: bool,
-    pub(crate) download_caption: bool,
-    pub(crate) download_metadata: bool,
-}
-
-#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DownloadTask {
     pub(crate) id: String,
@@ -83,6 +39,48 @@ pub(crate) struct DownloadTask {
     pub(crate) output_path: Option<String>,
     pub(crate) supports_pause: bool,
     pub(crate) supports_cancel: bool,
+    #[serde(default)]
+    pub(crate) can_retry: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModuleRuntimeState {
+    pub(crate) id: String,
+    pub(crate) installed: bool,
+    pub(crate) enabled: bool,
+    pub(crate) pack_id: Option<String>,
+    pub(crate) current_version: Option<String>,
+    pub(crate) latest_version: Option<String>,
+    pub(crate) size_bytes: Option<u64>,
+    pub(crate) source_kind: Option<String>,
+    pub(crate) update_available: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskReplayRequest {
+    pub(crate) platform: String,
+    pub(crate) source_url: String,
+    pub(crate) asset_id: String,
+    pub(crate) title: String,
+    pub(crate) author: String,
+    pub(crate) publish_date: String,
+    pub(crate) caption: String,
+    pub(crate) cover_url: Option<String>,
+    pub(crate) format_id: Option<String>,
+    pub(crate) format_label: Option<String>,
+    pub(crate) save_directory: String,
+    pub(crate) download_options: DownloadContentSelection,
+    pub(crate) auto_reveal_in_file_manager: bool,
+    pub(crate) cookie_browser: Option<String>,
+    pub(crate) cookie_file: Option<String>,
+    pub(crate) direct_url: Option<String>,
+    pub(crate) referer: Option<String>,
+    pub(crate) user_agent: Option<String>,
+    pub(crate) audio_direct_url: Option<String>,
+    pub(crate) audio_referer: Option<String>,
+    pub(crate) audio_user_agent: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -106,6 +104,7 @@ struct BootstrapState {
     auto_reveal_in_finder: bool,
     ffmpeg_available: bool,
     metrics: Metrics,
+    modules: Vec<ModuleRuntimeState>,
     preview: VideoAsset,
     tasks: Vec<DownloadTask>,
 }
@@ -135,11 +134,126 @@ struct BatchDownloadResult {
     message: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisProgress {
+    current: u32,
+    total: u32,
+    message: String,
+}
+
 #[derive(Clone)]
 struct AppState {
-    tasks: Arc<Mutex<Vec<DownloadTask>>>,
+    tasks: task_store::TaskStore,
     settings: Arc<Mutex<settings::AppSettings>>,
     controllers: ytdlp::TaskControllerStore,
+}
+
+#[derive(Clone)]
+struct ToolingState {
+    ffmpeg_path: Option<String>,
+}
+
+fn analysis_progress_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".streamverse")
+        .join("analysis-progress")
+}
+
+fn analysis_progress_path(session_id: &str) -> PathBuf {
+    analysis_progress_dir().join(format!("{session_id}.json"))
+}
+
+fn write_analysis_progress(
+    session_id: Option<&str>,
+    current: u32,
+    total: u32,
+    message: &str,
+) -> Result<(), String> {
+    let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+
+    let path = analysis_progress_path(session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建解析进度目录失败：{error}"))?;
+    }
+
+    let payload = AnalysisProgress {
+        current,
+        total: total.max(current).max(1),
+        message: message.to_string(),
+    };
+    let content =
+        serde_json::to_vec(&payload).map_err(|error| format!("序列化解析进度失败：{error}"))?;
+    fs::write(path, content).map_err(|error| format!("写入解析进度失败：{error}"))
+}
+
+#[tauri::command]
+fn get_analysis_progress(session_id: String) -> Result<Option<AnalysisProgress>, String> {
+    let path = analysis_progress_path(&session_id);
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = fs::read(&path).map_err(|error| format!("读取解析进度失败：{error}"))?;
+    let payload = serde_json::from_slice::<AnalysisProgress>(&raw)
+        .map_err(|error| format!("解析进度内容损坏：{error}"))?;
+    Ok(Some(payload))
+}
+
+#[tauri::command]
+fn clear_analysis_progress(session_id: String) -> Result<(), String> {
+    let path = analysis_progress_path(&session_id);
+    if path.is_file() {
+        fs::remove_file(path).map_err(|error| format!("清理解析进度失败：{error}"))?;
+    }
+    Ok(())
+}
+
+fn ensure_ffmpeg_path(
+    current: Option<&str>,
+    requires_processing: bool,
+) -> Result<Option<String>, String> {
+    if !requires_processing || ytdlp::ffmpeg_available(current) {
+        return Ok(current.map(str::to_string));
+    }
+
+    Ok(pack_manager::ensure_media_engine_installed()?
+        .and_then(|path| path.to_str().map(|value| value.to_string()))
+        .or_else(|| current.map(str::to_string)))
+}
+
+fn fallback_profile_format(
+    asset: &VideoAsset,
+    selected_format_id: Option<&str>,
+) -> Option<VideoFormat> {
+    if asset.platform != "bilibili" || !asset.formats.is_empty() {
+        return None;
+    }
+
+    Some(VideoFormat {
+        id: selected_format_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("best")
+            .to_string(),
+        label: "自动选择".to_string(),
+        resolution: "自动".to_string(),
+        bitrate_kbps: 0,
+        codec: "AUTO".to_string(),
+        container: "AUTO".to_string(),
+        no_watermark: false,
+        requires_login: false,
+        requires_processing: false,
+        recommended: true,
+        direct_url: None,
+        referer: None,
+        user_agent: None,
+        audio_direct_url: None,
+        audio_referer: None,
+        audio_user_agent: None,
+    })
 }
 
 fn sample_preview() -> VideoAsset {
@@ -151,7 +265,9 @@ fn sample_preview() -> VideoAsset {
         author: "镜头笔记".into(),
         duration_seconds: 42,
         publish_date: "2026-03-28".into(),
-        caption: "浏览器预览模式下会显示这个占位作品；桌面应用里会改成实时解析结果。".into(),
+        caption: "支持分享文本、短链与作品链接解析。".into(),
+        category_label: None,
+        group_title: None,
         cover_url: None,
         cover_gradient: DEFAULT_GRADIENT.into(),
         formats: vec![
@@ -169,6 +285,9 @@ fn sample_preview() -> VideoAsset {
                 direct_url: None,
                 referer: None,
                 user_agent: None,
+                audio_direct_url: None,
+                audio_referer: None,
+                audio_user_agent: None,
             },
             VideoFormat {
                 id: "uhd_plus".into(),
@@ -184,48 +303,123 @@ fn sample_preview() -> VideoAsset {
                 direct_url: None,
                 referer: None,
                 user_agent: None,
+                audio_direct_url: None,
+                audio_referer: None,
+                audio_user_agent: None,
             },
         ],
     }
 }
 
 #[tauri::command]
-fn get_bootstrap_state(state: tauri::State<'_, AppState>) -> BootstrapState {
-    build_bootstrap_state(&state)
+fn get_bootstrap_state(
+    state: tauri::State<'_, AppState>,
+    tooling: tauri::State<'_, ToolingState>,
+) -> BootstrapState {
+    build_bootstrap_state(&state, tooling.ffmpeg_path.as_deref())
 }
 
 #[tauri::command]
 fn analyze_input(
     raw_input: String,
+    session_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<VideoAsset, String> {
-    let source_url = parser::extract_first_url(raw_input.trim())
-        .ok_or_else(|| "未在输入内容里找到可用链接，请粘贴完整分享文案或作品链接。".to_string())?;
-
     let cookie_browser = state.settings.lock().unwrap().cookie_browser.clone();
-    ytdlp::analyze_url(&source_url, cookie_browser.as_deref())
+    let progress_file = session_id.as_deref().map(analysis_progress_path);
+    let _ = write_analysis_progress(session_id.as_deref(), 0, 1, "正在解析作品链接…");
+    let result = providers::analyze_input(
+        &raw_input,
+        cookie_browser.as_deref(),
+        progress_file.as_deref(),
+    );
+    match &result {
+        Ok(_) => {
+            let _ = write_analysis_progress(session_id.as_deref(), 1, 1, "作品解析完成。");
+        }
+        Err(error) => {
+            let _ = write_analysis_progress(session_id.as_deref(), 0, 1, error);
+        }
+    }
+    result
 }
 
 #[tauri::command]
 fn analyze_profile_input(
     raw_input: String,
-    limit: Option<u32>,
+    _limit: Option<u32>,
+    session_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProfileBatch, String> {
-    let source_url = parser::extract_first_url(raw_input.trim())
-        .ok_or_else(|| "未在输入内容里找到可用主页链接，请粘贴完整主页分享文案或主页链接。".to_string())?;
     let settings = state.settings.lock().unwrap().clone();
-
-    douyin::analyze_profile(
-        &source_url,
+    let progress_file = session_id.as_deref().map(analysis_progress_path);
+    let _ = write_analysis_progress(session_id.as_deref(), 0, 1, "正在读取主页视频…");
+    let result = providers::analyze_profile_input(
+        &raw_input,
         settings.cookie_browser.as_deref(),
-        limit.unwrap_or(24),
-    )
+        progress_file.as_deref(),
+    );
+    match &result {
+        Ok(batch) => {
+            let _ = write_analysis_progress(
+                session_id.as_deref(),
+                batch.fetched_count,
+                batch.total_available,
+                "主页视频解析完成。",
+            );
+        }
+        Err(error) => {
+            let _ = write_analysis_progress(session_id.as_deref(), 0, 1, error);
+        }
+    }
+    result
+}
+
+#[tauri::command]
+fn open_profile_browser(
+    raw_input: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<BrowserLaunchResult, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    providers::open_profile_browser(&raw_input, settings.cookie_browser.as_deref())
+}
+
+#[tauri::command]
+fn collect_profile_browser(
+    raw_input: String,
+    port: u16,
+    session_id: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<ProfileBatch, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let progress_file = session_id.as_deref().map(analysis_progress_path);
+    let _ = write_analysis_progress(session_id.as_deref(), 0, 1, "正在连接浏览器并读取作品…");
+    let result = providers::collect_profile_browser(
+        &raw_input,
+        port,
+        settings.cookie_browser.as_deref(),
+        progress_file.as_deref(),
+    );
+    match &result {
+        Ok(batch) => {
+            let _ = write_analysis_progress(
+                session_id.as_deref(),
+                batch.fetched_count,
+                batch.total_available,
+                "主页视频解析完成。",
+            );
+        }
+        Err(error) => {
+            let _ = write_analysis_progress(session_id.as_deref(), 0, 1, error);
+        }
+    }
+    result
 }
 
 #[tauri::command]
 fn create_download_task(
     state: tauri::State<'_, AppState>,
+    tooling: tauri::State<'_, ToolingState>,
     asset_id: String,
     platform: String,
     source_url: String,
@@ -241,11 +435,26 @@ fn create_download_task(
     direct_url: Option<String>,
     referer: Option<String>,
     user_agent: Option<String>,
+    audio_direct_url: Option<String>,
+    audio_referer: Option<String>,
+    audio_user_agent: Option<String>,
 ) -> Result<DownloadTask, String> {
     let settings = state.settings.lock().unwrap().clone();
     let save_directory = match save_directory_override {
         Some(path) => settings::normalize_save_directory(path)?,
         None => settings.save_directory.clone(),
+    };
+    let ffmpeg_path = ensure_ffmpeg_path(
+        tooling.ffmpeg_path.as_deref(),
+        format_id
+            .as_deref()
+            .is_some_and(|value| value.contains('+'))
+            || audio_direct_url.is_some(),
+    )?;
+    let cookie_browser = if platform == "youtube" {
+        None
+    } else {
+        settings.cookie_browser.as_deref()
     };
 
     ytdlp::download_video(
@@ -264,19 +473,26 @@ fn create_download_task(
         &save_directory,
         download_options,
         settings.auto_reveal_in_finder,
-        settings.cookie_browser.as_deref(),
+        ffmpeg_path.as_deref(),
+        cookie_browser,
+        None,
         direct_url.as_deref(),
         referer.as_deref(),
         user_agent.as_deref(),
+        audio_direct_url.as_deref(),
+        audio_referer.as_deref(),
+        audio_user_agent.as_deref(),
     )
 }
 
 #[tauri::command]
 fn create_profile_download_tasks(
     state: tauri::State<'_, AppState>,
+    tooling: tauri::State<'_, ToolingState>,
     profile_title: String,
     source_url: String,
-    items: Vec<VideoAsset>,
+    items: Vec<BatchItemSelection>,
+    session_cookie_file: Option<String>,
     save_directory_override: Option<String>,
     download_options: DownloadContentSelection,
 ) -> Result<BatchDownloadResult, String> {
@@ -298,83 +514,263 @@ fn create_profile_download_tasks(
         return Err("至少要选择一种要保存的内容。".to_string());
     }
 
-    let mut enqueued_count = 0u32;
-    let mut skipped_count = 0u32;
-    let mut first_error = None::<String>;
+    let total_requested = items.len() as u32;
+    let tasks = Arc::clone(&state.tasks);
+    let controllers = Arc::clone(&state.controllers);
+    let ffmpeg_path = tooling.ffmpeg_path.clone();
+    let cookie_browser = settings.cookie_browser.clone();
+    let quality_preference = settings.quality_preference.clone();
+    let auto_reveal_in_finder = settings.auto_reveal_in_finder;
+    let save_directory_for_thread = save_directory.clone();
+    let profile_title_for_thread = profile_title.clone();
+    let source_url_for_thread = source_url.clone();
 
-    for asset in &items {
-        let selected_format = if download_options.download_video {
-            formats::pick_preferred_format(
-                &asset.formats,
-                &settings.quality_preference,
-                settings.cookie_browser.is_some(),
-            )
-        } else {
-            None
-        };
+    thread::spawn(move || {
+        let mut skipped_count = 0u32;
+        let mut first_error = None::<String>;
+        let mut runtime_ffmpeg_path = ffmpeg_path.clone();
 
-        if download_options.download_video && selected_format.is_none() {
-            skipped_count += 1;
-            continue;
-        }
+        for item in items {
+            let fallback_format = if download_options.download_video {
+                fallback_profile_format(&item.asset, item.selected_format_id.as_deref())
+            } else {
+                None
+            };
 
-        match ytdlp::download_video(
-            Arc::clone(&state.tasks),
-            Arc::clone(&state.controllers),
-            &asset.platform,
-            &asset.source_url,
-            &asset.asset_id,
-            &asset.title,
-            &asset.author,
-            &asset.publish_date,
-            &asset.caption,
-            asset.cover_url.as_deref(),
-            selected_format.as_ref().map(|format| format.id.as_str()),
-            selected_format.as_ref().map(|format| format.label.as_str()),
-            &save_directory,
-            download_options.clone(),
-            settings.auto_reveal_in_finder,
-            settings.cookie_browser.as_deref(),
-            selected_format.as_ref().and_then(|format| format.direct_url.as_deref()),
-            selected_format.as_ref().and_then(|format| format.referer.as_deref()),
-            selected_format.as_ref().and_then(|format| format.user_agent.as_deref()),
-        ) {
-            Ok(_) => enqueued_count += 1,
-            Err(error) => {
+            let resolved_asset = if download_options.download_video
+                && item.asset.formats.is_empty()
+                && fallback_format.is_none()
+            {
+                match pack_host::analyze_single(
+                    &item.asset.source_url,
+                    cookie_browser.as_deref(),
+                    session_cookie_file.as_deref(),
+                    None,
+                ) {
+                    Ok(asset) => asset,
+                    Err(error) => {
+                        skipped_count += 1;
+                        if first_error.is_none() {
+                            first_error = Some(error.clone());
+                        }
+                        task_store::upsert_task(
+                            &tasks,
+                            DownloadTask {
+                                id: format!("task-prepare-{}", item.asset.asset_id),
+                                platform: item.asset.platform.clone(),
+                                title: item.asset.title.clone(),
+                                progress: 0,
+                                speed_text: "-".to_string(),
+                                format_label: "准备失败".to_string(),
+                                status: "failed".to_string(),
+                                eta_text: "失败".to_string(),
+                                message: Some(error),
+                                output_path: None,
+                                supports_pause: false,
+                                supports_cancel: false,
+                                can_retry: false,
+                            },
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                item.asset.clone()
+            };
+            let asset = &resolved_asset;
+            let selected_format = if download_options.download_video {
+                item.selected_format_id
+                    .as_deref()
+                    .and_then(|format_id| {
+                        asset
+                            .formats
+                            .iter()
+                            .find(|format| format.id == format_id)
+                            .cloned()
+                    })
+                    .or_else(|| {
+                        formats::pick_preferred_format(
+                            &asset.formats,
+                            &quality_preference,
+                            cookie_browser.is_some(),
+                        )
+                    })
+                    .or(fallback_format)
+            } else {
+                None
+            };
+
+            if download_options.download_video && selected_format.is_none() {
                 skipped_count += 1;
-                if first_error.is_none() {
-                    first_error = Some(error);
+                task_store::upsert_task(
+                    &tasks,
+                    DownloadTask {
+                        id: format!("task-prepare-{}", asset.asset_id),
+                        platform: asset.platform.clone(),
+                        title: asset.title.clone(),
+                        progress: 0,
+                        speed_text: "-".to_string(),
+                        format_label: "未找到可用格式".to_string(),
+                        status: "failed".to_string(),
+                        eta_text: "失败".to_string(),
+                        message: Some("当前作品没有可用的下载格式。".to_string()),
+                        output_path: None,
+                        supports_pause: false,
+                        supports_cancel: false,
+                        can_retry: false,
+                    },
+                );
+                continue;
+            }
+
+            if selected_format
+                .as_ref()
+                .is_some_and(|format| format.requires_processing)
+                && !ytdlp::ffmpeg_available(runtime_ffmpeg_path.as_deref())
+            {
+                match ensure_ffmpeg_path(runtime_ffmpeg_path.as_deref(), true) {
+                    Ok(path) => runtime_ffmpeg_path = path,
+                    Err(error) => {
+                        skipped_count += 1;
+                        if first_error.is_none() {
+                            first_error = Some(error.clone());
+                        }
+                        task_store::upsert_task(
+                            &tasks,
+                            DownloadTask {
+                                id: format!("task-prepare-{}", asset.asset_id),
+                                platform: asset.platform.clone(),
+                                title: asset.title.clone(),
+                                progress: 0,
+                                speed_text: "-".to_string(),
+                                format_label: selected_format
+                                    .as_ref()
+                                    .map(|format| format.label.clone())
+                                    .unwrap_or_else(|| "准备失败".to_string()),
+                                status: "failed".to_string(),
+                                eta_text: "失败".to_string(),
+                                message: Some(error),
+                                output_path: None,
+                                supports_pause: false,
+                                supports_cancel: false,
+                                can_retry: false,
+                            },
+                        );
+                        continue;
+                    }
                 }
             }
-        }
-    }
 
-    if enqueued_count == 0 {
-        return Err(first_error.unwrap_or_else(|| "主页作品批量下载入队失败。".to_string()));
-    }
+            if let Err(error) = ytdlp::download_video(
+                Arc::clone(&tasks),
+                Arc::clone(&controllers),
+                &asset.platform,
+                &asset.source_url,
+                &asset.asset_id,
+                &asset.title,
+                &asset.author,
+                &asset.publish_date,
+                &asset.caption,
+                asset.cover_url.as_deref(),
+                selected_format.as_ref().map(|format| format.id.as_str()),
+                selected_format.as_ref().map(|format| format.label.as_str()),
+                &save_directory_for_thread,
+                download_options.clone(),
+                auto_reveal_in_finder,
+                runtime_ffmpeg_path.as_deref(),
+                cookie_browser.as_deref(),
+                session_cookie_file.as_deref(),
+                selected_format
+                    .as_ref()
+                    .and_then(|format| format.direct_url.as_deref()),
+                selected_format
+                    .as_ref()
+                    .and_then(|format| format.referer.as_deref()),
+                selected_format
+                    .as_ref()
+                    .and_then(|format| format.user_agent.as_deref()),
+                selected_format
+                    .as_ref()
+                    .and_then(|format| format.audio_direct_url.as_deref()),
+                selected_format
+                    .as_ref()
+                    .and_then(|format| format.audio_referer.as_deref()),
+                selected_format
+                    .as_ref()
+                    .and_then(|format| format.audio_user_agent.as_deref()),
+            ) {
+                skipped_count += 1;
+                if first_error.is_none() {
+                    first_error = Some(error.clone());
+                }
+                task_store::upsert_task(
+                    &tasks,
+                    DownloadTask {
+                        id: format!("task-prepare-{}", asset.asset_id),
+                        platform: asset.platform.clone(),
+                        title: asset.title.clone(),
+                        progress: 0,
+                        speed_text: "-".to_string(),
+                        format_label: selected_format
+                            .as_ref()
+                            .map(|format| format.label.clone())
+                            .unwrap_or_else(|| "准备失败".to_string()),
+                        status: "failed".to_string(),
+                        eta_text: "失败".to_string(),
+                        message: Some(error),
+                        output_path: None,
+                        supports_pause: false,
+                        supports_cancel: false,
+                        can_retry: false,
+                    },
+                );
+            }
+        }
+
+        if skipped_count >= total_requested {
+            task_store::upsert_task(
+                &tasks,
+                DownloadTask {
+                    id: format!(
+                        "task-batch-summary-{}",
+                        parser::sanitize_filename(&profile_title_for_thread)
+                    ),
+                    platform: platforms::detect_platform(&source_url_for_thread).to_string(),
+                    title: profile_title_for_thread,
+                    progress: 0,
+                    speed_text: "-".to_string(),
+                    format_label: "批量入队失败".to_string(),
+                    status: "failed".to_string(),
+                    eta_text: "失败".to_string(),
+                    message: Some(
+                        first_error.unwrap_or_else(|| "主页作品批量下载入队失败。".to_string()),
+                    ),
+                    output_path: None,
+                    supports_pause: false,
+                    supports_cancel: false,
+                    can_retry: false,
+                },
+            );
+        }
+    });
 
     Ok(BatchDownloadResult {
         profile_title,
         source_url,
-        total_available: items.len() as u32,
-        fetched_count: items.len() as u32,
-        enqueued_count,
-        skipped_count,
+        total_available: total_requested,
+        fetched_count: total_requested,
+        enqueued_count: total_requested,
+        skipped_count: 0,
         message: format!(
-            "已将 {} 个作品加入下载队列{}。",
-            enqueued_count,
-            if skipped_count > 0 {
-                format!("，跳过 {} 个", skipped_count)
-            } else {
-                String::new()
-            }
+            "正在将 {} 个作品加入下载队列，你可以先去查看任务进度。",
+            total_requested
         ),
     })
 }
 
 #[tauri::command]
 fn list_download_tasks(state: tauri::State<'_, AppState>) -> Vec<DownloadTask> {
-    state.tasks.lock().unwrap().clone()
+    task_store::list_tasks(&state.tasks)
 }
 
 #[tauri::command]
@@ -382,7 +778,11 @@ fn pause_download_task(
     task_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<DownloadTask, String> {
-    ytdlp::pause_task(Arc::clone(&state.tasks), Arc::clone(&state.controllers), &task_id)
+    ytdlp::pause_task(
+        Arc::clone(&state.tasks),
+        Arc::clone(&state.controllers),
+        &task_id,
+    )
 }
 
 #[tauri::command]
@@ -390,7 +790,11 @@ fn resume_download_task(
     task_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<DownloadTask, String> {
-    ytdlp::resume_task(Arc::clone(&state.tasks), Arc::clone(&state.controllers), &task_id)
+    ytdlp::resume_task(
+        Arc::clone(&state.tasks),
+        Arc::clone(&state.controllers),
+        &task_id,
+    )
 }
 
 #[tauri::command]
@@ -398,7 +802,56 @@ fn cancel_download_task(
     task_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<DownloadTask, String> {
-    ytdlp::cancel_task(Arc::clone(&state.tasks), Arc::clone(&state.controllers), &task_id)
+    ytdlp::cancel_task(
+        Arc::clone(&state.tasks),
+        Arc::clone(&state.controllers),
+        &task_id,
+    )
+}
+
+#[tauri::command]
+fn retry_download_task(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+    tooling: tauri::State<'_, ToolingState>,
+) -> Result<DownloadTask, String> {
+    let replay = task_store::replay_for_task(&state.tasks, &task_id)
+        .ok_or_else(|| "当前任务缺少可重试的上下文，请重新解析后再下载。".to_string())?;
+    let ffmpeg_path = ensure_ffmpeg_path(
+        tooling.ffmpeg_path.as_deref(),
+        replay
+            .format_id
+            .as_deref()
+            .is_some_and(|value| value.contains('+'))
+            || replay.audio_direct_url.is_some(),
+    )?;
+
+    ytdlp::download_video(
+        Arc::clone(&state.tasks),
+        Arc::clone(&state.controllers),
+        &replay.platform,
+        &replay.source_url,
+        &replay.asset_id,
+        &replay.title,
+        &replay.author,
+        &replay.publish_date,
+        &replay.caption,
+        replay.cover_url.as_deref(),
+        replay.format_id.as_deref(),
+        replay.format_label.as_deref(),
+        &replay.save_directory,
+        replay.download_options,
+        replay.auto_reveal_in_file_manager,
+        ffmpeg_path.as_deref(),
+        replay.cookie_browser.as_deref(),
+        replay.cookie_file.as_deref(),
+        replay.direct_url.as_deref(),
+        replay.referer.as_deref(),
+        replay.user_agent.as_deref(),
+        replay.audio_direct_url.as_deref(),
+        replay.audio_referer.as_deref(),
+        replay.audio_user_agent.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -409,6 +862,7 @@ fn save_settings(
     quality_preference: String,
     auto_reveal_in_finder: bool,
     state: tauri::State<'_, AppState>,
+    tooling: tauri::State<'_, ToolingState>,
 ) -> Result<SettingsProfile, String> {
     let normalized_browser = settings::normalize_cookie_browser(cookie_browser)?;
     let normalized_directory = settings::normalize_save_directory(save_directory)?;
@@ -425,7 +879,83 @@ fn save_settings(
         settings::save_settings(&guard)?;
     }
 
-    Ok(build_settings_profile(&state.settings.lock().unwrap()))
+    Ok(build_settings_profile(
+        &state.settings.lock().unwrap(),
+        tooling.ffmpeg_path.as_deref(),
+    ))
+}
+
+#[tauri::command]
+fn set_module_enabled(
+    module_id: String,
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ModuleRuntimeState>, String> {
+    let normalized_id = settings::normalize_module_id(&module_id)?.to_string();
+
+    let modules = {
+        let mut guard = state.settings.lock().unwrap();
+        pack_manager::refresh_installed_state(&mut guard);
+        let installed = pack_manager::is_module_installed(&normalized_id);
+        if enabled && !installed {
+            return Err("请先安装这个模块。".to_string());
+        }
+        let module = guard.modules.entry(normalized_id).or_default();
+        module.installed = installed;
+        module.enabled = installed && enabled;
+        settings::save_settings(&guard)?;
+        build_module_runtime_states(&guard)
+    };
+
+    Ok(modules)
+}
+
+#[tauri::command]
+fn install_module_pack(
+    module_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ModuleRuntimeState>, String> {
+    let modules = {
+        let mut guard = state.settings.lock().unwrap();
+        pack_manager::install_pack_for_module(&module_id, &mut guard)?;
+        pack_manager::refresh_installed_state(&mut guard);
+        settings::save_settings(&guard)?;
+        build_module_runtime_states(&guard)
+    };
+
+    Ok(modules)
+}
+
+#[tauri::command]
+fn uninstall_module_pack(
+    module_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ModuleRuntimeState>, String> {
+    let modules = {
+        let mut guard = state.settings.lock().unwrap();
+        pack_manager::uninstall_pack_for_module(&module_id, &mut guard)?;
+        pack_manager::refresh_installed_state(&mut guard);
+        settings::save_settings(&guard)?;
+        build_module_runtime_states(&guard)
+    };
+
+    Ok(modules)
+}
+
+#[tauri::command]
+fn update_module_pack(
+    module_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ModuleRuntimeState>, String> {
+    let modules = {
+        let mut guard = state.settings.lock().unwrap();
+        pack_manager::update_pack_for_module(&module_id, &mut guard)?;
+        pack_manager::refresh_installed_state(&mut guard);
+        settings::save_settings(&guard)?;
+        build_module_runtime_states(&guard)
+    };
+
+    Ok(modules)
 }
 
 #[tauri::command]
@@ -449,17 +979,22 @@ fn open_in_file_manager(path: String, reveal_parent: bool) -> Result<(), String>
 }
 
 #[tauri::command]
-fn clear_finished_tasks(state: tauri::State<'_, AppState>) -> Vec<DownloadTask> {
-    let mut tasks = state.tasks.lock().unwrap();
-    tasks.retain(|task| {
-        task.status != "completed" && task.status != "failed" && task.status != "cancelled"
-    });
-    tasks.clone()
+fn install_download_engine() -> Result<(), String> {
+    pack_manager::ensure_download_engine_installed().map(|_| ())
 }
 
-fn build_bootstrap_state(state: &tauri::State<'_, AppState>) -> BootstrapState {
+#[tauri::command]
+fn clear_finished_tasks(state: tauri::State<'_, AppState>) -> Vec<DownloadTask> {
+    task_store::clear_finished(&state.tasks)
+}
+
+fn build_bootstrap_state(
+    state: &tauri::State<'_, AppState>,
+    ffmpeg_path: Option<&str>,
+) -> BootstrapState {
     let settings = state.settings.lock().unwrap().clone();
-    let tasks = state.tasks.lock().unwrap().clone();
+    let modules = build_module_runtime_states(&settings);
+    let tasks = task_store::list_tasks(&state.tasks);
     let completed = tasks
         .iter()
         .filter(|task| task.status == "completed")
@@ -484,19 +1019,53 @@ fn build_bootstrap_state(state: &tauri::State<'_, AppState>) -> BootstrapState {
         download_mode: settings.download_mode,
         quality_preference: settings.quality_preference,
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
-        ffmpeg_available: ytdlp::ffmpeg_available(),
+        ffmpeg_available: ytdlp::ffmpeg_available(ffmpeg_path),
         metrics: Metrics {
             today_downloads: completed,
             success_rate,
             available_formats: 0,
             max_quality: "等待解析".into(),
         },
+        modules,
         preview: sample_preview(),
         tasks,
     }
 }
 
-fn build_settings_profile(settings: &settings::AppSettings) -> SettingsProfile {
+fn build_module_runtime_states(settings: &settings::AppSettings) -> Vec<ModuleRuntimeState> {
+    settings::MODULE_IDS
+        .iter()
+        .filter_map(|id| {
+            settings.modules.get(*id).map(|_module| {
+                let installed = pack_manager::is_module_installed(id);
+                let pack_info = pack_manager::module_runtime_info(id);
+                ModuleRuntimeState {
+                    id: (*id).to_string(),
+                    installed,
+                    enabled: installed,
+                    pack_id: pack_info.as_ref().map(|info| info.pack_id.clone()),
+                    current_version: pack_info
+                        .as_ref()
+                        .and_then(|info| info.current_version.clone()),
+                    latest_version: pack_info
+                        .as_ref()
+                        .and_then(|info| info.latest_version.clone()),
+                    size_bytes: pack_info.as_ref().and_then(|info| info.size_bytes),
+                    source_kind: pack_info.as_ref().map(|info| info.source_kind.clone()),
+                    update_available: pack_info
+                        .as_ref()
+                        .map(|info| info.update_available)
+                        .unwrap_or(false),
+                }
+            })
+        })
+        .collect()
+}
+
+fn build_settings_profile(
+    settings: &settings::AppSettings,
+    ffmpeg_path: Option<&str>,
+) -> SettingsProfile {
     SettingsProfile {
         auth_state: if settings.cookie_browser.is_some() {
             "active".into()
@@ -509,32 +1078,55 @@ fn build_settings_profile(settings: &settings::AppSettings) -> SettingsProfile {
         download_mode: settings.download_mode.clone(),
         quality_preference: settings.quality_preference.clone(),
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
-        ffmpeg_available: ytdlp::ffmpeg_available(),
+        ffmpeg_available: ytdlp::ffmpeg_available(ffmpeg_path),
     }
 }
 
 fn main() {
+    let tasks = task_store::load_task_store();
+    task_store::normalize_interrupted_tasks(&tasks);
+    let mut loaded_settings = settings::load_settings();
+    if pack_manager::refresh_installed_state(&mut loaded_settings) {
+        let _ = settings::save_settings(&loaded_settings);
+    }
+
     let app_state = AppState {
-        tasks: Arc::new(Mutex::new(Vec::new())),
-        settings: Arc::new(Mutex::new(settings::load_settings())),
+        tasks,
+        settings: Arc::new(Mutex::new(loaded_settings)),
         controllers: ytdlp::new_task_controller_store(),
     };
 
     tauri::Builder::default()
         .manage(app_state)
+        .setup(|app| {
+            let ffmpeg_path = ytdlp::resolve_ffmpeg_path(app.handle())
+                .map(|path| path.to_string_lossy().to_string());
+            app.manage(ToolingState { ffmpeg_path });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_bootstrap_state,
+            get_analysis_progress,
+            clear_analysis_progress,
             analyze_input,
             analyze_profile_input,
+            open_profile_browser,
+            collect_profile_browser,
             create_download_task,
             create_profile_download_tasks,
             list_download_tasks,
             pause_download_task,
             resume_download_task,
             cancel_download_task,
+            retry_download_task,
             save_settings,
+            set_module_enabled,
+            install_module_pack,
+            uninstall_module_pack,
+            update_module_pack,
             pick_save_directory,
             open_in_file_manager,
+            install_download_engine,
             clear_finished_tasks
         ])
         .run(tauri::generate_context!())

@@ -1,130 +1,100 @@
 # StreamVerse
 
-`StreamVerse` 是一个桌面端多平台视频下载器，当前优先打磨抖音体验，并已接入 `Bilibili` 单视频下载 Beta，后续会继续扩展到 `YouTube` 等站点。
+`StreamVerse` 是一个桌面端多平台视频下载器，聚焦三件事：解析快、批量流程清晰、下载过程可控。
 
-它现在已经具备两条清晰的工作流：
+当前版本已经稳定覆盖：
 
-- `单视频下载`：面向单个作品，解析链接后选择清晰度与下载内容
-- `主页批量下载`：面向个人主页，先读取作品列表，再勾选想下载的内容与作品
+- `抖音`：单视频下载、主页批量读取与批量下载
+- `Bilibili`：单视频下载、UP 主投稿批量下载
+- `YouTube`：单视频下载
 
-## 当前状态
+应用基于 `Tauri 2 + Rust + Svelte 5`，采用“主应用壳 + 平台 pack + 共享运行时”的结构。主应用负责界面、队列、设置和任务调度；平台能力按 pack 安装与更新；`FFmpeg`、浏览器批量读取等共享能力按需补齐。
 
-- 当前最成熟的是 `抖音`
-- `Bilibili` 已接入单视频下载 Beta
-- 桌面目标平台为 `macOS` 与 `Windows`
-- 当前仓库已在 `macOS` 上完成开发与打包验证
-- `Windows` 代码路径已按双平台准备，后续继续补实机验证与安装包体验
-
-## 界面截图
-
-### 平台首页
+## 界面预览
 
 ![StreamVerse 平台首页](docs/screenshots/home.png)
 
-### 抖音工作区
-
 ![StreamVerse 抖音工作区](docs/screenshots/douyin-workspace.png)
-
-### Bilibili 工作区
 
 ![StreamVerse Bilibili 工作区](docs/screenshots/bilibili-workspace.png)
 
-## 文档导航
+## 核心能力
 
-- 项目路线图：[docs/roadmap.md](docs/roadmap.md)
-- 贡献说明：[CONTRIBUTING.md](CONTRIBUTING.md)
-- 维护规则：[docs/project-rules.md](docs/project-rules.md)
-- 维护上下文：[docs/maintainer-context.md](docs/maintainer-context.md)
-- 变更记录：[CHANGELOG.md](CHANGELOG.md)
+- 单视频下载：解析链接后选择清晰度、内容类型，再进入任务队列
+- 主页批量下载：先读取完整作品列表，再筛选、勾选、批量入队
+- 格式去重：界面只保留用户可感知差异的清晰度项
+- 单条画质选择：批量列表里的每个视频都可以单独改清晰度
+- 任务队列：支持进度、速度、ETA、暂停、继续、取消、重试、定位文件
+- 历史持久化：应用重启后保留最近任务状态
+- 内置媒体能力：打包版自带 `FFmpeg`，高质量 `DASH` 下载无需额外安装
+- 浏览器登录态接入：支持基于浏览器 Cookie 的受限内容解析
 
-## 当前能力
+## 当前支持的工作流
 
-- 支持粘贴抖音分享文案、短链、作品链接和主页链接
-- 支持在首页先选择平台，再进入对应工作区
-- 支持 `抖音` 工作区内切换 `单视频下载` 与 `主页批量下载`
-- 支持 `Bilibili` 单视频下载 Beta
-- 支持浏览器 Cookie 登录态：`Chrome`、`Safari`、`Firefox`、`Edge`、`Brave`
-- 支持两种下载模式：`手动模式` 与 `智能模式`
-- 支持默认清晰度策略：`recommended`、`highest`、`smallest`、`no_watermark`
-- 支持格式去重，界面仅保留用户可感知规格不同的清晰度项
-- 支持单个作品下载时按需勾选：
-  - 视频 `.mp4`
-  - 封面图
-  - 文案 `.txt`
-  - 元数据 `.json`
-- 只下载单个内容时直接落盘
-- 勾选多个内容时自动创建以标题命名的作品文件夹
-- 支持主页批量预览、逐项勾选、批量入队
-- 支持默认下载目录与单次任务目录覆盖
-- 支持任务进度、速度、ETA、暂停、继续、取消与完成后定位文件
+### 抖音
 
-## 页面说明
+- 单视频下载
+- 主页批量读取
+- 批量列表筛选、全选、逐项画质选择
 
-### 单视频下载
+### Bilibili
 
-适合下载单条抖音或 Bilibili 视频。
+- 单视频下载
+- `UP` 主投稿列表批量读取
+- 批量列表筛选、全选、逐项画质选择
 
-1. 粘贴分享文案、短链或作品链接
-2. 解析作品信息与可用清晰度
-3. 勾选要下载的内容
-4. 选择清晰度或使用智能模式
-5. 开始下载并在任务区查看实时进度
+### YouTube
 
-### 主页批量下载
+- 单视频下载
+- 高质量格式下载与音视频合流
 
-适合下载某个抖音个人主页下的多条作品。
+## 架构概览
 
-1. 粘贴主页链接
-2. 读取主页作品列表
-3. 勾选本次要下载的作品
-4. 勾选下载内容
-5. 批量入队，在任务区统一管理暂停、继续与取消
+- 主应用：`Tauri` 桌面壳、前端页面、任务队列、设置、模块中心
+- 平台 pack：`douyin-pack`、`bilibili-pack`、`youtube-pack`
+- 共享 pack：
+  - `browser-bridge`：主页批量读取与浏览器会话导出
+  - `download-engine`：`yt-dlp`
+  - `media-engine`：`FFmpeg`
+- 注册表与安装链路：支持本地 build 资源、远程 release bundle、按需安装与更新
 
-## `JSON` 元数据是什么
+## 仓库结构
 
-`JSON` 元数据文件默认是可选内容，不是必须下载。
+- `src/`：Svelte 前端
+- `src-tauri/`：Rust 后端、下载执行、pack 调度
+- `scripts/`：Python 桥接脚本与打包辅助脚本
+- `vendor/douyin_api/`：抖音桥接依赖
+- `registry/plugins.json`：本地开发与打包时使用的 pack 注册表
+- `.github/workflows/`：`macOS / Windows` 桌面构建与 pack 发布工作流
 
-它主要保存这些结构化信息：
+## 下载内容
 
-- 作品 ID
-- 来源链接
-- 标题
-- 作者
-- 发布时间
-- 文案
-- 封面链接
-- 当前解析到的格式信息
+每个任务都可以按需选择：
 
-如果你只想保存视频本体，可以不勾选它。
+- 视频
+- 封面
+- 文案 `.txt`
+- 元数据 `.json`
 
-## 技术栈
-
-- 桌面壳：`Tauri 2`
-- 后端：`Rust`
-- 前端：`Svelte 5 + TypeScript`
-- 抖音解析链路：`Douyin bridge + 直链下载 + yt-dlp fallback`
-- Bilibili 解析链路：`yt-dlp + 浏览器 Cookie + FFmpeg 合并高质量 DASH`
-- 配置存储：本地 JSON 设置文件
+只选一个内容时直接落盘；选择多个内容时自动创建以标题命名的文件夹。
 
 ## 本地开发
 
 ### 依赖
 
-- `Node.js`
+- `Node.js 22`
 - `Rust`
-- `Python 3`
-- `yt-dlp`
+- `Python 3.11+`
+- 可用的 Chromium 浏览器（抖音 / Bilibili 主页批量读取）
 
-应用会自动准备抖音桥接脚本所需的 Python 依赖，但系统里仍需要可用的 `Python 3` 与 `yt-dlp`。
-如果要下载 `Bilibili` 的高质量 DASH 视频，建议额外安装 `FFmpeg`，否则应用会提示你先补齐环境。
+打包版会内置当前平台所需的 `FFmpeg`，一般不需要用户额外安装。
 
 ### 启动
 
 ```bash
-npm install
+npm ci
 npm run check
-cd src-tauri && cargo test
-cd ..
+cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri:dev
 ```
 
@@ -134,24 +104,29 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
-## 默认路径与设置
+## 发布
 
-- 默认下载目录：`~/Movies/StreamVerse`
-- 设置页支持修改默认下载目录
-- 设置页支持切换浏览器 Cookie 来源
-- 设置页支持默认下载模式、默认清晰度策略与完成后定位文件
+仓库已经接通两条 GitHub Actions 流程：
 
-## 当前限制
+- `Build Desktop App`：构建 `macOS` 与 `Windows` 桌面包
+- `Release Packs`：发布平台 pack 与共享依赖 bundle
 
-- 当前最完整的链路仍然是 `抖音`
-- `Bilibili` 目前优先支持单视频下载，`UP 主批量下载` 页面已预留但尚未实现
-- 部分抖音链接仍然依赖浏览器 Cookie 才能稳定解析
-- 主页批量下载当前面向“已发布作品”，不包含喜欢、收藏、合集和直播
-- 主页批量下载当前按全局策略自动选格式，尚未做到“每条视频单独选清晰度”
-- `Bilibili` 的高质量格式通常需要 `FFmpeg` 合并音视频流
+推送 `v*` tag 后，会自动生成 GitHub Release，并附带：
 
-## 路线图
+- `macOS`：`DMG`
+- `Windows`：`NSIS` 安装包
 
-- 当前：继续打磨抖音单视频与主页批量下载体验
-- 下一步：Windows 实机验证、失败重试、任务历史持久化、批量体验优化
-- 后续：增加 `Bilibili`、`YouTube` 等站点适配层
+## 当前边界
+
+- `YouTube` 目前只开放单视频下载
+- 主页批量下载只面向已发布作品，不包含喜欢、收藏、直播等内容
+- 部分抖音链接仍然依赖新鲜浏览器 Cookie
+- `Windows` 构建通过 GitHub Actions 产出，仍建议继续做实机回归
+
+## 文档
+
+- [变更记录](CHANGELOG.md)
+- [贡献说明](CONTRIBUTING.md)
+- [项目路线图](docs/roadmap.md)
+- [项目规则](docs/project-rules.md)
+- [维护上下文](docs/maintainer-context.md)

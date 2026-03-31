@@ -2,6 +2,7 @@ node_modules/
 dist/
 .venv/
 logs/
+releases/
 .DS_Store
 npm-debug.log*
 
@@ -10,3 +11,5 @@ src-tauri/gen/
 
 vendor/douyin_api/**/__pycache__/
 vendor/douyin_api/**/*.pyc
+scripts/__pycache__/
+scripts/**/*.pyc

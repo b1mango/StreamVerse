@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import type {
+    AnalysisProgress,
     AuthState,
     DownloadContentSelection,
     QualityPreference,
@@ -31,9 +32,9 @@
   export let qualityPreference: QualityPreference = "recommended";
   export let qualityLabel = "";
   export let analyzing = false;
+  export let analysisProgress: AnalysisProgress | null = null;
   export let downloading = false;
   export let pasting = false;
-  export let ffmpegAvailable = false;
 
   const dispatch = createEventDispatcher<{
     analyze: void;
@@ -44,6 +45,9 @@
   $: formatList = visibleFormats(preview, authState);
   $: currentFormat = selectedFormat(preview, selectedFormatId, authState);
   $: preferredFormat = pickPreferredFormat(preview, qualityPreference, authState);
+  $: analysisPercent = analysisProgress
+    ? Math.max(6, Math.min(100, Math.round((analysisProgress.current / Math.max(analysisProgress.total, 1)) * 100)))
+    : 0;
 </script>
 
 <section class="page-shell">
@@ -51,7 +55,9 @@
     <div class="composer-copy">
       <p class="eyebrow">{heroEyebrow}</p>
       <h2>{heading}</h2>
-      <p class="lede">{description}</p>
+      {#if description}
+        <p class="lede">{description}</p>
+      {/if}
     </div>
 
     <label class="input-wrap">
@@ -86,14 +92,8 @@
         </label>
         <label class="option-chip subtle-option">
           <input bind:checked={downloadOptions.downloadMetadata} type="checkbox" />
-          <span>元数据 JSON</span>
+          <span>元数据</span>
         </label>
-      </div>
-
-      <div class="option-notes">
-        <span class="meta-item">只勾选单项时直接保存单文件。</span>
-        <span class="meta-item">勾选多项时自动创建以标题命名的文件夹。</span>
-        <span class="meta-item">`JSON` 只用于保存结构化元数据，默认可不选。</span>
       </div>
     </div>
 
@@ -121,19 +121,36 @@
       </button>
     </div>
 
+    {#if analyzing && analysisProgress}
+      <div class="analysis-progress-card">
+        <div class="section-head compact">
+          <div>
+            <p class="eyebrow">Analyze Progress</p>
+            <h3>解析进度</h3>
+          </div>
+          <span class="chip subtle">
+            {analysisProgress.current} / {analysisProgress.total}
+          </span>
+        </div>
+        <div class="task-progress analysis-progress-bar">
+          <div class="task-progress-fill" style={`width: ${analysisPercent}%`}></div>
+        </div>
+        <p class="analysis-progress-copy">{analysisProgress.message}</p>
+      </div>
+    {/if}
+
     <div class="meta-row">
       <span class="meta-item">平台：{platformLabel}</span>
       <span class="meta-item">默认策略：{qualityLabel}</span>
-      <span class="meta-item">解析链路：{parserLabel}</span>
       <span class="meta-item">当前格式：{currentFormat?.label ?? preferredFormat?.label ?? "等待解析"}</span>
+      {#if parserLabel}
+        <span class="meta-item">{parserLabel}</span>
+      {/if}
     </div>
 
     {#if formatNote}
       <div class="meta-row page-meta">
         <span class="meta-item">{formatNote}</span>
-        {#if !ffmpegAvailable}
-          <span class="meta-item subtle">当前未检测到 FFmpeg。</span>
-        {/if}
       </div>
     {/if}
   </article>
@@ -195,9 +212,6 @@
                   {/if}
                   {#if format.requiresLogin}
                     <span class="mini-tag">登录后</span>
-                  {/if}
-                  {#if format.requiresProcessing}
-                    <span class="mini-tag">需 FFmpeg</span>
                   {/if}
                 </div>
               </button>

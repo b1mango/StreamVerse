@@ -1,10 +1,23 @@
 const RESERVED_FILENAME_CHARS: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 const MAX_FILENAME_CHARS: usize = 80;
+const URL_MARKERS: [&str; 13] = [
+    "https://",
+    "http://",
+    "www.douyin.com/",
+    "v.douyin.com/",
+    "www.iesdouyin.com/",
+    "www.bilibili.com/",
+    "bilibili.com/",
+    "space.bilibili.com/",
+    "b23.tv/",
+    "www.youtube.com/",
+    "youtube.com/",
+    "m.youtube.com/",
+    "youtu.be/",
+];
 
 pub fn extract_first_url(raw: &str) -> Option<String> {
-    raw.split_whitespace()
-        .find_map(find_url_in_token)
-        .map(ToOwned::to_owned)
+    raw.split_whitespace().find_map(find_url_in_token)
 }
 
 pub fn sanitize_filename(input: &str) -> String {
@@ -35,10 +48,36 @@ fn is_url(input: &str) -> bool {
     input.starts_with("http://") || input.starts_with("https://")
 }
 
-fn find_url_in_token(token: &str) -> Option<&str> {
-    let start = token.find("https://").or_else(|| token.find("http://"))?;
+fn find_url_in_token(token: &str) -> Option<String> {
+    for marker in URL_MARKERS {
+        let Some(start) = token.find(marker) else {
+            continue;
+        };
+        let candidate = strip_wrapping_punctuation(&token[start..])?;
+        let normalized = normalize_url(candidate)?;
+        if is_url(&normalized) {
+            return Some(normalized);
+        }
+    }
 
-    strip_wrapping_punctuation(&token[start..]).filter(|item| is_url(item))
+    None
+}
+
+fn normalize_url(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Some(trimmed.to_string());
+    }
+
+    if trimmed.starts_with("//") {
+        return Some(format!("https:{trimmed}"));
+    }
+
+    Some(format!("https://{trimmed}"))
 }
 
 fn strip_wrapping_punctuation(input: &str) -> Option<&str> {
@@ -112,5 +151,22 @@ mod tests {
     fn truncates_overlong_filenames() {
         let filename = sanitize_filename(&"春".repeat(120));
         assert_eq!(filename.chars().count(), 80);
+    }
+
+    #[test]
+    fn normalizes_scheme_less_bilibili_url() {
+        let raw = "bilibili.com/video/BV1VPQSBsEdR/?spm_id_from=333.1387.homepage.video_card.click";
+        let url = extract_first_url(raw);
+        assert_eq!(
+            url.as_deref(),
+            Some("https://bilibili.com/video/BV1VPQSBsEdR/?spm_id_from=333.1387.homepage.video_card.click")
+        );
+    }
+
+    #[test]
+    fn normalizes_scheme_less_youtube_url() {
+        let raw = "youtu.be/u1JB_opf2u8?t=5";
+        let url = extract_first_url(raw);
+        assert_eq!(url.as_deref(), Some("https://youtu.be/u1JB_opf2u8?t=5"));
     }
 }

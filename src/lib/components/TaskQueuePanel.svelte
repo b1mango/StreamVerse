@@ -12,6 +12,7 @@
     pause: { task: DownloadTask };
     resume: { task: DownloadTask };
     cancel: { task: DownloadTask };
+    retry: { task: DownloadTask };
     reveal: { task: DownloadTask };
     clearFinished: void;
   }>();
@@ -46,7 +47,7 @@
     <p class="empty-state">还没有下载任务。先进入上面的平台工作区创建一个试试。</p>
   {:else}
     <div class="task-list">
-      {#each tasks as task}
+      {#each tasks as task (task.id)}
         <div class="task-row">
           <div class="task-copy">
             <strong>{task.title}</strong>
@@ -103,6 +104,17 @@
                   type="button"
                 >
                   取消
+                </button>
+              {/if}
+
+              {#if ["failed", "cancelled"].includes(task.status) && task.canRetry}
+                <button
+                  class="text-button"
+                  onclick={() => dispatch("retry", { task })}
+                  disabled={pendingTaskAction(task.id)}
+                  type="button"
+                >
+                  重试
                 </button>
               {/if}
 

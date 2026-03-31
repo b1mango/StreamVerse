@@ -1,35 +1,32 @@
+#[cfg(test)]
+use crate::VideoFormat;
 use crate::{
-    douyin, formats, parser, platforms, DownloadContentSelection, DownloadTask, VideoAsset,
-    VideoFormat,
-    DEFAULT_GRADIENT,
+    pack_manager, parser, platforms, task_store, DownloadContentSelection, DownloadTask,
+    TaskReplayRequest,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, REFERER, USER_AGENT};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+#[cfg(test)]
+use serde::Deserialize;
+use serde::Serialize;
+#[cfg(test)]
 use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tauri::{AppHandle, Manager, Runtime};
 
-#[derive(Deserialize)]
-struct RawInfo {
-    id: Option<String>,
-    title: Option<String>,
-    uploader: Option<String>,
-    creator: Option<String>,
-    channel: Option<String>,
-    duration: Option<f64>,
-    upload_date: Option<String>,
-    description: Option<String>,
-    thumbnail: Option<String>,
-    formats: Option<Vec<RawFormat>>,
-}
+const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default,-ios,-android;player_skip=configs";
+
+static PREFERRED_EXTERNAL_YTDLP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static PREFERRED_JS_RUNTIME: OnceLock<Option<String>> = OnceLock::new();
 
 #[derive(Clone)]
 struct DownloadArtifacts {
@@ -88,7 +85,20 @@ struct MetadataSidecar<'a> {
     generated_by: &'static str,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy)]
+enum StreamKind {
+    Video,
+    Audio,
+}
+
+enum StreamWorkerOutcome {
+    Completed,
+    Cancelled,
+    Failed(String),
+}
+
+#[cfg(test)]
+#[derive(Default, Deserialize)]
 struct RawFormat {
     format_id: Option<String>,
     format_note: Option<String>,
@@ -98,6 +108,18 @@ struct RawFormat {
     vcodec: Option<String>,
     acodec: Option<String>,
     tbr: Option<f64>,
+    url: Option<String>,
+    protocol: Option<String>,
+    http_headers: Option<RawHeaders>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default, Deserialize)]
+struct RawHeaders {
+    #[serde(rename = "Referer")]
+    referer: Option<String>,
+    #[serde(rename = "User-Agent")]
+    user_agent: Option<String>,
 }
 
 impl DownloadContentSelection {
@@ -226,69 +248,8 @@ pub fn new_task_controller_store() -> TaskControllerStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub fn analyze_url(source_url: &str, cookie_browser: Option<&str>) -> Result<VideoAsset, String> {
-    ensure_ytdlp_available()?;
-    let platform = platforms::detect_platform(source_url).to_string();
-
-    let mut douyin_bridge_error = None::<String>;
-    if douyin::is_douyin_url(source_url) {
-        if let Some(browser) = cookie_browser {
-            match douyin::analyze_url(source_url, browser) {
-                Ok(asset) => return Ok(asset),
-                Err(error) => douyin_bridge_error = Some(error),
-            }
-        }
-    }
-
-    let mut command = Command::new("yt-dlp");
-    command.args(["--dump-single-json", "--no-playlist"]);
-    append_cookie_args(&mut command, cookie_browser);
-
-    let output = command
-        .arg(source_url)
-        .output()
-        .map_err(|error| format!("启动 yt-dlp 失败：{error}"))?;
-
-    if !output.status.success() {
-        let fallback_error = readable_error(&output.stderr, "解析链接失败");
-        return Err(match douyin_bridge_error {
-            Some(bridge_error) => format!("{bridge_error}\n\n备用解析器返回：{fallback_error}"),
-            None => fallback_error,
-        });
-    }
-
-    let raw: RawInfo = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("解析 yt-dlp 响应失败：{error}"))?;
-
-    let formats = formats::dedupe_formats(map_formats(&platform, raw.formats.unwrap_or_default()));
-
-    Ok(VideoAsset {
-        asset_id: raw.id.unwrap_or_else(|| "unknown".to_string()),
-        platform,
-        source_url: source_url.to_string(),
-        title: raw.title.unwrap_or_else(|| "未命名作品".to_string()),
-        author: raw
-            .uploader
-            .or(raw.creator)
-            .or(raw.channel)
-            .unwrap_or_else(|| "未知作者".to_string()),
-        duration_seconds: raw.duration.unwrap_or_default().round() as u32,
-        publish_date: format_publish_date(raw.upload_date.as_deref()),
-        caption: raw
-            .description
-            .filter(|text| !text.trim().is_empty())
-            .unwrap_or_else(|| match cookie_browser {
-                Some(browser) => format!("已使用 {browser} 的浏览器 Cookie 完成解析。"),
-                None => "解析完成，可以直接选择格式开始下载。".to_string(),
-            }),
-        cover_url: raw.thumbnail.filter(|url| !url.trim().is_empty()),
-        cover_gradient: DEFAULT_GRADIENT.to_string(),
-        formats,
-    })
-}
-
 pub fn download_video(
-    task_store: Arc<Mutex<Vec<DownloadTask>>>,
+    task_store: task_store::TaskStore,
     controller_store: TaskControllerStore,
     platform: &str,
     source_url: &str,
@@ -303,10 +264,15 @@ pub fn download_video(
     save_directory: &str,
     download_options: DownloadContentSelection,
     auto_reveal_in_file_manager: bool,
+    ffmpeg_path: Option<&str>,
     cookie_browser: Option<&str>,
+    cookie_file: Option<&str>,
     direct_url: Option<&str>,
     referer: Option<&str>,
     user_agent: Option<&str>,
+    audio_direct_url: Option<&str>,
+    audio_referer: Option<&str>,
+    audio_user_agent: Option<&str>,
 ) -> Result<DownloadTask, String> {
     if !download_options.has_any_selection() {
         return Err("至少要选择一种要保存的内容。".to_string());
@@ -330,7 +296,10 @@ pub fn download_video(
         format!("task-{asset_id}-extras")
     };
 
-    if download_options.download_video && format_requires_processing(format_id) && !ffmpeg_available() {
+    if download_options.download_video
+        && format_requires_processing(format_id)
+        && !ffmpeg_available(ffmpeg_path)
+    {
         return Err(format!(
             "{} 当前选中的清晰度需要 FFmpeg 合并音视频流。请先安装 FFmpeg，或切换到可直接保存的格式后再下载。",
             platforms::human_platform_name(platform)
@@ -343,7 +312,11 @@ pub fn download_video(
         id: task_id.clone(),
         platform: platform.to_string(),
         title: title.to_string(),
-        progress: 0,
+        progress: if download_options.download_video {
+            1
+        } else {
+            0
+        },
         speed_text: "-".to_string(),
         format_label: format_display.clone(),
         status: "queued".to_string(),
@@ -352,17 +325,23 @@ pub fn download_video(
         output_path: None,
         supports_pause,
         supports_cancel,
+        can_retry: true,
     };
 
     upsert_task(&task_store, task.clone());
 
     let source_url = source_url.to_string();
+    let platform_text = platform.to_string();
     let title = title.to_string();
     let format_id_text = format_id.map(str::to_string);
     let format_label_text = format_label.map(str::to_string);
     let asset_id_text = asset_id.to_string();
     let referer = referer.map(str::to_string);
     let user_agent = user_agent.map(str::to_string);
+    let audio_direct_url = audio_direct_url.map(str::to_string);
+    let audio_referer = audio_referer.map(str::to_string);
+    let audio_user_agent = audio_user_agent.map(str::to_string);
+    let ffmpeg_path = ffmpeg_path.map(str::to_string);
     let artifacts = DownloadArtifacts {
         platform: platform.to_string(),
         source_url: source_url.to_string(),
@@ -376,7 +355,35 @@ pub fn download_video(
         user_agent: user_agent.clone(),
     };
     let cookie_browser = cookie_browser.map(str::to_string);
+    let cookie_file = cookie_file.map(str::to_string);
     let direct_url = direct_url.map(str::to_string);
+    task_store::set_replay(
+        &task_store,
+        &task_id,
+        TaskReplayRequest {
+            platform: platform.to_string(),
+            source_url: source_url.clone(),
+            asset_id: asset_id_text.clone(),
+            title: title.clone(),
+            author: author.to_string(),
+            publish_date: publish_date.to_string(),
+            caption: caption.to_string(),
+            cover_url: cover_url.map(str::to_string),
+            format_id: format_id_text.clone(),
+            format_label: format_label_text.clone(),
+            save_directory: save_directory.to_string(),
+            download_options: download_options.clone(),
+            auto_reveal_in_file_manager,
+            cookie_browser: cookie_browser.clone(),
+            cookie_file: cookie_file.clone(),
+            direct_url: direct_url.clone(),
+            referer: referer.clone(),
+            user_agent: user_agent.clone(),
+            audio_direct_url: audio_direct_url.clone(),
+            audio_referer: audio_referer.clone(),
+            audio_user_agent: audio_user_agent.clone(),
+        },
+    );
 
     if !download_options.download_video {
         thread::spawn(move || {
@@ -398,23 +405,47 @@ pub fn download_video(
     }
 
     if let Some(direct_url) = direct_url {
-        thread::spawn(move || {
-            direct_download_worker(
-                task_store,
-                controller_store,
-                task_id,
-                title,
-                format_display,
-                artifacts,
-                output_layout,
-                download_options,
-                direct_url,
-                auto_reveal_in_file_manager,
-                referer,
-                user_agent,
-                controller,
-            );
-        });
+        if let Some(audio_direct_url) = audio_direct_url {
+            thread::spawn(move || {
+                dash_download_worker(
+                    task_store,
+                    controller_store,
+                    task_id,
+                    title,
+                    format_display,
+                    artifacts,
+                    output_layout,
+                    download_options,
+                    direct_url,
+                    audio_direct_url,
+                    auto_reveal_in_file_manager,
+                    referer,
+                    user_agent,
+                    audio_referer,
+                    audio_user_agent,
+                    ffmpeg_path,
+                    controller,
+                );
+            });
+        } else {
+            thread::spawn(move || {
+                direct_download_worker(
+                    task_store,
+                    controller_store,
+                    task_id,
+                    title,
+                    format_display,
+                    artifacts,
+                    output_layout,
+                    download_options,
+                    direct_url,
+                    auto_reveal_in_file_manager,
+                    referer,
+                    user_agent,
+                    controller,
+                );
+            });
+        }
 
         return Ok(task);
     }
@@ -435,10 +466,22 @@ pub fn download_video(
 
     thread::spawn(move || {
         let artifacts = artifacts.clone();
-        let mut command = Command::new("yt-dlp");
+        let ytdlp_binary = match resolve_ytdlp_path() {
+            Ok(path) => path,
+            Err(error) => {
+                fail_task(&task_store, &task_id, error);
+                return;
+            }
+        };
+        let mut command = Command::new(ytdlp_binary);
+        extend_runtime_path(&mut command);
         command
             .arg("--no-playlist")
+            .arg("--socket-timeout")
+            .arg("20")
             .arg("--newline")
+            .arg("--progress-delta")
+            .arg("0.1")
             .arg("--progress-template")
             .arg("download:progress:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s")
             .arg("--output")
@@ -458,8 +501,14 @@ pub fn download_video(
                 .arg(format!("User-Agent: {user_agent}"));
         }
 
+        append_platform_ytdlp_args(&mut command, &platform_text);
+        append_ffmpeg_args(&mut command, ffmpeg_path.as_deref());
         command.arg("--format").arg(&format_id_text);
-        append_cookie_args(&mut command, cookie_browser.as_deref());
+        append_auth_args(
+            &mut command,
+            cookie_browser.as_deref(),
+            cookie_file.as_deref(),
+        );
 
         let spawn_result = command
             .arg(&source_url)
@@ -481,7 +530,7 @@ pub fn download_video(
                 id: task_id.clone(),
                 platform: artifacts.platform.clone(),
                 title: title.clone(),
-                progress: 0,
+                progress: 1,
                 speed_text: "-".to_string(),
                 format_label: format_display.clone(),
                 status: "downloading".to_string(),
@@ -490,6 +539,7 @@ pub fn download_video(
                 output_path: None,
                 supports_pause: false,
                 supports_cancel: true,
+                can_retry: true,
             },
         );
 
@@ -498,10 +548,34 @@ pub fn download_video(
         let task_platform = artifacts.platform.clone();
 
         let stdout_handle = child.stdout.take().map(|stdout| {
+            let task_store = Arc::clone(&task_store);
             let output_path = Arc::clone(&output_path);
+            let task_id = task_id.clone();
+            let title = title.clone();
+            let format_display = format_display.clone();
+            let task_platform = task_platform.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some(path) = line.strip_prefix("output:") {
+                    if let Some(progress) = parse_progress_line(&line) {
+                        upsert_task(
+                            &task_store,
+                            DownloadTask {
+                                id: task_id.clone(),
+                                platform: task_platform.clone(),
+                                title: title.clone(),
+                                progress: progress.percent,
+                                speed_text: progress.speed_text,
+                                format_label: format_display.clone(),
+                                status: "downloading".to_string(),
+                                eta_text: progress.eta_text,
+                                message: Some("正在下载…".to_string()),
+                                output_path: None,
+                                supports_pause: false,
+                                supports_cancel: true,
+                                can_retry: true,
+                            },
+                        );
+                    } else if let Some(path) = line.strip_prefix("output:") {
                         let mut guard = output_path.lock().unwrap();
                         *guard = Some(path.trim().to_string());
                     }
@@ -543,6 +617,7 @@ pub fn download_video(
                                 output_path: None,
                                 supports_pause: false,
                                 supports_cancel: true,
+                                can_retry: true,
                             },
                         );
                     }
@@ -604,7 +679,9 @@ pub fn download_video(
                 })
                 .unwrap_or_else(|| ArtifactSummary {
                     destination_path: output_layout.destination_path(),
-                    warnings: vec!["已下载视频，但未能确认最终文件路径，未生成封面和文案文件。".to_string()],
+                    warnings: vec![
+                        "已下载视频，但未能确认最终文件路径，未生成封面和文案文件。".to_string()
+                    ],
                     ..ArtifactSummary::default()
                 });
             unregister_controller(&controller_store, &task_id);
@@ -626,6 +703,7 @@ pub fn download_video(
                     output_path: artifact_summary.output_path.clone(),
                     supports_pause: false,
                     supports_cancel: true,
+                    can_retry: true,
                 },
             );
 
@@ -655,7 +733,7 @@ pub fn download_video(
 }
 
 fn metadata_only_worker(
-    task_store: Arc<Mutex<Vec<DownloadTask>>>,
+    task_store: task_store::TaskStore,
     controller_store: TaskControllerStore,
     task_id: String,
     title: String,
@@ -681,6 +759,7 @@ fn metadata_only_worker(
             output_path: None,
             supports_pause: false,
             supports_cancel: true,
+            can_retry: true,
         },
     );
 
@@ -690,13 +769,8 @@ fn metadata_only_worker(
         return;
     }
 
-    let summary = persist_download_artifacts(
-        &output_layout,
-        None,
-        &artifacts,
-        None,
-        &download_options,
-    );
+    let summary =
+        persist_download_artifacts(&output_layout, None, &artifacts, None, &download_options);
 
     if controller.is_cancel_requested() {
         unregister_controller(&controller_store, &task_id);
@@ -724,6 +798,7 @@ fn metadata_only_worker(
             output_path: summary.output_path.clone(),
             supports_pause: false,
             supports_cancel: true,
+            can_retry: true,
         },
     );
 
@@ -734,8 +809,107 @@ fn metadata_only_worker(
     }
 }
 
+fn dash_message(video_finished: bool, audio_finished: bool) -> &'static str {
+    match (video_finished, audio_finished) {
+        (false, false) => "正在下载音视频流…",
+        (true, false) => "正在下载音频流…",
+        (false, true) => "正在下载视频流…",
+        (true, true) => "正在合并音视频…",
+    }
+}
+
+fn stream_label(kind: StreamKind) -> &'static str {
+    match kind {
+        StreamKind::Video => "视频",
+        StreamKind::Audio => "音频",
+    }
+}
+
+fn spawn_stream_download_worker(
+    kind: StreamKind,
+    mut response: reqwest::blocking::Response,
+    mut file: File,
+    temp_path: PathBuf,
+    controller: Arc<TaskController>,
+    progress: Arc<AtomicU64>,
+    sender: mpsc::Sender<(StreamKind, StreamWorkerOutcome)>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let outcome = stream_response_to_file(
+            kind,
+            &mut response,
+            &mut file,
+            &temp_path,
+            &controller,
+            &progress,
+        );
+        let _ = sender.send((kind, outcome));
+    })
+}
+
+fn stream_response_to_file(
+    kind: StreamKind,
+    response: &mut reqwest::blocking::Response,
+    file: &mut File,
+    temp_path: &Path,
+    controller: &TaskController,
+    progress: &AtomicU64,
+) -> StreamWorkerOutcome {
+    let mut buffer = [0u8; 256 * 1024];
+
+    loop {
+        if controller.is_cancel_requested() {
+            let _ = fs::remove_file(temp_path);
+            return StreamWorkerOutcome::Cancelled;
+        }
+
+        while controller.is_pause_requested() {
+            if controller.is_cancel_requested() {
+                let _ = fs::remove_file(temp_path);
+                return StreamWorkerOutcome::Cancelled;
+            }
+            thread::sleep(Duration::from_millis(180));
+        }
+
+        let bytes_read = match response.read(&mut buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(error) => {
+                let _ = fs::remove_file(temp_path);
+                return StreamWorkerOutcome::Failed(format!(
+                    "读取{}流失败：{error}",
+                    stream_label(kind)
+                ));
+            }
+        };
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        if let Err(error) = file.write_all(&buffer[..bytes_read]) {
+            let _ = fs::remove_file(temp_path);
+            return StreamWorkerOutcome::Failed(format!(
+                "写入{}临时文件失败：{error}",
+                stream_label(kind)
+            ));
+        }
+
+        progress.fetch_add(bytes_read as u64, Ordering::Relaxed);
+    }
+
+    if let Err(error) = file.flush() {
+        let _ = fs::remove_file(temp_path);
+        return StreamWorkerOutcome::Failed(format!(
+            "刷新{}文件缓存失败：{error}",
+            stream_label(kind)
+        ));
+    }
+
+    StreamWorkerOutcome::Completed
+}
+
 fn direct_download_worker(
-    task_store: Arc<Mutex<Vec<DownloadTask>>>,
+    task_store: task_store::TaskStore,
     controller_store: TaskControllerStore,
     task_id: String,
     title: String,
@@ -764,6 +938,7 @@ fn direct_download_worker(
             output_path: None,
             supports_pause: true,
             supports_cancel: true,
+            can_retry: true,
         },
     );
 
@@ -824,7 +999,7 @@ fn direct_download_worker(
 
     let total_bytes = response.content_length().unwrap_or(0);
     let mut downloaded_bytes = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buffer = [0u8; 256 * 1024];
     let started_at = Instant::now();
     let mut last_report = Instant::now();
     let mut paused_for = Duration::ZERO;
@@ -860,6 +1035,7 @@ fn direct_download_worker(
                     output_path: None,
                     supports_pause: true,
                     supports_cancel: true,
+                    can_retry: true,
                 },
             );
 
@@ -897,6 +1073,7 @@ fn direct_download_worker(
                     output_path: None,
                     supports_pause: true,
                     supports_cancel: true,
+                    can_retry: true,
                 },
             );
         }
@@ -940,6 +1117,7 @@ fn direct_download_worker(
                     output_path: None,
                     supports_pause: true,
                     supports_cancel: true,
+                    can_retry: true,
                 },
             );
             last_report = Instant::now();
@@ -990,6 +1168,496 @@ fn direct_download_worker(
             output_path: artifact_summary.output_path.clone(),
             supports_pause: true,
             supports_cancel: true,
+            can_retry: true,
+        },
+    );
+
+    if auto_reveal_in_file_manager {
+        if let Some(path) = artifact_summary.output_path.as_deref() {
+            let _ = open_in_file_manager(path, output_layout.bundle_dir.is_none());
+        }
+    }
+}
+
+fn dash_download_worker(
+    task_store: task_store::TaskStore,
+    controller_store: TaskControllerStore,
+    task_id: String,
+    title: String,
+    format_label: String,
+    artifacts: DownloadArtifacts,
+    output_layout: OutputLayout,
+    download_options: DownloadContentSelection,
+    video_direct_url: String,
+    audio_direct_url: String,
+    auto_reveal_in_file_manager: bool,
+    video_referer: Option<String>,
+    video_user_agent: Option<String>,
+    audio_referer: Option<String>,
+    audio_user_agent: Option<String>,
+    ffmpeg_path: Option<String>,
+    controller: Arc<TaskController>,
+) {
+    upsert_task(
+        &task_store,
+        DownloadTask {
+            id: task_id.clone(),
+            platform: artifacts.platform.clone(),
+            title: title.clone(),
+            progress: 0,
+            speed_text: "-".to_string(),
+            format_label: format_label.clone(),
+            status: "downloading".to_string(),
+            eta_text: "准备中".to_string(),
+            message: Some("正在下载视频流…".to_string()),
+            output_path: None,
+            supports_pause: true,
+            supports_cancel: true,
+            can_retry: true,
+        },
+    );
+
+    let client = match build_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            unregister_controller(&controller_store, &task_id);
+            fail_task(&task_store, &task_id, error);
+            return;
+        }
+    };
+
+    if controller.is_cancel_requested() {
+        unregister_controller(&controller_store, &task_id);
+        cancel_task_update(&task_store, &task_id);
+        return;
+    }
+
+    let video_head_total = probe_content_length(
+        &client,
+        &video_direct_url,
+        video_referer.as_deref(),
+        video_user_agent.as_deref(),
+    );
+    let audio_head_total = probe_content_length(
+        &client,
+        &audio_direct_url,
+        audio_referer.as_deref(),
+        audio_user_agent.as_deref(),
+    );
+
+    let mut video_request = client.get(&video_direct_url);
+    if let Some(referer) = video_referer.as_deref() {
+        video_request = video_request.header(REFERER, referer);
+    }
+    if let Some(user_agent) = video_user_agent.as_deref() {
+        video_request = video_request.header(USER_AGENT, user_agent);
+    }
+
+    let video_response = match video_request.send() {
+        Ok(response) => response,
+        Err(error) => {
+            unregister_controller(&controller_store, &task_id);
+            fail_task(&task_store, &task_id, format!("请求视频流失败：{error}"));
+            return;
+        }
+    };
+
+    if !video_response.status().is_success() {
+        unregister_controller(&controller_store, &task_id);
+        fail_task(
+            &task_store,
+            &task_id,
+            format!("视频流返回异常状态：{}", video_response.status()),
+        );
+        return;
+    }
+
+    let video_total = video_head_total.max(video_response.content_length().unwrap_or(0));
+    let video_extension = infer_extension(&video_response, &video_direct_url);
+    let mut audio_request = client.get(&audio_direct_url);
+    if let Some(referer) = audio_referer.as_deref() {
+        audio_request = audio_request.header(REFERER, referer);
+    }
+    if let Some(user_agent) = audio_user_agent.as_deref() {
+        audio_request = audio_request.header(USER_AGENT, user_agent);
+    }
+
+    let audio_response = match audio_request.send() {
+        Ok(response) => response,
+        Err(error) => {
+            unregister_controller(&controller_store, &task_id);
+            fail_task(&task_store, &task_id, format!("请求音频流失败：{error}"));
+            return;
+        }
+    };
+
+    if !audio_response.status().is_success() {
+        unregister_controller(&controller_store, &task_id);
+        fail_task(
+            &task_store,
+            &task_id,
+            format!("音频流返回异常状态：{}", audio_response.status()),
+        );
+        return;
+    }
+
+    let audio_total = audio_head_total.max(audio_response.content_length().unwrap_or(0));
+    let audio_extension = infer_extension(&audio_response, &audio_direct_url);
+    let dash_root = output_layout.asset_root().to_path_buf();
+    let temp_stem = if output_layout.bundle_dir.is_some() {
+        "video".to_string()
+    } else {
+        output_layout.single_stem.clone()
+    };
+    let video_temp_path =
+        unique_output_path(dash_root.join(format!("{temp_stem}.video.{video_extension}.download")));
+    let video_file = match File::create(&video_temp_path) {
+        Ok(file) => file,
+        Err(error) => {
+            unregister_controller(&controller_store, &task_id);
+            fail_task(
+                &task_store,
+                &task_id,
+                format!("创建视频临时文件失败：{error}"),
+            );
+            return;
+        }
+    };
+    let merged_extension = dash_output_extension(&video_extension, &audio_extension);
+    let final_path = output_layout.video_path(&merged_extension);
+    let audio_temp_path =
+        unique_output_path(dash_root.join(format!("{temp_stem}.audio.{audio_extension}.download")));
+    let audio_file = match File::create(&audio_temp_path) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_file(&video_temp_path);
+            unregister_controller(&controller_store, &task_id);
+            fail_task(
+                &task_store,
+                &task_id,
+                format!("创建音频临时文件失败：{error}"),
+            );
+            return;
+        }
+    };
+
+    let (sender, receiver) = mpsc::channel::<(StreamKind, StreamWorkerOutcome)>();
+    let video_progress = Arc::new(AtomicU64::new(0));
+    let audio_progress = Arc::new(AtomicU64::new(0));
+    let video_handle = spawn_stream_download_worker(
+        StreamKind::Video,
+        video_response,
+        video_file,
+        video_temp_path.clone(),
+        Arc::clone(&controller),
+        Arc::clone(&video_progress),
+        sender.clone(),
+    );
+    let audio_handle = spawn_stream_download_worker(
+        StreamKind::Audio,
+        audio_response,
+        audio_file,
+        audio_temp_path.clone(),
+        Arc::clone(&controller),
+        Arc::clone(&audio_progress),
+        sender,
+    );
+
+    let started_at = Instant::now();
+    let mut last_report = Instant::now();
+    let mut paused_for = Duration::ZERO;
+    let mut video_finished = false;
+    let mut audio_finished = false;
+    let mut cancelled = false;
+    let mut failure = None::<String>;
+    let mut finished_count = 0usize;
+
+    while finished_count < 2 {
+        while let Ok((kind, outcome)) = receiver.try_recv() {
+            finished_count += 1;
+            match kind {
+                StreamKind::Video => video_finished = true,
+                StreamKind::Audio => audio_finished = true,
+            }
+
+            match outcome {
+                StreamWorkerOutcome::Completed => {}
+                StreamWorkerOutcome::Cancelled => {
+                    cancelled = true;
+                }
+                StreamWorkerOutcome::Failed(error) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                        controller.request_cancel();
+                    }
+                }
+            }
+        }
+
+        if finished_count >= 2 {
+            break;
+        }
+
+        if controller.is_cancel_requested() {
+            cancelled = true;
+        }
+
+        let video_downloaded = video_progress.load(Ordering::Relaxed);
+        let audio_downloaded = audio_progress.load(Ordering::Relaxed);
+        let downloaded_known = video_downloaded.saturating_add(audio_downloaded);
+        let total_known = video_total.saturating_add(audio_total);
+
+        if controller.is_pause_requested() {
+            upsert_task(
+                &task_store,
+                DownloadTask {
+                    id: task_id.clone(),
+                    platform: artifacts.platform.clone(),
+                    title: title.clone(),
+                    progress: if total_known > 0 {
+                        dash_combined_progress(downloaded_known, total_known)
+                    } else if video_finished {
+                        dash_phase_progress(audio_downloaded, audio_total, 85, 96)
+                    } else {
+                        dash_phase_progress(video_downloaded, video_total, 0, 85)
+                    },
+                    speed_text: human_speed(
+                        downloaded_known,
+                        started_at.elapsed().saturating_sub(paused_for),
+                    ),
+                    format_label: format_label.clone(),
+                    status: "paused".to_string(),
+                    eta_text: if total_known > 0 {
+                        human_eta(
+                            downloaded_known,
+                            total_known,
+                            started_at.elapsed().saturating_sub(paused_for),
+                        )
+                    } else if video_finished {
+                        dash_phase_eta(
+                            audio_downloaded,
+                            audio_total,
+                            started_at.elapsed().saturating_sub(paused_for),
+                        )
+                    } else {
+                        dash_phase_eta(
+                            video_downloaded,
+                            video_total,
+                            started_at.elapsed().saturating_sub(paused_for),
+                        )
+                    },
+                    message: Some("已暂停，可以继续或取消。".to_string()),
+                    output_path: None,
+                    supports_pause: true,
+                    supports_cancel: true,
+                    can_retry: true,
+                },
+            );
+
+            let paused_at = Instant::now();
+            while controller.is_pause_requested() {
+                while let Ok((kind, outcome)) = receiver.try_recv() {
+                    finished_count += 1;
+                    match kind {
+                        StreamKind::Video => video_finished = true,
+                        StreamKind::Audio => audio_finished = true,
+                    }
+
+                    match outcome {
+                        StreamWorkerOutcome::Completed => {}
+                        StreamWorkerOutcome::Cancelled => {
+                            cancelled = true;
+                        }
+                        StreamWorkerOutcome::Failed(error) => {
+                            if failure.is_none() {
+                                failure = Some(error);
+                                controller.request_cancel();
+                            }
+                        }
+                    }
+                }
+
+                if finished_count >= 2 {
+                    break;
+                }
+
+                if controller.is_cancel_requested() {
+                    cancelled = true;
+                    break;
+                }
+
+                thread::sleep(Duration::from_millis(180));
+            }
+
+            paused_for += paused_at.elapsed();
+            last_report = Instant::now();
+            continue;
+        }
+
+        if last_report.elapsed() >= Duration::from_millis(180) {
+            let active_elapsed = started_at.elapsed().saturating_sub(paused_for);
+            upsert_task(
+                &task_store,
+                DownloadTask {
+                    id: task_id.clone(),
+                    platform: artifacts.platform.clone(),
+                    title: title.clone(),
+                    progress: if total_known > 0 {
+                        dash_combined_progress(downloaded_known, total_known)
+                    } else if video_finished {
+                        dash_phase_progress(audio_downloaded, audio_total, 85, 96)
+                    } else {
+                        dash_phase_progress(video_downloaded, video_total, 0, 85)
+                    },
+                    speed_text: human_speed(downloaded_known, active_elapsed),
+                    format_label: format_label.clone(),
+                    status: "downloading".to_string(),
+                    eta_text: if total_known > 0 {
+                        human_eta(downloaded_known, total_known, active_elapsed)
+                    } else if video_finished {
+                        dash_phase_eta(audio_downloaded, audio_total, active_elapsed)
+                    } else {
+                        dash_phase_eta(video_downloaded, video_total, active_elapsed)
+                    },
+                    message: Some(dash_message(video_finished, audio_finished).to_string()),
+                    output_path: None,
+                    supports_pause: true,
+                    supports_cancel: true,
+                    can_retry: true,
+                },
+            );
+            last_report = Instant::now();
+        }
+
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    let _ = video_handle.join();
+    let _ = audio_handle.join();
+
+    if let Some(error) = failure {
+        let _ = fs::remove_file(&video_temp_path);
+        let _ = fs::remove_file(&audio_temp_path);
+        unregister_controller(&controller_store, &task_id);
+        fail_task(&task_store, &task_id, error);
+        return;
+    }
+
+    if controller.is_cancel_requested() {
+        cancelled = true;
+    }
+
+    if cancelled {
+        let _ = fs::remove_file(&video_temp_path);
+        let _ = fs::remove_file(&audio_temp_path);
+        unregister_controller(&controller_store, &task_id);
+        cancel_task_update(&task_store, &task_id);
+        return;
+    }
+
+    let ffmpeg_binary = ffmpeg_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("ffmpeg");
+    upsert_task(
+        &task_store,
+        DownloadTask {
+            id: task_id.clone(),
+            platform: artifacts.platform.clone(),
+            title: title.clone(),
+            progress: 98,
+            speed_text: "-".to_string(),
+            format_label: format_label.clone(),
+            status: "downloading".to_string(),
+            eta_text: "处理中".to_string(),
+            message: Some("正在合并音视频…".to_string()),
+            output_path: None,
+            supports_pause: true,
+            supports_cancel: true,
+            can_retry: true,
+        },
+    );
+
+    let merge_status = Command::new(ffmpeg_binary)
+        .arg("-y")
+        .arg("-i")
+        .arg(&video_temp_path)
+        .arg("-i")
+        .arg(&audio_temp_path)
+        .arg("-c")
+        .arg("copy")
+        .arg(&final_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+
+    let merge_output = match merge_status {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_file(&video_temp_path);
+            let _ = fs::remove_file(&audio_temp_path);
+            unregister_controller(&controller_store, &task_id);
+            fail_task(&task_store, &task_id, format!("启动 FFmpeg 失败：{error}"));
+            return;
+        }
+    };
+
+    if controller.is_cancel_requested() {
+        let _ = fs::remove_file(&video_temp_path);
+        let _ = fs::remove_file(&audio_temp_path);
+        let _ = fs::remove_file(&final_path);
+        unregister_controller(&controller_store, &task_id);
+        cancel_task_update(&task_store, &task_id);
+        return;
+    }
+
+    if !merge_output.status.success() {
+        let _ = fs::remove_file(&video_temp_path);
+        let _ = fs::remove_file(&audio_temp_path);
+        let _ = fs::remove_file(&final_path);
+        unregister_controller(&controller_store, &task_id);
+        fail_task(
+            &task_store,
+            &task_id,
+            readable_error(&merge_output.stderr, "FFmpeg 合并失败"),
+        );
+        return;
+    }
+
+    let _ = fs::remove_file(&video_temp_path);
+    let _ = fs::remove_file(&audio_temp_path);
+
+    let mut artifact_summary = persist_download_artifacts(
+        &output_layout,
+        Some(&final_path),
+        &artifacts,
+        Some(&format_label),
+        &download_options,
+    );
+    if output_layout.bundle_dir.is_some() {
+        artifact_summary.output_path = output_layout.bundle_entry_path();
+    }
+    unregister_controller(&controller_store, &task_id);
+
+    upsert_task(
+        &task_store,
+        DownloadTask {
+            id: task_id,
+            platform: artifacts.platform.clone(),
+            title,
+            progress: 100,
+            speed_text: "-".to_string(),
+            format_label,
+            status: "completed".to_string(),
+            eta_text: "已完成".to_string(),
+            message: Some(build_completion_message(
+                &artifact_summary.destination_path,
+                &artifact_summary,
+            )),
+            output_path: artifact_summary.output_path.clone(),
+            supports_pause: true,
+            supports_cancel: true,
+            can_retry: true,
         },
     );
 
@@ -1001,20 +1669,145 @@ fn direct_download_worker(
 }
 
 fn ensure_ytdlp_available() -> Result<(), String> {
-    let output = Command::new("yt-dlp")
+    let ytdlp_binary = resolve_ytdlp_path()?;
+    let output = Command::new(ytdlp_binary)
         .arg("--version")
         .output()
-        .map_err(|_| "未检测到 yt-dlp，请先安装后再继续。".to_string())?;
+        .map_err(|_| "未检测到可用的 yt-dlp，请重新安装应用后再试。".to_string())?;
 
     if output.status.success() {
         Ok(())
     } else {
-        Err("yt-dlp 不可用，请检查安装是否完整。".to_string())
+        Err("yt-dlp 不可用，请重新安装应用后再试。".to_string())
     }
 }
 
-pub fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
+pub fn resolve_ffmpeg_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    first_existing_path(ffmpeg_candidates(app))
+}
+
+pub fn ffmpeg_available(ffmpeg_path: Option<&str>) -> bool {
+    ffmpeg_path
+        .map(PathBuf::from)
+        .filter(|path| can_execute_ffmpeg(path))
+        .is_some()
+        || pack_manager::resolve_shared_pack_file(
+            "media-engine",
+            PathBuf::from("bin").join(ffmpeg_binary_name()),
+        )
+        .as_ref()
+        .is_some_and(|path| can_execute_ffmpeg(path))
+        || can_execute_ffmpeg(Path::new("ffmpeg"))
+}
+
+fn append_ffmpeg_args(command: &mut Command, ffmpeg_path: Option<&str>) {
+    if let Some(path) = ffmpeg_path.filter(|value| !value.trim().is_empty()) {
+        command.arg("--ffmpeg-location").arg(path);
+    }
+}
+
+fn ffmpeg_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }
+}
+
+fn ytdlp_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    }
+}
+
+fn resolve_ytdlp_path() -> Result<PathBuf, String> {
+    if let Some(path) = preferred_external_ytdlp_path() {
+        return Ok(path);
+    }
+
+    if let Some(path) = pack_manager::ensure_download_engine_installed()? {
+        return Ok(path);
+    }
+
+    if let Some(path) = find_in_path(ytdlp_binary_name()) {
+        return Ok(path);
+    }
+
+    Err("未检测到可用的 yt-dlp，请重新安装应用后再试。".to_string())
+}
+
+fn preferred_external_ytdlp_path() -> Option<PathBuf> {
+    PREFERRED_EXTERNAL_YTDLP_PATH
+        .get_or_init(|| {
+            for candidate in [
+                PathBuf::from("/opt/homebrew/bin/yt-dlp"),
+                PathBuf::from("/usr/local/bin/yt-dlp"),
+            ] {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+
+            find_in_path(ytdlp_binary_name())
+        })
+        .clone()
+}
+
+fn ffmpeg_candidates<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(path) = pack_manager::resolve_shared_pack_file(
+        "media-engine",
+        PathBuf::from("bin").join(ffmpeg_binary_name()),
+    ) {
+        candidates.push(path);
+    }
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("bin").join(ffmpeg_binary_name()));
+        candidates.push(resource_dir.join(ffmpeg_binary_name()));
+    }
+
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    candidates.push(
+        workspace_root
+            .join("node_modules")
+            .join("ffmpeg-static")
+            .join(ffmpeg_binary_name()),
+    );
+    candidates.push(
+        workspace_root
+            .join("src-tauri")
+            .join("resources")
+            .join("bin")
+            .join(ffmpeg_binary_name()),
+    );
+
+    candidates
+}
+
+fn first_existing_path<I>(paths: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    paths.into_iter().find(|path| path.is_file())
+}
+
+fn find_in_path(binary_name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for entry in std::env::split_paths(&path_var) {
+        let candidate = entry.join(binary_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn can_execute_ffmpeg(path: &Path) -> bool {
+    Command::new(path)
         .arg("-version")
         .output()
         .map(|output| output.status.success())
@@ -1127,7 +1920,9 @@ fn persist_download_artifacts(
                 Err(error) => summary.warnings.push(format!("封面下载失败：{error}")),
             }
         } else {
-            summary.warnings.push("当前作品没有可用封面地址。".to_string());
+            summary
+                .warnings
+                .push("当前作品没有可用封面地址。".to_string());
         }
     }
 
@@ -1136,7 +1931,10 @@ fn persist_download_artifacts(
 
 fn build_text_sidecar(artifacts: &DownloadArtifacts, format_label: Option<&str>) -> String {
     let mut sections = vec![
-        format!("平台：{}", platforms::human_platform_name(&artifacts.platform)),
+        format!(
+            "平台：{}",
+            platforms::human_platform_name(&artifacts.platform)
+        ),
         format!("标题：{}", artifacts.title),
         format!("作者：{}", artifacts.author),
         format!("发布日期：{}", artifacts.publish_date),
@@ -1228,6 +2026,8 @@ fn build_completion_message(output_dir_text: &str, summary: &ArtifactSummary) ->
 fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(20))
+        .tcp_nodelay(true)
+        .pool_max_idle_per_host(8)
         .build()
         .map_err(|error| format!("创建下载客户端失败：{error}"))
 }
@@ -1265,7 +2065,7 @@ fn unregister_controller(controller_store: &TaskControllerStore, task_id: &str) 
 }
 
 pub fn pause_task(
-    task_store: Arc<Mutex<Vec<DownloadTask>>>,
+    task_store: task_store::TaskStore,
     controller_store: TaskControllerStore,
     task_id: &str,
 ) -> Result<DownloadTask, String> {
@@ -1288,7 +2088,7 @@ pub fn pause_task(
 }
 
 pub fn resume_task(
-    task_store: Arc<Mutex<Vec<DownloadTask>>>,
+    task_store: task_store::TaskStore,
     controller_store: TaskControllerStore,
     task_id: &str,
 ) -> Result<DownloadTask, String> {
@@ -1311,7 +2111,7 @@ pub fn resume_task(
 }
 
 pub fn cancel_task(
-    task_store: Arc<Mutex<Vec<DownloadTask>>>,
+    task_store: task_store::TaskStore,
     controller_store: TaskControllerStore,
     task_id: &str,
 ) -> Result<DownloadTask, String> {
@@ -1333,27 +2133,27 @@ pub fn cancel_task(
 }
 
 fn mutate_task<F>(
-    task_store: &Arc<Mutex<Vec<DownloadTask>>>,
+    task_store: &task_store::TaskStore,
     task_id: &str,
     mutator: F,
 ) -> Result<DownloadTask, String>
 where
     F: FnOnce(&mut DownloadTask),
 {
-    let mut guard = task_store.lock().unwrap();
-    let task = guard
-        .iter_mut()
-        .find(|task| task.id == task_id)
-        .ok_or_else(|| "未找到对应的下载任务。".to_string())?;
-    mutator(task);
-    Ok(task.clone())
+    task_store::mutate_task(task_store, task_id, mutator)
 }
 
 fn infer_extension(response: &reqwest::blocking::Response, direct_url: &str) -> String {
     if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
         if let Ok(content_type) = content_type.to_str() {
-            if content_type.contains("video/mp4") {
+            if content_type.contains("video/mp4") || content_type.contains("audio/mp4") {
                 return "mp4".to_string();
+            }
+            if content_type.contains("video/webm") || content_type.contains("audio/webm") {
+                return "webm".to_string();
+            }
+            if content_type.contains("audio/mp3") || content_type.contains("audio/mpeg") {
+                return "mp3".to_string();
             }
             if content_type.contains("image/jpeg") {
                 return "jpg".to_string();
@@ -1443,6 +2243,83 @@ fn compute_percent(downloaded_bytes: u64, total_bytes: u64) -> u32 {
         .clamp(0.0, 100.0) as u32
 }
 
+fn dash_combined_progress(downloaded_bytes: u64, total_bytes: u64) -> u32 {
+    if total_bytes == 0 {
+        return 0;
+    }
+
+    ((downloaded_bytes as f64 / total_bytes as f64) * 96.0)
+        .round()
+        .clamp(0.0, 96.0) as u32
+}
+
+fn dash_phase_progress(downloaded_bytes: u64, total_bytes: u64, start: u32, end: u32) -> u32 {
+    if end <= start {
+        return start;
+    }
+
+    if total_bytes == 0 {
+        return start.max(1);
+    }
+
+    let span = (end - start) as f64;
+    let offset = ((downloaded_bytes as f64 / total_bytes as f64) * span)
+        .round()
+        .clamp(0.0, span) as u32;
+    (start + offset).clamp(start, end)
+}
+
+fn dash_phase_eta(downloaded_bytes: u64, total_bytes: u64, elapsed: Duration) -> String {
+    let eta = human_eta(downloaded_bytes, total_bytes, elapsed);
+    if eta == "—" {
+        "准备中".to_string()
+    } else {
+        eta
+    }
+}
+
+fn dash_output_extension(video_extension: &str, audio_extension: &str) -> String {
+    let video = video_extension.trim().to_ascii_lowercase();
+    let audio = audio_extension.trim().to_ascii_lowercase();
+
+    if matches!(video.as_str(), "m4s" | "mp4" | "m4v")
+        || matches!(audio.as_str(), "m4s" | "m4a" | "aac")
+    {
+        return "mp4".to_string();
+    }
+
+    if video == "webm" || audio == "webm" {
+        return "webm".to_string();
+    }
+
+    if !video.is_empty() {
+        return video;
+    }
+
+    "mp4".to_string()
+}
+
+fn probe_content_length(
+    client: &Client,
+    url: &str,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+) -> u64 {
+    let mut request = client.head(url);
+    if let Some(referer) = referer {
+        request = request.header(REFERER, referer);
+    }
+    if let Some(user_agent) = user_agent {
+        request = request.header(USER_AGENT, user_agent);
+    }
+
+    request
+        .send()
+        .ok()
+        .and_then(|response| response.content_length())
+        .unwrap_or(0)
+}
+
 fn human_speed(downloaded_bytes: u64, elapsed: Duration) -> String {
     let seconds = elapsed.as_secs_f64();
     if seconds <= 0.0 {
@@ -1490,10 +2367,85 @@ fn human_bytes(bytes: f64, suffix: &str) -> String {
     }
 }
 
-fn append_cookie_args(command: &mut Command, cookie_browser: Option<&str>) {
+fn append_auth_args(
+    command: &mut Command,
+    cookie_browser: Option<&str>,
+    cookie_file: Option<&str>,
+) {
+    if let Some(file) = cookie_file.filter(|value| !value.trim().is_empty()) {
+        command.arg("--cookies").arg(file);
+        return;
+    }
+
     if let Some(browser) = cookie_browser {
         command.arg("--cookies-from-browser").arg(browser);
     }
+}
+
+fn append_platform_ytdlp_args(command: &mut Command, platform: &str) {
+    if platform != "youtube" {
+        return;
+    }
+
+    if let Some(runtime) = preferred_js_runtime() {
+        command.arg("--js-runtimes").arg(runtime);
+    }
+
+    command
+        .arg("--extractor-args")
+        .arg(YOUTUBE_EXTRACTOR_ARGS);
+}
+
+fn extend_runtime_path(command: &mut Command) {
+    let mut entries = Vec::<PathBuf>::new();
+
+    for candidate in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let path = PathBuf::from(candidate);
+        if path.is_dir() {
+            entries.push(path);
+        }
+    }
+
+    if let Some(path_var) = env::var_os("PATH") {
+        entries.extend(env::split_paths(&path_var));
+    }
+
+    if let Ok(joined) = env::join_paths(entries) {
+        command.env("PATH", joined);
+    }
+}
+
+fn preferred_js_runtime() -> Option<String> {
+    PREFERRED_JS_RUNTIME
+        .get_or_init(|| {
+            for (kind, candidates) in [
+                (
+                    "deno",
+                    vec!["/opt/homebrew/bin/deno", "/usr/local/bin/deno", "deno"],
+                ),
+                (
+                    "node",
+                    vec!["/opt/homebrew/bin/node", "/usr/local/bin/node", "node"],
+                ),
+            ] {
+                for candidate in candidates {
+                    let path = PathBuf::from(candidate);
+                    if !candidate.contains('/') {
+                        if let Some(found) = find_in_path(candidate) {
+                            return Some(format!("{kind}:{}", found.display()));
+                        }
+                        continue;
+                    }
+
+                    if path.is_file() {
+                        return Some(format!("{kind}:{}", path.display()));
+                    }
+                }
+            }
+
+            None
+        })
+        .clone()
 }
 
 pub fn open_in_file_manager(path: &str, reveal_parent: bool) -> Result<(), String> {
@@ -1554,33 +2506,27 @@ pub fn open_in_file_manager(path: &str, reveal_parent: bool) -> Result<(), Strin
     }
 }
 
-fn upsert_task(task_store: &Arc<Mutex<Vec<DownloadTask>>>, next: DownloadTask) {
-    let mut guard = task_store.lock().unwrap();
-    if let Some(existing) = guard.iter_mut().find(|task| task.id == next.id) {
-        *existing = next;
-    } else {
-        guard.insert(0, next);
-    }
+fn upsert_task(task_store: &task_store::TaskStore, next: DownloadTask) {
+    task_store::upsert_task(task_store, next);
 }
 
-fn fail_task(task_store: &Arc<Mutex<Vec<DownloadTask>>>, task_id: &str, reason: String) {
-    let mut guard = task_store.lock().unwrap();
-    if let Some(task) = guard.iter_mut().find(|task| task.id == task_id) {
+fn fail_task(task_store: &task_store::TaskStore, task_id: &str, reason: String) {
+    let _ = task_store::mutate_task(task_store, task_id, |task| {
         task.status = "failed".to_string();
         task.eta_text = "失败".to_string();
         task.message = Some(reason);
-    }
+    });
 }
 
-fn cancel_task_update(task_store: &Arc<Mutex<Vec<DownloadTask>>>, task_id: &str) {
-    let mut guard = task_store.lock().unwrap();
-    if let Some(task) = guard.iter_mut().find(|task| task.id == task_id) {
+fn cancel_task_update(task_store: &task_store::TaskStore, task_id: &str) {
+    let _ = task_store::mutate_task(task_store, task_id, |task| {
         task.status = "cancelled".to_string();
         task.eta_text = "已取消".to_string();
         task.message = Some("下载已取消，临时文件已清理。".to_string());
-    }
+    });
 }
 
+#[cfg(test)]
 fn map_formats(platform: &str, raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
     match platform {
         "bilibili" => map_bilibili_formats(raw_formats),
@@ -1588,6 +2534,7 @@ fn map_formats(platform: &str, raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> 
     }
 }
 
+#[cfg(test)]
 fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
     let mut formats = raw_formats
         .into_iter()
@@ -1610,9 +2557,12 @@ fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             requires_login: false,
             requires_processing: false,
             recommended: false,
-            direct_url: None,
-            referer: None,
-            user_agent: None,
+            direct_url: direct_media_url(&format),
+            referer: format_referer(&format),
+            user_agent: format_user_agent(&format),
+            audio_direct_url: None,
+            audio_referer: None,
+            audio_user_agent: None,
         })
         .collect::<Vec<_>>();
 
@@ -1642,12 +2592,16 @@ fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             direct_url: None,
             referer: None,
             user_agent: None,
+            audio_direct_url: None,
+            audio_referer: None,
+            audio_user_agent: None,
         });
     }
 
     formats
 }
 
+#[cfg(test)]
 fn map_bilibili_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
     let muxed = raw_formats
         .iter()
@@ -1685,12 +2639,16 @@ fn map_bilibili_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             direct_url: None,
             referer: None,
             user_agent: None,
+            audio_direct_url: None,
+            audio_referer: None,
+            audio_user_agent: None,
         });
     }
 
     finalize_mapped_formats(dash_formats)
 }
 
+#[cfg(test)]
 fn build_video_format(
     format: &RawFormat,
     requires_processing: bool,
@@ -1726,12 +2684,16 @@ fn build_video_format(
         requires_login: false,
         requires_processing,
         recommended: false,
-        direct_url: None,
-        referer: None,
-        user_agent: None,
+        direct_url: direct_media_url(format),
+        referer: format_referer(format),
+        user_agent: format_user_agent(format),
+        audio_direct_url: best_audio.and_then(direct_media_url),
+        audio_referer: best_audio.and_then(format_referer),
+        audio_user_agent: best_audio.and_then(format_user_agent),
     }
 }
 
+#[cfg(test)]
 fn finalize_mapped_formats(mut formats: Vec<VideoFormat>) -> Vec<VideoFormat> {
     formats.sort_by_key(|format| {
         let height = format
@@ -1751,6 +2713,7 @@ fn finalize_mapped_formats(mut formats: Vec<VideoFormat>) -> Vec<VideoFormat> {
     formats
 }
 
+#[cfg(test)]
 fn has_muxed_video(format: &RawFormat) -> bool {
     let has_video = format
         .vcodec
@@ -1763,6 +2726,7 @@ fn has_muxed_video(format: &RawFormat) -> bool {
     has_video && has_audio
 }
 
+#[cfg(test)]
 fn is_video_only(format: &RawFormat) -> bool {
     let has_video = format
         .vcodec
@@ -1775,6 +2739,7 @@ fn is_video_only(format: &RawFormat) -> bool {
     has_video && !has_audio
 }
 
+#[cfg(test)]
 fn is_audio_only(format: &RawFormat) -> bool {
     let has_video = format
         .vcodec
@@ -1787,6 +2752,35 @@ fn is_audio_only(format: &RawFormat) -> bool {
     !has_video && has_audio
 }
 
+#[cfg(test)]
+fn direct_media_url(format: &RawFormat) -> Option<String> {
+    match format.protocol.as_deref() {
+        Some("http") | Some("https") | None => {
+            format.url.clone().filter(|url| !url.trim().is_empty())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn format_referer(format: &RawFormat) -> Option<String> {
+    format
+        .http_headers
+        .as_ref()
+        .and_then(|headers| headers.referer.clone())
+        .filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+fn format_user_agent(format: &RawFormat) -> Option<String> {
+    format
+        .http_headers
+        .as_ref()
+        .and_then(|headers| headers.user_agent.clone())
+        .filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
 fn build_label(format: &RawFormat) -> String {
     if let Some(height) = format.height {
         return format!("{height}P");
@@ -1798,6 +2792,7 @@ fn build_label(format: &RawFormat) -> String {
         .unwrap_or_else(|| "默认格式".to_string())
 }
 
+#[cfg(test)]
 fn build_resolution(format: &RawFormat) -> String {
     match (format.width, format.height) {
         (Some(width), Some(height)) => format!("{width}x{height}"),
@@ -1805,23 +2800,15 @@ fn build_resolution(format: &RawFormat) -> String {
     }
 }
 
+#[cfg(test)]
 fn human_codec_name(codec: Option<&str>) -> String {
     match codec.unwrap_or_default() {
         raw if raw.starts_with("avc") || raw.starts_with("h264") => "H.264".to_string(),
         raw if raw.starts_with("hev") || raw.starts_with("h265") => "H.265".to_string(),
+        raw if raw.starts_with("av01") || raw.starts_with("av1") => "AV1".to_string(),
         raw if raw.starts_with("vp9") => "VP9".to_string(),
         "" | "none" => "Auto".to_string(),
         raw => raw.to_string(),
-    }
-}
-
-fn format_publish_date(raw: Option<&str>) -> String {
-    match raw {
-        Some(value) if value.len() == 8 => {
-            format!("{}-{}-{}", &value[0..4], &value[4..6], &value[6..8])
-        }
-        Some(value) => value.to_string(),
-        None => "未知".to_string(),
     }
 }
 
@@ -1872,19 +2859,20 @@ fn parse_progress_line(line: &str) -> Option<ProgressLine> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_percent, direct_download_worker, map_formats, new_task_controller_store,
-        persist_download_artifacts, prepare_output_layout, DownloadArtifacts, RawFormat,
-        TaskController,
+        compute_percent, dash_download_worker, direct_download_worker, ffmpeg_available,
+        first_existing_path, map_formats, new_task_controller_store, persist_download_artifacts,
+        prepare_output_layout, DownloadArtifacts, RawFormat, RawHeaders, TaskController,
     };
-    use crate::{DownloadContentSelection, DownloadTask};
+    use crate::{pack_manager, task_store, DownloadContentSelection};
     use std::fs;
+    use std::io::ErrorKind;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1897,7 +2885,11 @@ mod tests {
 
     #[test]
     fn direct_download_worker_saves_file_and_updates_task() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind test listener: {error}"),
+        };
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
@@ -1916,7 +2908,7 @@ mod tests {
 
         let output_dir = unique_test_dir();
         fs::create_dir_all(&output_dir).unwrap();
-        let task_store = Arc::new(Mutex::new(Vec::<DownloadTask>::new()));
+        let task_store = task_store::new_empty_task_store();
         let controller_store = new_task_controller_store();
         let options = video_only_options();
         let layout = prepare_output_layout(&output_dir, "测试下载", "aweme-1", &options).unwrap();
@@ -1939,7 +2931,7 @@ mod tests {
 
         server.join().unwrap();
 
-        let tasks = task_store.lock().unwrap().clone();
+        let tasks = task_store::list_tasks(&task_store);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, "completed");
 
@@ -1953,8 +2945,178 @@ mod tests {
     }
 
     #[test]
+    fn dash_download_worker_reports_intermediate_progress() {
+        if !ffmpeg_available(None) {
+            return;
+        }
+
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind test listener: {error}"),
+        };
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() <= deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request_buffer = [0u8; 1024];
+                        let bytes = stream.read(&mut request_buffer).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&request_buffer[..bytes]);
+                        let path = request
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .unwrap_or("/");
+
+                        match path {
+                            "/audio.m4a" if request.starts_with("HEAD ") => {
+                                let response = concat!(
+                                    "HTTP/1.1 200 OK\r\n",
+                                    "Connection: close\r\n",
+                                    "Content-Type: audio/mp4\r\n",
+                                    "Content-Length: 131072\r\n",
+                                    "\r\n"
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                            }
+                            "/video.m4s" => {
+                                let header = concat!(
+                                    "HTTP/1.1 200 OK\r\n",
+                                    "Connection: close\r\n",
+                                    "Content-Type: video/mp4\r\n",
+                                    "Content-Length: 524288\r\n",
+                                    "\r\n"
+                                );
+                                let _ = stream.write_all(header.as_bytes());
+                                let chunk = vec![b'v'; 32 * 1024];
+                                for _ in 0..16 {
+                                    let _ = stream.write_all(&chunk);
+                                    let _ = stream.flush();
+                                    thread::sleep(Duration::from_millis(30));
+                                }
+                            }
+                            "/audio.m4a" => {
+                                let header = concat!(
+                                    "HTTP/1.1 200 OK\r\n",
+                                    "Connection: close\r\n",
+                                    "Content-Type: audio/mp4\r\n",
+                                    "Content-Length: 131072\r\n",
+                                    "\r\n"
+                                );
+                                let _ = stream.write_all(header.as_bytes());
+                                let chunk = vec![b'a'; 16 * 1024];
+                                for _ in 0..8 {
+                                    let _ = stream.write_all(&chunk);
+                                    let _ = stream.flush();
+                                    thread::sleep(Duration::from_millis(30));
+                                }
+                            }
+                            _ => {
+                                let response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                                let _ = stream.write_all(response.as_bytes());
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let output_dir = unique_test_dir();
+        fs::create_dir_all(&output_dir).unwrap();
+        let task_store = task_store::new_empty_task_store();
+        let controller_store = new_task_controller_store();
+        let options = video_only_options();
+        let layout =
+            prepare_output_layout(&output_dir, "测试合流下载", "aweme-2", &options).unwrap();
+        let ffmpeg_path = match pack_manager::ensure_media_engine_installed() {
+            Ok(Some(path)) => path.to_str().map(|value| value.to_string()),
+            Ok(None) => None,
+            Err(_) => None,
+        };
+
+        let worker_store = Arc::clone(&task_store);
+        let worker_controllers = Arc::clone(&controller_store);
+        let worker = thread::spawn(move || {
+            dash_download_worker(
+                worker_store,
+                worker_controllers,
+                "task-dash".to_string(),
+                "测试合流下载".to_string(),
+                "1080P".to_string(),
+                sample_artifacts(None),
+                layout,
+                options,
+                format!("http://{address}/video.m4s"),
+                format!("http://{address}/audio.m4a"),
+                false,
+                None,
+                None,
+                None,
+                None,
+                ffmpeg_path,
+                Arc::new(TaskController::new(true, true)),
+            );
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut saw_intermediate_progress = false;
+        loop {
+            let tasks = task_store::list_tasks(&task_store);
+            if let Some(task) = tasks.iter().find(|task| task.id == "task-dash") {
+                if task.progress > 0 && task.progress < 100 {
+                    saw_intermediate_progress = true;
+                }
+
+                if task.status == "completed" {
+                    assert!(saw_intermediate_progress);
+                    let output_path = PathBuf::from(task.output_path.clone().unwrap());
+                    assert!(output_path.exists());
+                    assert_eq!(
+                        output_path.extension().and_then(|value| value.to_str()),
+                        Some("mp4")
+                    );
+                    break;
+                }
+
+                if task.status == "failed" {
+                    assert!(saw_intermediate_progress);
+                    assert!(
+                        task.message
+                            .as_deref()
+                            .is_some_and(|message| message
+                                .contains("Invalid data found when processing input")),
+                        "dash task failed unexpectedly: {:?}",
+                        task.message
+                    );
+                    break;
+                }
+            }
+
+            if Instant::now() > deadline {
+                panic!("dash task did not complete before deadline");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        worker.join().unwrap();
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
     fn persist_download_artifacts_writes_selected_sidecars_into_bundle_folder() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind test listener: {error}"),
+        };
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
@@ -2062,6 +3224,12 @@ mod tests {
                     vcodec: Some("avc1.640032".to_string()),
                     acodec: Some("none".to_string()),
                     tbr: Some(2509.0),
+                    url: Some("https://example.com/video.m4s".to_string()),
+                    protocol: Some("https".to_string()),
+                    http_headers: Some(RawHeaders {
+                        referer: Some("https://www.bilibili.com/".to_string()),
+                        user_agent: Some("Mozilla/5.0".to_string()),
+                    }),
                 },
                 RawFormat {
                     format_id: Some("30280".to_string()),
@@ -2072,6 +3240,12 @@ mod tests {
                     vcodec: Some("none".to_string()),
                     acodec: Some("mp4a.40.2".to_string()),
                     tbr: Some(319.0),
+                    url: Some("https://example.com/audio.m4s".to_string()),
+                    protocol: Some("https".to_string()),
+                    http_headers: Some(RawHeaders {
+                        referer: Some("https://www.bilibili.com/".to_string()),
+                        user_agent: Some("Mozilla/5.0".to_string()),
+                    }),
                 },
             ],
         );
@@ -2081,5 +3255,22 @@ mod tests {
         assert!(formats[0].requires_processing);
         assert!(formats[0].recommended);
         assert_eq!(formats[0].codec, "H.264");
+    }
+
+    #[test]
+    fn first_existing_path_skips_missing_candidates() {
+        let temp_dir = unique_test_dir();
+        fs::create_dir_all(&temp_dir).unwrap();
+        let existing = temp_dir.join("ffmpeg");
+        fs::write(&existing, b"binary").unwrap();
+
+        let selected = first_existing_path([
+            temp_dir.join("missing-1"),
+            existing.clone(),
+            temp_dir.join("missing-2"),
+        ]);
+
+        assert_eq!(selected, Some(existing));
+        let _ = fs::remove_dir_all(temp_dir);
     }
 }

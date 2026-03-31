@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import re
 import sys
 from datetime import datetime
@@ -25,6 +26,7 @@ DESKTOP_UA = (
 )
 DOUYIN_REFERER = "https://www.douyin.com/"
 IMAGE_AWEME_TYPES = {2, 68}
+PROGRESS_FILE = os.environ.get("STREAMVERSE_PROGRESS_FILE")
 
 if str(VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(VENDOR_ROOT))
@@ -50,6 +52,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     profile_parser.add_argument("--limit", type=int, default=24)
 
     return parser.parse_args(argv)
+
+
+def write_progress(current: int, total: int, message: str) -> None:
+    if not PROGRESS_FILE:
+        return
+
+    path = Path(PROGRESS_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "current": max(0, int(current)),
+                "total": max(int(total), int(current), 1),
+                "message": message,
+            },
+            ensure_ascii=False,
+        ),
+        "utf-8",
+    )
 
 
 def build_cookie_header(cookie_file: Path | None) -> str:
@@ -218,6 +239,7 @@ def collect_formats(detail: dict[str, Any], using_login: bool) -> list[dict[str,
                     "container": "MP4",
                     "noWatermark": True,
                     "requiresLogin": using_login,
+                    "requiresProcessing": False,
                     "recommended": False,
                     "directUrl": direct_url,
                     "referer": DOUYIN_REFERER,
@@ -270,12 +292,15 @@ def build_asset_from_detail(
 
     return {
         "awemeId": aweme_id,
+        "platform": "douyin",
         "sourceUrl": source_url,
         "title": title,
         "author": author,
         "durationSeconds": compute_duration_seconds(detail),
         "publishDate": format_publish_date(detail.get("create_time")),
         "caption": build_caption(detail, using_login, bool(formats)),
+        "categoryLabel": "图文笔记" if int(detail.get("aweme_type") or 0) in IMAGE_AWEME_TYPES else "普通视频",
+        "groupTitle": None,
         "coverUrl": extract_cover_url(detail),
         "coverGradient": "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))",
         "formats": formats,
@@ -307,21 +332,26 @@ def build_caption(detail: dict[str, Any], using_login: bool, has_video_formats: 
 
 
 async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:
+    write_progress(0, 4, "正在准备抖音解析环境…")
     patch_cookie_config(build_cookie_header(cookie_file))
+    write_progress(1, 4, "正在读取抖音作品信息…")
 
     aweme_id = await AwemeIdFetcher.get_aweme_id(url)
     crawler = DouyinWebCrawler()
     response = await crawler.fetch_one_video(aweme_id)
     detail = response.get("aweme_detail") or {}
+    write_progress(2, 4, "正在整理抖音可用清晰度…")
 
     asset = build_asset_from_detail(
         detail,
         source_url=build_source_url(detail, url),
         using_login=bool(cookie_file),
     )
+    write_progress(3, 4, "正在生成抖音预览结果…")
     if not asset:
         raise RuntimeError("当前链接是图文笔记或受限内容，暂时没有可下载的视频格式。")
 
+    write_progress(4, 4, "抖音作品解析完成。")
     return asset
 
 
@@ -330,7 +360,7 @@ async def analyze_profile(
 ) -> dict[str, Any]:
     patch_cookie_config(build_cookie_header(cookie_file))
     using_login = bool(cookie_file)
-    normalized_limit = max(1, min(limit, 100))
+    normalized_limit = max(1, min(limit, 2000))
 
     crawler = DouyinWebCrawler()
     sec_user_id = await crawler.get_sec_user_id(url)
@@ -349,6 +379,8 @@ async def analyze_profile(
         or sec_user_id
     )
     total_available = int(user.get("aweme_count") or 0)
+    progress_total = max(1, min(total_available or normalized_limit, normalized_limit))
+    write_progress(0, progress_total, "正在读取抖音主页作品…")
 
     items: list[dict[str, Any]] = []
     seen_aweme_ids: set[str] = set()
@@ -380,6 +412,7 @@ async def analyze_profile(
             )
             if asset:
                 items.append(asset)
+                write_progress(len(items), progress_total, f"已解析 {len(items)} 个抖音作品。")
                 if len(items) >= normalized_limit:
                     break
             else:
@@ -392,6 +425,8 @@ async def analyze_profile(
     if not items:
         raise RuntimeError("当前主页暂时没有可批量下载的视频作品，或需要更新登录状态后重试。")
 
+    write_progress(len(items), progress_total, "抖音主页解析完成。")
+
     return {
         "profileTitle": str(profile_title),
         "sourceUrl": url,
@@ -399,6 +434,7 @@ async def analyze_profile(
         "totalAvailable": total_available or len(items),
         "fetchedCount": len(items),
         "skippedCount": skipped_count,
+        "sessionCookieFile": str(cookie_file) if cookie_file else None,
         "items": items,
     }
 

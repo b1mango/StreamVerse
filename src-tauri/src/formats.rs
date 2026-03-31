@@ -68,12 +68,7 @@ pub fn pick_preferred_format(
 }
 
 fn same_profile(left: &VideoFormat, right: &VideoFormat) -> bool {
-    normalized(&left.label) == normalized(&right.label)
-        && normalized(&left.resolution) == normalized(&right.resolution)
-        && normalized(&left.codec) == normalized(&right.codec)
-        && normalized(&left.container) == normalized(&right.container)
-        && left.no_watermark == right.no_watermark
-        && left.requires_login == right.requires_login
+    quality_key(left) == quality_key(right) && left.requires_login == right.requires_login
 }
 
 fn normalized(value: &str) -> String {
@@ -96,8 +91,12 @@ fn profile_height(format: &VideoFormat) -> u32 {
 
 fn merge_formats(existing: VideoFormat, candidate: VideoFormat) -> VideoFormat {
     let prefer_candidate = candidate.recommended && !existing.recommended
+        || candidate.no_watermark && !existing.no_watermark
         || candidate.direct_url.is_some() && existing.direct_url.is_none()
+        || candidate.audio_direct_url.is_some() && existing.audio_direct_url.is_none()
         || candidate.bitrate_kbps > existing.bitrate_kbps
+        || (candidate.bitrate_kbps == existing.bitrate_kbps
+            && codec_priority(&candidate.codec) < codec_priority(&existing.codec))
         || (existing.id == "best" && candidate.id != "best");
 
     let (mut primary, secondary) = if prefer_candidate {
@@ -118,11 +117,50 @@ fn merge_formats(existing: VideoFormat, candidate: VideoFormat) -> VideoFormat {
     if primary.user_agent.is_none() {
         primary.user_agent = secondary.user_agent;
     }
+    if primary.audio_direct_url.is_none() {
+        primary.audio_direct_url = secondary.audio_direct_url;
+    }
+    if primary.audio_referer.is_none() {
+        primary.audio_referer = secondary.audio_referer;
+    }
+    if primary.audio_user_agent.is_none() {
+        primary.audio_user_agent = secondary.audio_user_agent;
+    }
     if primary.bitrate_kbps == 0 {
         primary.bitrate_kbps = secondary.bitrate_kbps;
     }
 
     primary
+}
+
+fn quality_key(format: &VideoFormat) -> String {
+    let height = profile_height(format);
+    if height > 0 {
+        return format!("H{height}");
+    }
+
+    format!(
+        "{}|{}",
+        normalized(&format.label),
+        normalized(&format.resolution)
+    )
+}
+
+fn codec_priority(value: &str) -> u8 {
+    let normalized = normalized(value);
+    if normalized.starts_with("H264") || normalized.starts_with("AVC") {
+        return 0;
+    }
+    if normalized.starts_with("H265") || normalized.starts_with("HEVC") {
+        return 1;
+    }
+    if normalized.starts_with("AV1") {
+        return 2;
+    }
+    if normalized.starts_with("VP9") {
+        return 3;
+    }
+    4
 }
 
 #[cfg(test)]
@@ -139,10 +177,11 @@ mod tests {
         ];
 
         let deduped = dedupe_formats(formats);
-        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped.len(), 1);
         assert!(deduped.iter().any(|format| format.recommended));
-        assert_eq!(deduped[0].bitrate_kbps, 4200);
-        assert_eq!(deduped[0].id, "fmt-2");
+        assert!(deduped[0].no_watermark);
+        assert_eq!(deduped[0].bitrate_kbps, 3000);
+        assert_eq!(deduped[0].id, "fmt-3");
     }
 
     #[test]
@@ -169,12 +208,9 @@ mod tests {
         let mut no_watermark = sample_format("fmt-2", true, false, 4800, false);
         no_watermark.label = "1080P 高码率".to_string();
 
-        let selected = pick_preferred_format(
-            &[standard, no_watermark.clone()],
-            "no_watermark",
-            false,
-        )
-        .unwrap();
+        let selected =
+            pick_preferred_format(&[standard, no_watermark.clone()], "no_watermark", false)
+                .unwrap();
 
         assert_eq!(selected.id, no_watermark.id);
     }
@@ -200,6 +236,9 @@ mod tests {
             direct_url: Some(format!("https://example.com/{id}.mp4")),
             referer: None,
             user_agent: None,
+            audio_direct_url: None,
+            audio_referer: None,
+            audio_user_agent: None,
         }
     }
 }

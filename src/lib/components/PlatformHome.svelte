@@ -1,41 +1,80 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import type { PlatformId } from "../types";
-  import { platformMeta } from "../options";
+  import type { ModuleId, ModuleRuntimeState } from "../types";
+  import { moduleCatalog, moduleOrder } from "../options";
 
-  const dispatch = createEventDispatcher<{ select: { platform: PlatformId } }>();
+  export let modules: ModuleRuntimeState[] = [];
 
-  function openPlatform(platform: PlatformId) {
-    dispatch("select", { platform });
+  const dispatch = createEventDispatcher<{
+    open: { moduleId: ModuleId };
+  }>();
+
+  function moduleState(moduleId: ModuleId) {
+    return (
+      modules.find((module) => module.id === moduleId) ?? {
+        id: moduleId,
+        installed: true,
+        enabled: true,
+        updateAvailable: false
+      }
+    );
+  }
+
+  function openModule(moduleId: ModuleId) {
+    const state = moduleState(moduleId);
+    if (!state.installed) {
+      return;
+    }
+
+    dispatch("open", { moduleId });
   }
 </script>
 
 <section class="platform-home panel">
   <div class="hero-copy">
-    <p class="eyebrow">Platform Hub</p>
-    <h2>先选择平台，再进入对应下载工作区</h2>
-    <p class="lede">
-      入口页只做一件事：让用户明确当前正在处理的是哪一个平台，避免把抖音、Bilibili 和 YouTube 的规则混在一个页面里。
-    </p>
+    <p class="eyebrow">Built-in Platforms</p>
+    <h2>选择功能</h2>
   </div>
 
   <div class="platform-grid">
-    {#each Object.entries(platformMeta) as [platform, meta]}
-      <button
-        class={`platform-card ${meta.accent}`}
-        onclick={() => openPlatform(platform as PlatformId)}
-        type="button"
-      >
+    {#each moduleOrder as moduleId}
+      {@const meta = moduleCatalog[moduleId]}
+      {@const state = moduleState(moduleId)}
+      <article class={`platform-card ${meta.accent} ${state.installed ? "" : "is-disabled"}`}>
         <div class="platform-card-head">
           <span class="chip subtle">{meta.badge}</span>
-          <span class="chip subtle">{meta.status}</span>
+          <span class={`chip ${state.installed ? "accent" : "subtle"}`}>
+            {state.installed ? "已内置" : "当前构建未包含"}
+          </span>
         </div>
 
         <div class="platform-card-copy">
           <strong>{meta.label}</strong>
           <p>{meta.description}</p>
         </div>
-      </button>
+
+        <div class="module-tags">
+          {#each meta.dependencyHints as item}
+            <span class="mini-tag">{item}</span>
+          {/each}
+          {#if state.currentVersion}
+            <span class="mini-tag">版本 {state.currentVersion}</span>
+          {:else if state.latestVersion}
+            <span class="mini-tag">版本 {state.latestVersion}</span>
+          {/if}
+        </div>
+
+        <div class="module-actions">
+          <button
+            class="primary-button"
+            disabled={!state.installed}
+            onclick={() => openModule(moduleId)}
+            type="button"
+          >
+            打开
+          </button>
+        </div>
+      </article>
     {/each}
   </div>
 </section>

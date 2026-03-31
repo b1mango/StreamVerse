@@ -1,11 +1,10 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
-  import type { DownloadMode, QualityPreference } from "../types";
+  import type { QualityPreference } from "../types";
 
   export let open = false;
   export let saveDirectoryDraft = "";
   export let cookieBrowser = "";
-  export let downloadMode: DownloadMode = "manual";
   export let qualityPreference: QualityPreference = "recommended";
   export let autoRevealInFinder = false;
   export let accountLabel = "未登录";
@@ -13,7 +12,6 @@
   export let settingsSaving = false;
   export let pickingDirectory = false;
   export let browserOptions: Array<{ value: string; label: string }> = [];
-  export let downloadModeOptions: Array<{ value: DownloadMode; label: string }> = [];
   export let qualityOptions: Array<{ value: QualityPreference; label: string }> = [];
 
   const dispatch = createEventDispatcher<{ close: void; save: void; pickDirectory: void }>();
@@ -54,22 +52,12 @@
         >
           {pickingDirectory ? "选择中…" : "选择目录"}
         </button>
-        <span class="meta-item subtle">新任务默认保存到这里</span>
       </div>
 
       <label class="settings-field">
         <span class="settings-label">登录源</span>
         <select class="settings-input" bind:value={cookieBrowser}>
           {#each browserOptions as option}
-            <option value={option.value}>{option.label}</option>
-          {/each}
-        </select>
-      </label>
-
-      <label class="settings-field">
-        <span class="settings-label">下载模式</span>
-        <select class="settings-input" bind:value={downloadMode}>
-          {#each downloadModeOptions as option}
             <option value={option.value}>{option.label}</option>
           {/each}
         </select>
@@ -90,13 +78,9 @@
       </label>
 
       <div class="settings-status">
-        <span class="meta-item">当前状态：{accountLabel}</span>
+        <span class="meta-item">{accountLabel}</span>
         <span class="meta-item">FFmpeg：{ffmpegAvailable ? "已检测到" : "未检测到"}</span>
       </div>
-
-      <p class="settings-help">
-        Bilibili 的高质量格式通常需要 FFmpeg 合并音视频流；抖音页面里的智能模式只会在单视频页直接触发下载。
-      </p>
 
       <div class="settings-submit">
         <button

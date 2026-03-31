@@ -111,6 +111,31 @@ export function clampBatchLimit(value: number) {
 }
 
 export function resolveErrorMessage(error: unknown) {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+
+  if (
+    message.includes("Only Python versions 3.10 and above are supported by yt-dlp") ||
+    message.includes("unsupported version of Python")
+  ) {
+    return "当前应用内置的 yt-dlp 与系统 Python 不兼容，请更新 Python 或重新安装应用后再试。";
+  }
+
+  if (message.includes("Traceback")) {
+    const importError = message.match(/ImportError:\s*([^\n]+)/);
+    if (importError?.[1]) {
+      return importError[1].trim();
+    }
+
+    const lines = message
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length) {
+      return lines.at(-1) ?? "操作失败，请稍后再试。";
+    }
+  }
+
   if (error instanceof Error) {
     return error.message;
   }
@@ -133,19 +158,20 @@ function normalizeFormatKey(value: string) {
     .replace(/[^A-Z0-9]/g, "");
 }
 
+function formatQualityKey(format: VideoFormat) {
+  const height = formatHeight(format);
+  if (height > 0) {
+    return `H${height}`;
+  }
+
+  return [normalizeFormatKey(format.label), normalizeFormatKey(format.resolution)].join("|");
+}
+
 function dedupeVisibleFormats(formats: VideoFormat[]) {
   const deduped = new Map<string, VideoFormat>();
 
   for (const format of formats) {
-    const key = [
-      normalizeFormatKey(format.label),
-      normalizeFormatKey(format.resolution),
-      normalizeFormatKey(format.codec),
-      normalizeFormatKey(format.container),
-      format.noWatermark ? "NOWM" : "WM",
-      format.requiresLogin ? "LOGIN" : "PUBLIC",
-      format.requiresProcessing ? "PROCESS" : "DIRECT"
-    ].join("|");
+    const key = [formatQualityKey(format), format.requiresLogin ? "LOGIN" : "PUBLIC"].join("|");
     const existing = deduped.get(key);
 
     if (!existing) {
@@ -155,8 +181,12 @@ function dedupeVisibleFormats(formats: VideoFormat[]) {
 
     const shouldReplace =
       (format.recommended && !existing.recommended) ||
+      (format.noWatermark && !existing.noWatermark) ||
       (Boolean(format.directUrl) && !existing.directUrl) ||
-      format.bitrateKbps > existing.bitrateKbps;
+      (Boolean(format.audioDirectUrl) && !existing.audioDirectUrl) ||
+      format.bitrateKbps > existing.bitrateKbps ||
+      (format.bitrateKbps === existing.bitrateKbps &&
+        codecPriority(format.codec) < codecPriority(existing.codec));
 
     if (shouldReplace) {
       deduped.set(key, format);
@@ -164,4 +194,21 @@ function dedupeVisibleFormats(formats: VideoFormat[]) {
   }
 
   return Array.from(deduped.values());
+}
+
+function codecPriority(value: string) {
+  const normalized = normalizeFormatKey(value);
+  if (normalized.startsWith("H264")) {
+    return 0;
+  }
+  if (normalized.startsWith("H265") || normalized.startsWith("HEVC")) {
+    return 1;
+  }
+  if (normalized.startsWith("AV1")) {
+    return 2;
+  }
+  if (normalized.startsWith("VP9")) {
+    return 3;
+  }
+  return 4;
 }

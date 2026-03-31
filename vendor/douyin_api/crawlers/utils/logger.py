@@ -33,6 +33,8 @@
 # ==============================================================================
 
 
+import os
+import tempfile
 import threading
 import time
 import logging
@@ -151,8 +153,15 @@ def log_setup(log_to_console=True):
         return logger
 
     # 创建临时的日志目录
-    temp_log_dir = Path("./logs")
-    temp_log_dir.mkdir(exist_ok=True)
+    temp_log_dir = Path(
+        os.environ.get("STREAMVERSE_LOG_DIR")
+        or (Path.home() / ".streamverse" / "logs" / "douyin-helper")
+    )
+    try:
+        temp_log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        temp_log_dir = Path(tempfile.gettempdir()) / "streamverse-logs" / "douyin-helper"
+        temp_log_dir.mkdir(parents=True, exist_ok=True)
 
     # 初始化日志管理器
     log_manager = LogManager()

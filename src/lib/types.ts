@@ -1,6 +1,12 @@
 export type AuthState = "guest" | "active" | "expired";
-export type DownloadMode = "manual" | "smart";
+export type DownloadMode = "manual";
 export type PlatformId = "douyin" | "bilibili" | "youtube";
+export type ModuleId =
+  | "douyin-single"
+  | "douyin-profile"
+  | "bilibili-single"
+  | "bilibili-profile"
+  | "youtube-single";
 export type QualityPreference =
   | "recommended"
   | "highest"
@@ -38,6 +44,9 @@ export interface VideoFormat {
   directUrl?: string | null;
   referer?: string | null;
   userAgent?: string | null;
+  audioDirectUrl?: string | null;
+  audioReferer?: string | null;
+  audioUserAgent?: string | null;
 }
 
 export interface VideoAsset {
@@ -49,6 +58,8 @@ export interface VideoAsset {
   durationSeconds: number;
   publishDate: string;
   caption: string;
+  categoryLabel?: string | null;
+  groupTitle?: string | null;
   coverUrl?: string | null;
   coverGradient: string;
   formats: VideoFormat[];
@@ -67,6 +78,7 @@ export interface DownloadTask {
   outputPath?: string;
   supportsPause: boolean;
   supportsCancel: boolean;
+  canRetry: boolean;
 }
 
 export interface AppMetrics {
@@ -74,6 +86,23 @@ export interface AppMetrics {
   successRate: string;
   availableFormats: number;
   maxQuality: string;
+}
+
+export interface ModuleRuntimeState {
+  id: ModuleId;
+  installed: boolean;
+  enabled: boolean;
+  packId?: string | null;
+  currentVersion?: string | null;
+  latestVersion?: string | null;
+  sizeBytes?: number | null;
+  sourceKind?: string | null;
+  updateAvailable: boolean;
+}
+
+export interface ModuleInstallProgress {
+  percent: number;
+  label: string;
 }
 
 export interface BootstrapState {
@@ -86,6 +115,7 @@ export interface BootstrapState {
   autoRevealInFinder: boolean;
   ffmpegAvailable: boolean;
   metrics: AppMetrics;
+  modules: ModuleRuntimeState[];
   preview: VideoAsset;
   tasks: DownloadTask[];
 }
@@ -109,6 +139,7 @@ export interface SettingsProfile {
 
 export interface AnalyzeInputPayload {
   rawInput: string;
+  sessionId?: string | null;
 }
 
 export interface CreateTaskPayload {
@@ -127,6 +158,9 @@ export interface CreateTaskPayload {
   directUrl?: string | null;
   referer?: string | null;
   userAgent?: string | null;
+  audioDirectUrl?: string | null;
+  audioReferer?: string | null;
+  audioUserAgent?: string | null;
 }
 
 export interface SaveSettingsPayload {
@@ -137,10 +171,21 @@ export interface SaveSettingsPayload {
   autoRevealInFinder: boolean;
 }
 
+export interface SetModuleEnabledPayload {
+  moduleId: ModuleId;
+  enabled: boolean;
+}
+
+export interface BatchItemSelection {
+  asset: VideoAsset;
+  selectedFormatId?: string | null;
+}
+
 export interface CreateProfileDownloadTasksPayload {
   profileTitle: string;
   sourceUrl: string;
-  items: VideoAsset[];
+  items: BatchItemSelection[];
+  sessionCookieFile?: string | null;
   saveDirectoryOverride?: string | null;
   downloadOptions: DownloadContentSelection;
 }
@@ -148,6 +193,18 @@ export interface CreateProfileDownloadTasksPayload {
 export interface AnalyzeProfilePayload {
   rawInput: string;
   limit?: number;
+  sessionId?: string | null;
+}
+
+export interface AnalysisProgress {
+  current: number;
+  total: number;
+  message: string;
+}
+
+export interface BrowserLaunchResult {
+  port: number;
+  browser: string;
 }
 
 export interface ProfileBatch {
@@ -156,6 +213,7 @@ export interface ProfileBatch {
   totalAvailable: number;
   fetchedCount: number;
   skippedCount: number;
+  sessionCookieFile?: string | null;
   items: VideoAsset[];
 }
 
