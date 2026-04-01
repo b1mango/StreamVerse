@@ -31,8 +31,6 @@
   export let placeholder = "粘贴主页分享文案或主页链接";
   export let analyzeLabel = "浏览器读取列表";
   export let analyzeLoadingLabel = "读取主页…";
-  export let pasteLabel = "粘贴并读取";
-  export let pasteLoadingLabel = "读取中…";
   export let enqueueLabel = "将所选作品加入队列";
   export let enqueuingLabel = "加入队列中…";
   export let itemLabel = "作品";
@@ -454,7 +452,7 @@
         </label>
       </div>
 
-      <div class="profile-list" bind:this={profileListEl} onmousedown={onDragStart}>
+      <div class="profile-list" bind:this={profileListEl} onmousedown={onDragStart} role="listbox" aria-label="Profile list" tabindex="0">
         {#if dragActive}
           <div class="drag-select-rect" style={dragRectStyle}></div>
         {/if}

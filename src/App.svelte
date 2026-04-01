@@ -1154,8 +1154,6 @@
             heading={$t("douyin.profileHeading")}
             heroEyebrow="Profile Batch"
             itemLabel={$t("douyin.itemLabel")}
-            pasteLabel={$t("douyin.pasteLabel")}
-            pasteLoadingLabel={$t("douyin.pasteLoading")}
             preparing={openingDouyinProfileBrowser}
             prepareLabel={$t("douyin.openBrowser")}
             prepareLoadingLabel={$t("douyin.openingBrowser")}
