@@ -31,6 +31,11 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "icon": [
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
     "resources": {
       "../node_modules/ffmpeg-static/ffmpeg*": "bin/",
       "../registry/plugins.json": "registry/plugins.json",
