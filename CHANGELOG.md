@@ -2,7 +2,33 @@
 
 All notable changes to `StreamVerse` will be documented in this file.
 
-## [Unreleased]
+## [0.1.2] — 2026-04-01
+
+### 新增
+- 解析进度模态弹窗：批量解析时显示实时进度条，完成后播放打勾动画（1.2 秒后自动关闭）
+- 新增 `download_history.rs` 下载历史模块
+- 新增 `i18n.ts` 前端国际化模块
+- 透明标题栏（`titleBarStyle: Overlay` + `hiddenTitle`），窗口顶部拖动区域
+
+### 修复
+- **UI 阻塞**：`analyze_profile_input` / `collect_profile_browser` 从 `std::thread::spawn` + `join` 改为 `tauri::async_runtime::spawn_blocking`，彻底解决批量解析和模块切换卡死问题
+- **B站"访问权限不足"**：主页批量解析改为先请求 nav 获取 WBI 密钥，再对 profile info 请求做 WBI 签名
+- **抖音 JSON 解析失败**：vendor 脚本 `print()` 污染 stdout，改为从 stdout 提取最后一行 JSON
+- **进度条不满**：CSS transition + 组件提前卸载导致进度条永远到不了 100%，增加 320ms 延迟
+- **设置保存冻结**：`save_settings` 改为异步
+- **格式标签不响应**：Svelte 5 模板函数调用对闭包变量不自动响应，修复响应式
+- **B站缩略图跨域**：通过 Rust `fetch_thumbnail` 命令代理请求并返回 base64
+- **浅色模式样式**：修复 light 模式下多处 CSS 异常
+
+### 变更
+- B站并发数从 10 提升到 20（`FETCH_CONCURRENCY = 20`）
+- 解析进度从内嵌面板移至全屏模态弹窗
+- 默认主题 `dark`、默认语言 `zh-CN`（前后端统一）
+- 移除输入框旁的粘贴按钮
+
+---
+
+## [0.1.1] — 2026-03-31
 
 ### Added
 
