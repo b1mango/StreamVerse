@@ -1,5 +1,22 @@
 # StreamVerse
 
+<p align="center">
+  <img src="src-tauri/icons/icon.png" alt="StreamVerse Logo" width="128" height="128" />
+</p>
+
+<p align="center">
+  <strong>多平台视频聚合下载工具</strong><br/>
+  Tauri 2 + Rust + Svelte 5 · macOS & Windows
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.1.2-brightgreen" alt="version" />
+  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-blue" alt="platforms" />
+  <img src="https://img.shields.io/badge/license-MIT-yellow" alt="license" />
+</p>
+
+---
+
 `StreamVerse` 是一个面向桌面的多平台视频下载工具，专注于更快的解析体验、更清晰的批量流程，以及更可控的下载队列。
 
 项目基于 `Tauri 2 + Rust + Svelte 5`，当前已经完成 `抖音`、`Bilibili`、`YouTube` 三个平台的核心下载能力，并通过模块化 pack 架构把平台能力、浏览器桥接和媒体运行时拆开管理。
