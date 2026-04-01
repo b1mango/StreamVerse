@@ -19,7 +19,7 @@ USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 )
-FETCH_CONCURRENCY = 10
+FETCH_CONCURRENCY = 20
 PROGRESS_FILE = os.environ.get("STREAMVERSE_PROGRESS_FILE")
 MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
@@ -662,13 +662,14 @@ async def main_async(args: argparse.Namespace) -> int:
         nav_data = ensure_api_ok(nav_response, nav_payload, "读取 Bilibili 导航信息失败。")
         img_key, sub_key = get_wbi_keys({"data": nav_data})
 
-        profile_data = await fetch_json(
+        profile_data_raw = await fetch_json(
             client,
             "https://api.bilibili.com/x/space/wbi/acc/info",
             "读取 UP 主信息失败。",
             params=sign_wbi_params({"mid": mid}, img_key, sub_key),
         )
-        profile_title = str(profile_data.get("name") or "UP 主").strip() or "UP 主"
+
+        profile_title = str(profile_data_raw.get("name") or "UP 主").strip() or "UP 主"
         tracker.set_profile_title(profile_title)
         tracker.emit(f"正在读取 {profile_title} 的视频列表…")
 

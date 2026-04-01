@@ -1,8 +1,8 @@
 #[cfg(test)]
 use crate::VideoFormat;
 use crate::{
-    pack_manager, parser, platforms, task_store, DownloadContentSelection, DownloadTask,
-    TaskReplayRequest,
+    download_history, pack_manager, parser, platforms, task_store, DownloadContentSelection,
+    DownloadTask, TaskReplayRequest,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, REFERER, USER_AGENT};
@@ -27,6 +27,10 @@ const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default,-ios,-androi
 
 static PREFERRED_EXTERNAL_YTDLP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 static PREFERRED_JS_RUNTIME: OnceLock<Option<String>> = OnceLock::new();
+static DOWNLOAD_SEMAPHORE: OnceLock<Arc<(Mutex<u32>, std::sync::Condvar)>> = OnceLock::new();
+static MAX_CONCURRENT: OnceLock<AtomicU64> = OnceLock::new();
+static NETWORK_PROXY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static NETWORK_SPEED_LIMIT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 #[derive(Clone)]
 struct DownloadArtifacts {
@@ -248,6 +252,65 @@ pub fn new_task_controller_store() -> TaskControllerStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+pub fn set_max_concurrent_downloads(max: u32) {
+    let max = max.max(1).min(10) as u64;
+    MAX_CONCURRENT
+        .get_or_init(|| AtomicU64::new(max))
+        .store(max, Ordering::Relaxed);
+    let _ = DOWNLOAD_SEMAPHORE.get_or_init(|| {
+        Arc::new((Mutex::new(0), std::sync::Condvar::new()))
+    });
+}
+
+pub fn set_network_settings(proxy: Option<String>, speed_limit: Option<String>) {
+    *NETWORK_PROXY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = proxy;
+    *NETWORK_SPEED_LIMIT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = speed_limit;
+}
+
+fn current_proxy() -> Option<String> {
+    NETWORK_PROXY
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|g| g.clone())
+}
+
+fn current_speed_limit() -> Option<String> {
+    NETWORK_SPEED_LIMIT
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|g| g.clone())
+}
+
+fn acquire_download_slot() {
+    let max = MAX_CONCURRENT
+        .get()
+        .map(|v| v.load(Ordering::Relaxed) as u32)
+        .unwrap_or(3);
+    if let Some(sem) = DOWNLOAD_SEMAPHORE.get() {
+        let (lock, cvar) = sem.as_ref();
+        let mut active = lock.lock().unwrap();
+        while *active >= max {
+            active = cvar.wait(active).unwrap();
+        }
+        *active += 1;
+    }
+}
+
+fn release_download_slot() {
+    if let Some(sem) = DOWNLOAD_SEMAPHORE.get() {
+        let (lock, cvar) = sem.as_ref();
+        let mut active = lock.lock().unwrap();
+        *active = active.saturating_sub(1);
+        cvar.notify_one();
+    }
+}
+
 pub fn download_video(
     task_store: task_store::TaskStore,
     controller_store: TaskControllerStore,
@@ -407,6 +470,7 @@ pub fn download_video(
     if let Some(direct_url) = direct_url {
         if let Some(audio_direct_url) = audio_direct_url {
             thread::spawn(move || {
+                acquire_download_slot();
                 dash_download_worker(
                     task_store,
                     controller_store,
@@ -426,9 +490,11 @@ pub fn download_video(
                     ffmpeg_path,
                     controller,
                 );
+                release_download_slot();
             });
         } else {
             thread::spawn(move || {
+                acquire_download_slot();
                 direct_download_worker(
                     task_store,
                     controller_store,
@@ -444,6 +510,7 @@ pub fn download_video(
                     user_agent,
                     controller,
                 );
+                release_download_slot();
             });
         }
 
@@ -465,11 +532,13 @@ pub fn download_video(
     let output_template_text = output_template.to_string_lossy().to_string();
 
     thread::spawn(move || {
+        acquire_download_slot();
         let artifacts = artifacts.clone();
         let ytdlp_binary = match resolve_ytdlp_path() {
             Ok(path) => path,
             Err(error) => {
                 fail_task(&task_store, &task_id, error);
+                release_download_slot();
                 return;
             }
         };
@@ -503,6 +572,7 @@ pub fn download_video(
 
         append_platform_ytdlp_args(&mut command, &platform_text);
         append_ffmpeg_args(&mut command, ffmpeg_path.as_deref());
+        append_network_args(&mut command, current_proxy().as_deref(), current_speed_limit().as_deref());
         command.arg("--format").arg(&format_id_text);
         append_auth_args(
             &mut command,
@@ -714,6 +784,12 @@ pub fn download_video(
                     let _ = open_in_file_manager(&artifact_summary.destination_path, false);
                 }
             }
+
+            download_history::record_download(
+                &task_platform,
+                &artifacts.asset_id,
+                &title,
+            );
         } else {
             let reason = stderr_lines
                 .lock()
@@ -727,6 +803,7 @@ pub fn download_video(
             unregister_controller(&controller_store, &task_id);
             fail_task(&task_store, &task_id, reason);
         }
+        release_download_slot();
     });
 
     Ok(task)
@@ -807,6 +884,8 @@ fn metadata_only_worker(
             let _ = open_in_file_manager(path, output_layout.bundle_dir.is_none());
         }
     }
+
+    download_history::record_download(&artifacts.platform, &artifacts.asset_id, &artifacts.title);
 }
 
 fn dash_message(video_finished: bool, audio_finished: bool) -> &'static str {
@@ -1177,6 +1256,8 @@ fn direct_download_worker(
             let _ = open_in_file_manager(path, output_layout.bundle_dir.is_none());
         }
     }
+
+    download_history::record_download(&artifacts.platform, &artifacts.asset_id, &artifacts.title);
 }
 
 fn dash_download_worker(
@@ -1666,6 +1747,8 @@ fn dash_download_worker(
             let _ = open_in_file_manager(path, output_layout.bundle_dir.is_none());
         }
     }
+
+    download_history::record_download(&artifacts.platform, &artifacts.asset_id, &artifacts.title);
 }
 
 fn ensure_ytdlp_available() -> Result<(), String> {
@@ -2396,6 +2479,15 @@ fn append_platform_ytdlp_args(command: &mut Command, platform: &str) {
         .arg(YOUTUBE_EXTRACTOR_ARGS);
 }
 
+fn append_network_args(command: &mut Command, proxy_url: Option<&str>, speed_limit: Option<&str>) {
+    if let Some(proxy) = proxy_url.filter(|v| !v.trim().is_empty()) {
+        command.arg("--proxy").arg(proxy);
+    }
+    if let Some(limit) = speed_limit.filter(|v| !v.trim().is_empty()) {
+        command.arg("--limit-rate").arg(limit);
+    }
+}
+
 fn extend_runtime_path(command: &mut Command) {
     let mut entries = Vec::<PathBuf>::new();
 
@@ -2563,6 +2655,7 @@ fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             audio_direct_url: None,
             audio_referer: None,
             audio_user_agent: None,
+            file_size_bytes: None,
         })
         .collect::<Vec<_>>();
 
@@ -2595,6 +2688,7 @@ fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             audio_direct_url: None,
             audio_referer: None,
             audio_user_agent: None,
+            file_size_bytes: None,
         });
     }
 
@@ -2642,6 +2736,7 @@ fn map_bilibili_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             audio_direct_url: None,
             audio_referer: None,
             audio_user_agent: None,
+            file_size_bytes: None,
         });
     }
 
@@ -2690,6 +2785,7 @@ fn build_video_format(
         audio_direct_url: best_audio.and_then(direct_media_url),
         audio_referer: best_audio.and_then(format_referer),
         audio_user_agent: best_audio.and_then(format_user_agent),
+        file_size_bytes: None,
     }
 }
 

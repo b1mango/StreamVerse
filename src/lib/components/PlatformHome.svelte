@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
+  import { t } from "../i18n";
   import type { ModuleId, ModuleRuntimeState } from "../types";
   import { moduleCatalog, moduleOrder } from "../options";
 
@@ -33,7 +34,7 @@
 <section class="platform-home panel">
   <div class="hero-copy">
     <p class="eyebrow">Built-in Platforms</p>
-    <h2>选择功能</h2>
+    <h2>{$t("home.title")}</h2>
   </div>
 
   <div class="platform-grid">
@@ -44,13 +45,13 @@
         <div class="platform-card-head">
           <span class="chip subtle">{meta.badge}</span>
           <span class={`chip ${state.installed ? "accent" : "subtle"}`}>
-            {state.installed ? "已内置" : "当前构建未包含"}
+            {state.installed ? $t("home.installed") : $t("home.notInstalled")}
           </span>
         </div>
 
         <div class="platform-card-copy">
-          <strong>{meta.label}</strong>
-          <p>{meta.description}</p>
+          <strong>{$t("module." + moduleId + ".label")}</strong>
+          <p>{$t("module." + moduleId + ".description")}</p>
         </div>
 
         <div class="module-tags">
@@ -58,9 +59,9 @@
             <span class="mini-tag">{item}</span>
           {/each}
           {#if state.currentVersion}
-            <span class="mini-tag">版本 {state.currentVersion}</span>
+            <span class="mini-tag">{$t("home.version")} {state.currentVersion}</span>
           {:else if state.latestVersion}
-            <span class="mini-tag">版本 {state.latestVersion}</span>
+            <span class="mini-tag">{$t("home.version")} {state.latestVersion}</span>
           {/if}
         </div>
 
@@ -71,7 +72,7 @@
             onclick={() => openModule(moduleId)}
             type="button"
           >
-            打开
+            {$t("home.open")}
           </button>
         </div>
       </article>

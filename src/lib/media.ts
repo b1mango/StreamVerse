@@ -96,6 +96,21 @@ export function formatDuration(totalSeconds: number) {
     .padStart(2, "0")}`;
 }
 
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`;
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+export function estimateFileSize(bitrateKbps: number, durationSeconds: number): number | null {
+  if (!bitrateKbps || !durationSeconds) return null;
+  return Math.round((bitrateKbps * 1000 * durationSeconds) / 8);
+}
+
 export function finishedTaskCount(items: DownloadTask[]) {
   return items.filter((task) =>
     ["completed", "failed", "cancelled"].includes(task.status)

@@ -36,6 +36,13 @@ pub struct AppSettings {
     pub download_mode: String,
     pub quality_preference: String,
     pub auto_reveal_in_finder: bool,
+    pub max_concurrent_downloads: u32,
+    pub proxy_url: Option<String>,
+    pub speed_limit: Option<String>,
+    pub auto_update: bool,
+    pub theme: String,
+    pub notify_on_complete: bool,
+    pub language: String,
     pub modules: BTreeMap<String, ModuleSetting>,
 }
 
@@ -47,6 +54,13 @@ impl Default for AppSettings {
             download_mode: "manual".to_string(),
             quality_preference: "recommended".to_string(),
             auto_reveal_in_finder: false,
+            max_concurrent_downloads: 3,
+            proxy_url: None,
+            speed_limit: None,
+            auto_update: false,
+            theme: "dark".to_string(),
+            notify_on_complete: true,
+            language: "zh-CN".to_string(),
             modules: default_modules(),
         }
     }
@@ -121,6 +135,43 @@ pub fn normalize_quality_preference(input: String) -> Result<String, String> {
     match normalized.as_str() {
         "recommended" | "highest" | "smallest" | "no_watermark" => Ok(normalized),
         _ => Err("默认清晰度策略无效。".to_string()),
+    }
+}
+
+pub fn normalize_max_concurrent(input: u32) -> u32 {
+    input.clamp(1, 10)
+}
+
+pub fn normalize_proxy_url(input: Option<String>) -> Option<String> {
+    input
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub fn normalize_speed_limit(input: Option<String>) -> Option<String> {
+    input
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub fn normalize_theme(input: String) -> String {
+    let normalized = input.trim().to_lowercase();
+    match normalized.as_str() {
+        "dark" | "light" => normalized,
+        _ => "dark".to_string(),
+    }
+}
+
+pub fn normalize_language(input: String) -> String {
+    let normalized = input.trim().to_lowercase();
+    match normalized.as_str() {
+        "zh-cn" => "zh-CN".to_string(),
+        "en" => "en".to_string(),
+        _ => "zh-CN".to_string(),
     }
 }
 

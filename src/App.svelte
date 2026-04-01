@@ -6,10 +6,12 @@
   import SharedDirectoryBar from "./lib/components/SharedDirectoryBar.svelte";
   import SingleVideoWorkspace from "./lib/components/SingleVideoWorkspace.svelte";
   import TaskQueuePanel from "./lib/components/TaskQueuePanel.svelte";
+  import { setLanguage, t, tRaw } from "./lib/i18n";
   import {
     analyzeInput,
     analyzeProfileInput,
     cancelDownloadTask,
+    checkDownloadHistory,
     clearAnalysisProgress,
     collectProfileBrowser,
     clearFinishedTasks,
@@ -48,6 +50,7 @@
     DownloadContentSelection,
     DownloadMode,
     DownloadTask,
+    LanguageCode,
     ModuleId,
     ModuleRuntimeState,
     PlatformId,
@@ -55,6 +58,7 @@
     BrowserLaunchResult,
     QualityPreference,
     SettingsProfile,
+    ThemeMode,
     VideoAsset,
     VideoFormat
   } from "./lib/types";
@@ -72,6 +76,11 @@
   let tasks: DownloadTask[] = [];
   let pollTimer: number | undefined;
   let pollingTasks = false;
+
+  let analysisModalOpen = false;
+  let analysisModalProgress: AnalysisProgress | null = null;
+  let analysisModalLabel = "";
+  let analysisModalDone = false;
 
   let douyinSingleInput = "";
   let douyinSinglePreview: VideoAsset | null = null;
@@ -93,6 +102,7 @@
   let enqueuingDouyinProfile = false;
   let pastingDouyinProfile = false;
   let douyinProfileBrowserSession: BrowserLaunchResult | null = null;
+  let douyinDownloadedAssetIds: string[] = [];
 
   let bilibiliInput = "";
   let bilibiliPreview: VideoAsset | null = null;
@@ -111,6 +121,7 @@
   let bilibiliProfileAnalysisProgress: AnalysisProgress | null = null;
   let enqueuingBilibiliProfile = false;
   let pastingBilibiliProfile = false;
+  let bilibiliDownloadedAssetIds: string[] = [];
 
   let youtubeInput = "";
   let youtubePreview: VideoAsset | null = null;
@@ -129,10 +140,56 @@
   let downloadMode: DownloadMode = "manual";
   let qualityPreference: QualityPreference = "recommended";
   let autoRevealInFinder = false;
+  let maxConcurrentDownloads = 3;
+  let proxyUrl = "";
+  let speedLimit = "";
+  let autoUpdate = false;
+  let theme: ThemeMode = "dark";
+  let notifyOnComplete = true;
+  let language: LanguageCode = "zh-CN";
   let taskActionPendingIds: string[] = [];
+
+  import {
+    isPermissionGranted,
+    requestPermission,
+    sendNotification
+  } from "@tauri-apps/plugin-notification";
 
   const isDesktopRuntime =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+  let completedTaskIds = new Set<string>();
+
+  async function notifyIfNewCompletions(newTasks: DownloadTask[]) {
+    if (!notifyOnComplete || !isDesktopRuntime) return;
+    const newlyCompleted = newTasks.filter(
+      (t) => t.status === "completed" && !completedTaskIds.has(t.id)
+    );
+    if (!newlyCompleted.length) return;
+
+    for (const t of newlyCompleted) {
+      completedTaskIds.add(t.id);
+    }
+
+    let permissionGranted = await isPermissionGranted();
+    if (!permissionGranted) {
+      const permission = await requestPermission();
+      permissionGranted = permission === "granted";
+    }
+    if (!permissionGranted) return;
+
+    if (newlyCompleted.length === 1) {
+      sendNotification({
+        title: tRaw("notify.downloadComplete"),
+        body: newlyCompleted[0].title ?? tRaw("notify.taskCompleted")
+      });
+    } else {
+      sendNotification({
+        title: tRaw("notify.downloadComplete"),
+        body: `${newlyCompleted.length} ${tRaw("notify.tasksCompleted")}`
+      });
+    }
+  }
 
   onMount(() => {
     void initialize();
@@ -149,6 +206,13 @@
     tasks = bootstrap.tasks;
     moduleStates = bootstrap.modules;
     syncSettings(bootstrap);
+
+    // Seed completed IDs so we don't notify for already-completed tasks on load
+    for (const t of tasks) {
+      if (t.status === "completed") {
+        completedTaskIds.add(t.id);
+      }
+    }
 
     if (!isDesktopRuntime) {
       douyinSinglePreview = bootstrap.preview;
@@ -169,7 +233,9 @@
 
         pollingTasks = true;
         try {
-          tasks = await listDownloadTasks();
+          const freshTasks = await listDownloadTasks();
+          void notifyIfNewCompletions(freshTasks);
+          tasks = freshTasks;
         } finally {
           pollingTasks = false;
         }
@@ -186,6 +252,26 @@
     downloadMode = next.downloadMode;
     qualityPreference = next.qualityPreference;
     autoRevealInFinder = next.autoRevealInFinder;
+    maxConcurrentDownloads = next.maxConcurrentDownloads;
+    proxyUrl = next.proxyUrl ?? "";
+    speedLimit = next.speedLimit ?? "";
+    autoUpdate = next.autoUpdate;
+    theme = next.theme;
+    notifyOnComplete = next.notifyOnComplete;
+    language = next.language;
+    applyTheme(next.theme);
+    setLanguage(next.language);
+  }
+
+  function applyTheme(mode: ThemeMode) {
+    const root = document.documentElement;
+    root.classList.add("no-transition");
+    root.setAttribute("data-theme", mode);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        root.classList.remove("no-transition");
+      });
+    });
   }
 
   function clearNotices() {
@@ -245,18 +331,28 @@
 
   async function withAnalysisProgress<T>(
     setProgress: (progress: AnalysisProgress | null) => void,
-    runner: (sessionId: string) => Promise<T>
+    runner: (sessionId: string) => Promise<T>,
+    modalLabel?: string
   ): Promise<T> {
     const sessionId = createAnalysisSessionId();
     let pollId: number | undefined;
-    setProgress({ current: 0, total: 1, message: "准备解析…" });
+    const initialProgress: AnalysisProgress = { current: 0, total: 1, message: "准备解析…" };
+    setProgress(initialProgress);
+
+    if (modalLabel) {
+      analysisModalLabel = modalLabel;
+      analysisModalProgress = initialProgress;
+      analysisModalOpen = true;
+    }
 
     if (isDesktopRuntime) {
       pollId = window.setInterval(async () => {
         try {
           const next = await getAnalysisProgress(sessionId);
           if (next) {
-            setProgress(normalizeAnalysisProgress(next));
+            const normalized = normalizeAnalysisProgress(next);
+            setProgress(normalized);
+            if (modalLabel) analysisModalProgress = normalized;
           }
         } catch {}
       }, 180);
@@ -272,12 +368,23 @@
         try {
           const finalProgress = await getAnalysisProgress(sessionId);
           if (finalProgress) {
-            setProgress(normalizeAnalysisProgress(finalProgress));
+            const normalized = normalizeAnalysisProgress(finalProgress);
+            setProgress(normalized);
+            if (modalLabel) {
+              analysisModalProgress = normalized;
+              analysisModalDone = true;
+              await new Promise((r) => setTimeout(r, 1200));
+            }
           }
         } catch {}
         try {
           await clearAnalysisProgress(sessionId);
         } catch {}
+      }
+      if (modalLabel) {
+        analysisModalOpen = false;
+        analysisModalProgress = null;
+        analysisModalDone = false;
       }
     }
   }
@@ -365,12 +472,21 @@
             rawInput: douyinProfileInput,
             port,
             sessionId
-          })
+          }),
+        "正在读取抖音主页作品…"
       );
       douyinProfilePreview = result;
       douyinSelectedProfileIds = result.items.map((item) => item.assetId);
       douyinSelectedProfileFormatIds = buildBatchFormatSelections(result.items);
       successMessage = `已读取 ${result.fetchedCount} 个作品。`;
+      try {
+        douyinDownloadedAssetIds = await checkDownloadHistory(
+          "douyin",
+          result.items.map((item) => item.assetId)
+        );
+      } catch {
+        douyinDownloadedAssetIds = [];
+      }
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
@@ -411,7 +527,8 @@
           analyzeProfileInput({
             rawInput: bilibiliProfileInput,
             sessionId
-          })
+          }),
+        "正在读取 Bilibili 主页视频…"
       );
 
       if (result.items.some((item) => item.platform !== "bilibili")) {
@@ -422,6 +539,14 @@
       bilibiliSelectedProfileIds = result.items.map((item) => item.assetId);
       bilibiliSelectedProfileFormatIds = buildBatchFormatSelections(result.items);
       successMessage = `已读取 ${result.fetchedCount} 个视频。`;
+      try {
+        bilibiliDownloadedAssetIds = await checkDownloadHistory(
+          "bilibili",
+          result.items.map((item) => item.assetId)
+        );
+      } catch {
+        bilibiliDownloadedAssetIds = [];
+      }
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
@@ -782,8 +907,10 @@
       return;
     }
 
-    settingsSaving = true;
     clearNotices();
+
+    // Close panel immediately — visual settings (theme, language) are already previewed
+    settingsOpen = false;
 
     try {
       const nextSettings = await saveSettings({
@@ -791,7 +918,14 @@
         saveDirectory: saveDirectoryDraft,
         downloadMode,
         qualityPreference,
-        autoRevealInFinder
+        autoRevealInFinder,
+        maxConcurrentDownloads,
+        proxyUrl: proxyUrl || null,
+        speedLimit: speedLimit || null,
+        autoUpdate,
+        theme,
+        notifyOnComplete,
+        language
       });
 
       bootstrap = {
@@ -803,17 +937,20 @@
         downloadMode: nextSettings.downloadMode,
         qualityPreference: nextSettings.qualityPreference,
         autoRevealInFinder: nextSettings.autoRevealInFinder,
+        maxConcurrentDownloads: nextSettings.maxConcurrentDownloads,
+        proxyUrl: nextSettings.proxyUrl,
+        speedLimit: nextSettings.speedLimit,
+        autoUpdate: nextSettings.autoUpdate,
+        theme: nextSettings.theme,
+        notifyOnComplete: nextSettings.notifyOnComplete,
+        language: nextSettings.language,
         ffmpegAvailable: nextSettings.ffmpegAvailable
       };
-      syncSettings(nextSettings);
-      settingsOpen = false;
-      successMessage = "设置已保存。";
+      successMessage = $t("app.settingsSaved");
     } catch (error) {
       bootstrap = await getBootstrapState();
       syncSettings(bootstrap);
       errorMessage = resolveErrorMessage(error);
-    } finally {
-      settingsSaving = false;
     }
   }
 
@@ -885,13 +1022,11 @@
   }
 
   function currentQualityLabel() {
-    return (
-      qualityOptions.find((item) => item.value === qualityPreference)?.label ?? "推荐优先"
-    );
+    return tRaw("quality." + qualityPreference) || "推荐优先";
   }
 
   function activeModuleTitle() {
-    return activeModule ? moduleCatalog[activeModule].label : "StreamVerse";
+    return activeModule ? tRaw("module." + activeModule + ".label") : "StreamVerse";
   }
 </script>
 
@@ -899,7 +1034,7 @@
   <main class="loading-shell">
     <div class="pulse-card">
       <span class="pulse-dot"></span>
-      正在建立下载工作台…
+      {$t("app.loading")}
     </div>
   </main>
 {:else if bootstrap}
@@ -910,15 +1045,15 @@
           <p class="eyebrow">StreamVerse</p>
           <h1>{activeModuleTitle()}</h1>
           <p class="status-copy">
-            {authMap[bootstrap.authState]}
+            {$t("auth." + bootstrap.authState)}
           </p>
         </div>
 
         <div class="topbar-actions">
           {#if activeModule}
-            <button class="ghost-button" onclick={backToPlatformHome}>返回平台首页</button>
+            <button class="ghost-button" onclick={backToPlatformHome}>{$t("app.backToHome")}</button>
           {/if}
-          <button class="ghost-button" onclick={handleOpenSettings}>设置</button>
+          <button class="ghost-button" onclick={handleOpenSettings}>{$t("app.settings")}</button>
         </div>
       </header>
 
@@ -932,7 +1067,7 @@
               onclick={() => openModule(moduleId)}
               type="button"
             >
-              <strong>{meta.label}</strong>
+              <strong>{$t("module." + moduleId + ".label")}</strong>
               <span>{meta.badge}</span>
             </button>
           {/each}
@@ -984,11 +1119,11 @@
             description=""
             downloading={downloadingDouyinSingle}
             formatNote=""
-            heading="抖音单视频下载"
+            heading={$t("douyin.heading")}
             parserLabel=""
             pasting={pastingDouyinSingle}
-            platformLabel="抖音"
-            placeholder="粘贴抖音分享文案、短链或作品页链接"
+            platformLabel={$t("module.douyin-single.label")}
+            placeholder={$t("douyin.placeholder")}
             preview={douyinSinglePreview}
             qualityLabel={currentQualityLabel()}
             qualityPreference={qualityPreference}
@@ -1015,15 +1150,16 @@
             authState={bootstrap.authState}
             analyzeDisabled={!douyinProfileBrowserSession}
             description=""
-            heading="抖音主页批量下载"
+            downloadedAssetIds={douyinDownloadedAssetIds}
+            heading={$t("douyin.profileHeading")}
             heroEyebrow="Profile Batch"
-            itemLabel="作品"
-            pasteLabel="粘贴链接"
-            pasteLoadingLabel="读取剪贴板…"
+            itemLabel={$t("douyin.itemLabel")}
+            pasteLabel={$t("douyin.pasteLabel")}
+            pasteLoadingLabel={$t("douyin.pasteLoading")}
             preparing={openingDouyinProfileBrowser}
-            prepareLabel="打开浏览器"
-            prepareLoadingLabel="打开中…"
-            placeholder="粘贴抖音个人主页分享文案或主页链接"
+            prepareLabel={$t("douyin.openBrowser")}
+            prepareLoadingLabel={$t("douyin.openingBrowser")}
+            placeholder={$t("douyin.profilePlaceholder")}
             analyzing={analyzingDouyinProfile}
             analysisProgress={douyinProfileAnalysisProgress}
             enqueuing={enqueuingDouyinProfile}
@@ -1032,8 +1168,8 @@
             selectedIds={douyinSelectedProfileIds}
             selectedFormatIdsByAssetId={douyinSelectedProfileFormatIds}
             showPrepareAction={true}
-            analyzeLabel="读取完整列表"
-            analyzeLoadingLabel="读取中…"
+            analyzeLabel={$t("douyin.analyzeLabel")}
+            analyzeLoadingLabel={$t("douyin.analyzeLoading")}
             on:prepare={handleOpenDouyinProfileBrowser}
             on:analyze={handleAnalyzeDouyinProfile}
             on:clearSelection={clearProfileSelection}
@@ -1056,11 +1192,11 @@
             description=""
             downloading={downloadingBilibili}
             formatNote=""
-            heading="Bilibili 单视频下载"
+            heading={$t("bilibili.heading")}
             parserLabel=""
             pasting={pastingBilibili}
             platformLabel="Bilibili"
-            placeholder="粘贴 Bilibili 视频链接、分享文案、BV 号或 b23.tv 短链"
+            placeholder={$t("bilibili.placeholder")}
             preview={bilibiliPreview}
             qualityLabel={currentQualityLabel()}
             qualityPreference={qualityPreference}
@@ -1087,17 +1223,18 @@
             authState={bootstrap.authState}
             analyzing={analyzingBilibiliProfile}
             analysisProgress={bilibiliProfileAnalysisProgress}
-            analyzeLabel="解析主页"
-            analyzeLoadingLabel="读取视频中…"
+            analyzeLabel={$t("bilibili.analyzeLabel")}
+            analyzeLoadingLabel={$t("bilibili.analyzeLoading")}
             description=""
+            downloadedAssetIds={bilibiliDownloadedAssetIds}
             enqueuing={enqueuingBilibiliProfile}
-            enqueueLabel="将所选视频加入队列"
-            enqueuingLabel="加入队列中…"
-            heading="Bilibili 主页批量下载"
+            enqueueLabel={$t("bilibili.enqueueLabel")}
+            enqueuingLabel={$t("bilibili.enqueuingLabel")}
+            heading={$t("bilibili.profileHeading")}
             heroEyebrow="Creator Batch"
-            itemLabel="视频"
+            itemLabel={$t("bilibili.itemLabel")}
             pasting={pastingBilibiliProfile}
-            placeholder="粘贴 Bilibili UP 主空间页链接或分享文案"
+            placeholder={$t("bilibili.profilePlaceholder")}
             preview={bilibiliProfilePreview}
             selectedIds={bilibiliSelectedProfileIds}
             selectedFormatIdsByAssetId={bilibiliSelectedProfileFormatIds}
@@ -1123,11 +1260,11 @@
             description=""
             downloading={downloadingYoutube}
             formatNote=""
-            heading="YouTube 单视频下载"
+            heading={$t("youtube.heading")}
             parserLabel=""
             pasting={pastingYoutube}
             platformLabel="YouTube"
-            placeholder="粘贴 YouTube 视频链接、分享文案或 youtu.be 短链"
+            placeholder={$t("youtube.placeholder")}
             preview={youtubePreview}
             qualityLabel={currentQualityLabel()}
             qualityPreference={qualityPreference}
@@ -1166,16 +1303,60 @@
         bind:cookieBrowser
         bind:qualityPreference
         bind:saveDirectoryDraft
+        bind:maxConcurrentDownloads
+        bind:proxyUrl
+        bind:speedLimit
+        bind:autoUpdate
+        bind:theme
+        bind:notifyOnComplete
+        bind:language
         accountLabel={bootstrap.accountLabel}
         browserOptions={browserOptions}
         ffmpegAvailable={bootstrap.ffmpegAvailable}
         pickingDirectory={pickingDirectory}
         qualityOptions={qualityOptions}
         settingsSaving={settingsSaving}
-        on:close={() => (settingsOpen = false)}
+        on:close={() => { if (bootstrap) syncSettings(bootstrap); settingsOpen = false; }}
         on:pickDirectory={handlePickSaveDirectory}
         on:save={handleSaveSettings}
       />
     </section>
+
+    {#if analysisModalOpen}
+      <div class="analysis-modal-overlay">
+        <div class="analysis-modal" class:done={analysisModalDone}>
+          {#if analysisModalDone}
+            <div class="analysis-done-icon">
+              <svg viewBox="0 0 52 52" class="checkmark-svg">
+                <circle class="checkmark-circle" cx="26" cy="26" r="23" fill="none"/>
+                <path class="checkmark-path" fill="none" d="M15 27l7 7 15-15"/>
+              </svg>
+            </div>
+            <p class="analysis-modal-label done-label">解析完成</p>
+            <p class="analysis-modal-message">正在整理数据…</p>
+          {:else if analysisModalProgress}
+            {@const percent = Math.max(0, Math.min(100, Math.round((analysisModalProgress.current / Math.max(analysisModalProgress.total, 1)) * 100)))}
+            <p class="analysis-modal-label">{analysisModalLabel}</p>
+            <div class="analysis-modal-stats">
+              <span class="analysis-modal-counter">{analysisModalProgress.current} / {analysisModalProgress.total}</span>
+              <span class="analysis-modal-percent">{percent}%</span>
+            </div>
+            <div class="task-progress analysis-modal-bar">
+              <div
+                class="task-progress-fill"
+                class:indeterminate={percent < 3}
+                style="width: {Math.max(3, percent)}%"
+              ></div>
+            </div>
+            <p class="analysis-modal-message">{analysisModalProgress.message}</p>
+          {:else}
+            <p class="analysis-modal-label">{analysisModalLabel}</p>
+            <div class="task-progress analysis-modal-bar">
+              <div class="task-progress-fill indeterminate" style="width: 100%"></div>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
   </main>
 {/if}

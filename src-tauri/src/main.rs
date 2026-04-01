@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod download_history;
 mod formats;
 mod media_contract;
 mod pack_host;
@@ -102,6 +103,13 @@ struct BootstrapState {
     download_mode: String,
     quality_preference: String,
     auto_reveal_in_finder: bool,
+    max_concurrent_downloads: u32,
+    proxy_url: Option<String>,
+    speed_limit: Option<String>,
+    auto_update: bool,
+    theme: String,
+    notify_on_complete: bool,
+    language: String,
     ffmpeg_available: bool,
     metrics: Metrics,
     modules: Vec<ModuleRuntimeState>,
@@ -119,6 +127,13 @@ struct SettingsProfile {
     download_mode: String,
     quality_preference: String,
     auto_reveal_in_finder: bool,
+    max_concurrent_downloads: u32,
+    proxy_url: Option<String>,
+    speed_limit: Option<String>,
+    auto_update: bool,
+    theme: String,
+    notify_on_complete: bool,
+    language: String,
     ffmpeg_available: bool,
 }
 
@@ -147,6 +162,7 @@ struct AppState {
     tasks: task_store::TaskStore,
     settings: Arc<Mutex<settings::AppSettings>>,
     controllers: ytdlp::TaskControllerStore,
+    history: download_history::DownloadHistoryStore,
 }
 
 #[derive(Clone)]
@@ -253,6 +269,7 @@ fn fallback_profile_format(
         audio_direct_url: None,
         audio_referer: None,
         audio_user_agent: None,
+        file_size_bytes: None,
     })
 }
 
@@ -288,6 +305,7 @@ fn sample_preview() -> VideoAsset {
                 audio_direct_url: None,
                 audio_referer: None,
                 audio_user_agent: None,
+                file_size_bytes: None,
             },
             VideoFormat {
                 id: "uhd_plus".into(),
@@ -306,6 +324,7 @@ fn sample_preview() -> VideoAsset {
                 audio_direct_url: None,
                 audio_referer: None,
                 audio_user_agent: None,
+                file_size_bytes: None,
             },
         ],
     }
@@ -345,34 +364,40 @@ fn analyze_input(
 }
 
 #[tauri::command]
-fn analyze_profile_input(
+async fn analyze_profile_input(
     raw_input: String,
     _limit: Option<u32>,
     session_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProfileBatch, String> {
     let settings = state.settings.lock().unwrap().clone();
+    let sid = session_id.clone();
     let progress_file = session_id.as_deref().map(analysis_progress_path);
     let _ = write_analysis_progress(session_id.as_deref(), 0, 1, "正在读取主页视频…");
-    let result = providers::analyze_profile_input(
-        &raw_input,
-        settings.cookie_browser.as_deref(),
-        progress_file.as_deref(),
-    );
-    match &result {
-        Ok(batch) => {
-            let _ = write_analysis_progress(
-                session_id.as_deref(),
-                batch.fetched_count,
-                batch.total_available,
-                "主页视频解析完成。",
-            );
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = providers::analyze_profile_input(
+            &raw_input,
+            settings.cookie_browser.as_deref(),
+            progress_file.as_deref(),
+        );
+        match &result {
+            Ok(batch) => {
+                let _ = write_analysis_progress(
+                    sid.as_deref(),
+                    batch.fetched_count,
+                    batch.total_available,
+                    "主页视频解析完成。",
+                );
+            }
+            Err(error) => {
+                let _ = write_analysis_progress(sid.as_deref(), 0, 1, error);
+            }
         }
-        Err(error) => {
-            let _ = write_analysis_progress(session_id.as_deref(), 0, 1, error);
-        }
-    }
-    result
+        result
+    })
+    .await
+    .map_err(|_| "批量解析线程异常退出".to_string())?
 }
 
 #[tauri::command]
@@ -385,35 +410,41 @@ fn open_profile_browser(
 }
 
 #[tauri::command]
-fn collect_profile_browser(
+async fn collect_profile_browser(
     raw_input: String,
     port: u16,
     session_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProfileBatch, String> {
     let settings = state.settings.lock().unwrap().clone();
+    let sid = session_id.clone();
     let progress_file = session_id.as_deref().map(analysis_progress_path);
     let _ = write_analysis_progress(session_id.as_deref(), 0, 1, "正在连接浏览器并读取作品…");
-    let result = providers::collect_profile_browser(
-        &raw_input,
-        port,
-        settings.cookie_browser.as_deref(),
-        progress_file.as_deref(),
-    );
-    match &result {
-        Ok(batch) => {
-            let _ = write_analysis_progress(
-                session_id.as_deref(),
-                batch.fetched_count,
-                batch.total_available,
-                "主页视频解析完成。",
-            );
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = providers::collect_profile_browser(
+            &raw_input,
+            port,
+            settings.cookie_browser.as_deref(),
+            progress_file.as_deref(),
+        );
+        match &result {
+            Ok(batch) => {
+                let _ = write_analysis_progress(
+                    sid.as_deref(),
+                    batch.fetched_count,
+                    batch.total_available,
+                    "主页视频解析完成。",
+                );
+            }
+            Err(error) => {
+                let _ = write_analysis_progress(sid.as_deref(), 0, 1, error);
+            }
         }
-        Err(error) => {
-            let _ = write_analysis_progress(session_id.as_deref(), 0, 1, error);
-        }
-    }
-    result
+        result
+    })
+    .await
+    .map_err(|_| "浏览器读取线程异常退出".to_string())?
 }
 
 #[tauri::command]
@@ -855,12 +886,19 @@ fn retry_download_task(
 }
 
 #[tauri::command]
-fn save_settings(
+async fn save_settings(
     cookie_browser: Option<String>,
     save_directory: String,
     download_mode: String,
     quality_preference: String,
     auto_reveal_in_finder: bool,
+    max_concurrent_downloads: u32,
+    proxy_url: Option<String>,
+    speed_limit: Option<String>,
+    auto_update: bool,
+    theme: String,
+    notify_on_complete: bool,
+    language: String,
     state: tauri::State<'_, AppState>,
     tooling: tauri::State<'_, ToolingState>,
 ) -> Result<SettingsProfile, String> {
@@ -868,6 +906,11 @@ fn save_settings(
     let normalized_directory = settings::normalize_save_directory(save_directory)?;
     let normalized_mode = settings::normalize_download_mode(download_mode)?;
     let normalized_quality = settings::normalize_quality_preference(quality_preference)?;
+    let normalized_max_concurrent = settings::normalize_max_concurrent(max_concurrent_downloads);
+    let normalized_proxy = settings::normalize_proxy_url(proxy_url);
+    let normalized_speed_limit = settings::normalize_speed_limit(speed_limit);
+    let normalized_theme = settings::normalize_theme(theme);
+    let normalized_language = settings::normalize_language(language);
 
     {
         let mut guard = state.settings.lock().unwrap();
@@ -876,13 +919,25 @@ fn save_settings(
         guard.download_mode = normalized_mode;
         guard.quality_preference = normalized_quality;
         guard.auto_reveal_in_finder = auto_reveal_in_finder;
+        guard.max_concurrent_downloads = normalized_max_concurrent;
+        guard.proxy_url = normalized_proxy.clone();
+        guard.speed_limit = normalized_speed_limit.clone();
+        guard.auto_update = auto_update;
+        guard.theme = normalized_theme;
+        guard.notify_on_complete = notify_on_complete;
+        guard.language = normalized_language;
         settings::save_settings(&guard)?;
     }
 
-    Ok(build_settings_profile(
-        &state.settings.lock().unwrap(),
-        tooling.ffmpeg_path.as_deref(),
-    ))
+    ytdlp::set_max_concurrent_downloads(normalized_max_concurrent);
+    ytdlp::set_network_settings(normalized_proxy, normalized_speed_limit);
+
+    let profile = {
+        let guard = state.settings.lock().unwrap();
+        build_settings_profile(&guard, tooling.ffmpeg_path.as_deref())
+    };
+
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -988,6 +1043,21 @@ fn clear_finished_tasks(state: tauri::State<'_, AppState>) -> Vec<DownloadTask> 
     task_store::clear_finished(&state.tasks)
 }
 
+#[tauri::command]
+fn check_download_history(
+    platform: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Vec<String> {
+    let guard = state.history.lock().unwrap();
+    guard.check_downloaded(&platform, &asset_ids)
+}
+
+#[tauri::command]
+fn get_download_history_count(state: tauri::State<'_, AppState>) -> usize {
+    state.history.lock().unwrap().total_count()
+}
+
 fn build_bootstrap_state(
     state: &tauri::State<'_, AppState>,
     ffmpeg_path: Option<&str>,
@@ -1019,6 +1089,13 @@ fn build_bootstrap_state(
         download_mode: settings.download_mode,
         quality_preference: settings.quality_preference,
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
+        max_concurrent_downloads: settings.max_concurrent_downloads,
+        proxy_url: settings.proxy_url,
+        speed_limit: settings.speed_limit,
+        auto_update: settings.auto_update,
+        theme: settings.theme,
+        notify_on_complete: settings.notify_on_complete,
+        language: settings.language,
         ffmpeg_available: ytdlp::ffmpeg_available(ffmpeg_path),
         metrics: Metrics {
             today_downloads: completed,
@@ -1078,25 +1155,96 @@ fn build_settings_profile(
         download_mode: settings.download_mode.clone(),
         quality_preference: settings.quality_preference.clone(),
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
+        max_concurrent_downloads: settings.max_concurrent_downloads,
+        proxy_url: settings.proxy_url.clone(),
+        speed_limit: settings.speed_limit.clone(),
+        auto_update: settings.auto_update,
+        theme: settings.theme.clone(),
+        notify_on_complete: settings.notify_on_complete,
+        language: settings.language.clone(),
         ffmpeg_available: ytdlp::ffmpeg_available(ffmpeg_path),
     }
+}
+
+#[tauri::command]
+fn fetch_thumbnail(url: String) -> Result<String, String> {
+    let response = reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?
+        .get(&url)
+        .header("Referer", "https://www.bilibili.com/")
+        .send()
+        .map_err(|e| format!("缩略图请求失败: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("缩略图请求返回 {}", response.status()));
+    }
+
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = response
+        .bytes()
+        .map_err(|e| format!("读取缩略图失败: {e}"))?;
+
+    let mut encoded = String::from("data:");
+    encoded.push_str(&content_type);
+    encoded.push_str(";base64,");
+
+    const CHARS: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut buf = Vec::with_capacity(bytes.len() * 4 / 3 + 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        buf.push(CHARS[((triple >> 18) & 0x3F) as usize]);
+        buf.push(CHARS[((triple >> 12) & 0x3F) as usize]);
+        if chunk.len() > 1 {
+            buf.push(CHARS[((triple >> 6) & 0x3F) as usize]);
+        } else {
+            buf.push(b'=');
+        }
+        if chunk.len() > 2 {
+            buf.push(CHARS[(triple & 0x3F) as usize]);
+        } else {
+            buf.push(b'=');
+        }
+    }
+    encoded.push_str(&String::from_utf8_lossy(&buf));
+
+    Ok(encoded)
 }
 
 fn main() {
     let tasks = task_store::load_task_store();
     task_store::normalize_interrupted_tasks(&tasks);
+    let history = download_history::load_history_store();
     let mut loaded_settings = settings::load_settings();
     if pack_manager::refresh_installed_state(&mut loaded_settings) {
         let _ = settings::save_settings(&loaded_settings);
     }
 
+    ytdlp::set_max_concurrent_downloads(loaded_settings.max_concurrent_downloads);
+    ytdlp::set_network_settings(
+        loaded_settings.proxy_url.clone(),
+        loaded_settings.speed_limit.clone(),
+    );
+
     let app_state = AppState {
         tasks,
         settings: Arc::new(Mutex::new(loaded_settings)),
         controllers: ytdlp::new_task_controller_store(),
+        history,
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(app_state)
         .setup(|app| {
             let ffmpeg_path = ytdlp::resolve_ffmpeg_path(app.handle())
@@ -1127,7 +1275,10 @@ fn main() {
             pick_save_directory,
             open_in_file_manager,
             install_download_engine,
-            clear_finished_tasks
+            clear_finished_tasks,
+            check_download_history,
+            get_download_history_count,
+            fetch_thumbnail
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -210,6 +210,13 @@ export async function saveSettings(
       downloadMode: payload.downloadMode,
       qualityPreference: payload.qualityPreference,
       autoRevealInFinder: payload.autoRevealInFinder,
+      maxConcurrentDownloads: payload.maxConcurrentDownloads,
+      proxyUrl: payload.proxyUrl,
+      speedLimit: payload.speedLimit,
+      autoUpdate: payload.autoUpdate,
+      theme: payload.theme,
+      notifyOnComplete: payload.notifyOnComplete,
+      language: payload.language,
       ffmpegAvailable: false
     };
   }
@@ -327,6 +334,33 @@ export async function installDownloadEngine(): Promise<void> {
   }
 
   return maybeInvoke<void>("install_download_engine");
+}
+
+export async function checkDownloadHistory(
+  platform: string,
+  assetIds: string[]
+): Promise<string[]> {
+  if (!hasTauriRuntime()) {
+    return [];
+  }
+
+  return maybeInvoke<string[]>("check_download_history", { platform, assetIds });
+}
+
+export async function getDownloadHistoryCount(): Promise<number> {
+  if (!hasTauriRuntime()) {
+    return 0;
+  }
+
+  return maybeInvoke<number>("get_download_history_count");
+}
+
+export async function fetchThumbnail(url: string): Promise<string> {
+  if (!hasTauriRuntime()) {
+    return url;
+  }
+
+  return maybeInvoke<string>("fetch_thumbnail", { url });
 }
 
 export async function pauseDownloadTask(taskId: string): Promise<DownloadTask> {

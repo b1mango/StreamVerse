@@ -239,6 +239,7 @@ mod tests {
             audio_direct_url: None,
             audio_referer: None,
             audio_user_agent: None,
+            file_size_bytes: None,
         }
     }
 }

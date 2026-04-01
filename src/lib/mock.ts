@@ -8,6 +8,13 @@ export const mockState: BootstrapState = {
   downloadMode: "manual",
   qualityPreference: "recommended",
   autoRevealInFinder: false,
+  maxConcurrentDownloads: 3,
+  proxyUrl: null,
+  speedLimit: null,
+  autoUpdate: false,
+  theme: "dark",
+  notifyOnComplete: true,
+  language: "zh-CN",
   ffmpegAvailable: true,
   metrics: {
     todayDownloads: 18,

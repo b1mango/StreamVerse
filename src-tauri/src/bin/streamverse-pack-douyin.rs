@@ -108,7 +108,13 @@ fn run_analyze_action(
         .map_err(|error| format!("启动 Douyin pack 失败：{error}"))?;
 
     let result = if output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
+        let raw_stdout = String::from_utf8_lossy(&output.stdout);
+        let json_line = raw_stdout
+            .lines()
+            .rev()
+            .find(|line| line.starts_with('{'))
+            .unwrap_or(&raw_stdout);
+        print!("{json_line}");
         Ok(())
     } else if action == "analyze-single" {
         let fallback = analyze_generic_url(

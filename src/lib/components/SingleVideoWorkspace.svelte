@@ -1,5 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
+  import { t } from "../i18n";
+  import { fetchThumbnail } from "../backend";
   import type {
     AnalysisProgress,
     AuthState,
@@ -10,6 +12,8 @@
   } from "../types";
   import {
     formatDuration,
+    formatFileSize,
+    estimateFileSize,
     hasSelectedDownloadOptions,
     pickPreferredFormat,
     selectedFormat,
@@ -48,6 +52,30 @@
   $: analysisPercent = analysisProgress
     ? Math.max(6, Math.min(100, Math.round((analysisProgress.current / Math.max(analysisProgress.total, 1)) * 100)))
     : 0;
+
+  let proxiedCoverUrl: string | null = null;
+  let lastCoverUrl: string | null = null;
+
+  $: if (preview?.coverUrl && preview.coverUrl !== lastCoverUrl) {
+    lastCoverUrl = preview.coverUrl;
+    proxiedCoverUrl = null;
+    fetchThumbnail(preview.coverUrl).then((dataUri) => {
+      if (preview?.coverUrl === lastCoverUrl) {
+        proxiedCoverUrl = dataUri;
+      }
+    }).catch(() => {});
+  } else if (!preview?.coverUrl) {
+    lastCoverUrl = null;
+    proxiedCoverUrl = null;
+  }
+
+  function formatSizeLabel(format: import("../types").VideoFormat): string {
+    const bytes = format.fileSizeBytes
+      ?? estimateFileSize(format.bitrateKbps, preview?.durationSeconds ?? 0);
+    if (!bytes) return "";
+    const prefix = format.fileSizeBytes ? "" : "≈";
+    return `${prefix}${formatFileSize(bytes)}`;
+  }
 </script>
 
 <section class="page-shell">
@@ -68,31 +96,31 @@
       <div class="section-head compact">
         <div>
           <p class="eyebrow">Download Items</p>
-          <h3>下载内容</h3>
+          <h3>{$t("single.downloadContent")}</h3>
         </div>
         <span class="chip subtle">
           {hasSelectedDownloadOptions(downloadOptions)
             ? summarizeDownloadOptions(downloadOptions)
-            : "未选择"}
+            : $t("common.notSelected")}
         </span>
       </div>
 
       <div class="option-grid">
         <label class="option-chip">
           <input bind:checked={downloadOptions.downloadVideo} type="checkbox" />
-          <span>视频</span>
+          <span>{$t("content.video")}</span>
         </label>
         <label class="option-chip">
           <input bind:checked={downloadOptions.downloadCover} type="checkbox" />
-          <span>封面</span>
+          <span>{$t("content.cover")}</span>
         </label>
         <label class="option-chip">
           <input bind:checked={downloadOptions.downloadCaption} type="checkbox" />
-          <span>文案</span>
+          <span>{$t("content.caption")}</span>
         </label>
         <label class="option-chip subtle-option">
           <input bind:checked={downloadOptions.downloadMetadata} type="checkbox" />
-          <span>元数据</span>
+          <span>{$t("content.metadata")}</span>
         </label>
       </div>
     </div>
@@ -103,21 +131,14 @@
         onclick={() => dispatch("analyze")}
         disabled={analyzing || downloading || pasting}
       >
-        {analyzing ? "解析中…" : "解析作品"}
-      </button>
-      <button
-        class="secondary-button"
-        onclick={() => dispatch("paste")}
-        disabled={analyzing || downloading || pasting}
-      >
-        {pasting ? "读取中…" : "粘贴并解析"}
+        {analyzing ? $t("common.analyzing") : $t("single.analyze")}
       </button>
       <button
         class="secondary-button"
         onclick={() => dispatch("download")}
         disabled={!preview || analyzing || downloading}
       >
-        {downloading ? "创建任务…" : "开始下载"}
+        {downloading ? $t("single.creatingTask") : $t("single.startDownload")}
       </button>
     </div>
 
@@ -126,7 +147,7 @@
         <div class="section-head compact">
           <div>
             <p class="eyebrow">Analyze Progress</p>
-            <h3>解析进度</h3>
+            <h3>{$t("single.analyzeProgress")}</h3>
           </div>
           <span class="chip subtle">
             {analysisProgress.current} / {analysisProgress.total}
@@ -140,9 +161,9 @@
     {/if}
 
     <div class="meta-row">
-      <span class="meta-item">平台：{platformLabel}</span>
-      <span class="meta-item">默认策略：{qualityLabel}</span>
-      <span class="meta-item">当前格式：{currentFormat?.label ?? preferredFormat?.label ?? "等待解析"}</span>
+      <span class="meta-item">{$t("single.platform")}：{platformLabel}</span>
+      <span class="meta-item">{$t("single.defaultStrategy")}：{qualityLabel}</span>
+      <span class="meta-item">{$t("single.currentFormat")}：{currentFormat?.label ?? preferredFormat?.label ?? $t("single.awaitingAnalysis")}</span>
       {#if parserLabel}
         <span class="meta-item">{parserLabel}</span>
       {/if}
@@ -159,20 +180,27 @@
     <section class="analysis-grid">
       <article class="panel preview-panel">
         <p class="eyebrow">Preview</p>
+        {#if proxiedCoverUrl}
+          <img
+            src={proxiedCoverUrl}
+            alt={preview.title}
+            class="preview-thumbnail"
+          />
+        {/if}
         <h3>{preview.title}</h3>
         <p class="preview-caption">{preview.caption}</p>
 
         <div class="facts">
           <div>
-            <span>作者</span>
+            <span>{$t("single.author")}</span>
             <strong>{preview.author}</strong>
           </div>
           <div>
-            <span>时长</span>
+            <span>{$t("single.duration")}</span>
             <strong>{formatDuration(preview.durationSeconds)}</strong>
           </div>
           <div>
-            <span>发布日期</span>
+            <span>{$t("single.publishDate")}</span>
             <strong>{preview.publishDate}</strong>
           </div>
         </div>
@@ -182,9 +210,9 @@
         <div class="section-head">
           <div>
             <p class="eyebrow">Formats</p>
-            <h3>选择清晰度</h3>
+            <h3>{$t("single.selectQuality")}</h3>
           </div>
-          <span class="chip subtle">{formatList.length} 个格式</span>
+          <span class="chip subtle">{formatList.length} {$t("single.formatsCount")}</span>
         </div>
 
         {#if downloadOptions.downloadVideo}
@@ -200,25 +228,28 @@
                   <strong>{format.label}</strong>
                   <span>
                     {format.resolution} · {format.codec} · {format.container}
+                    {#if formatSizeLabel(format)}
+                      · {formatSizeLabel(format)}
+                    {/if}
                   </span>
                 </div>
 
                 <div class="format-tags">
                   {#if format.recommended}
-                    <span class="mini-tag accent">推荐</span>
+                    <span class="mini-tag accent">{$t("format.recommended")}</span>
                   {/if}
                   {#if format.noWatermark}
-                    <span class="mini-tag">无水印</span>
+                    <span class="mini-tag">{$t("format.noWatermark")}</span>
                   {/if}
                   {#if format.requiresLogin}
-                    <span class="mini-tag">登录后</span>
+                    <span class="mini-tag">{$t("format.requiresLogin")}</span>
                   {/if}
                 </div>
               </button>
             {/each}
           </div>
         {:else}
-          <p class="empty-state">当前只保存附加内容，所以这里不需要选择清晰度。</p>
+          <p class="empty-state">{$t("single.noVideoSelected")}</p>
         {/if}
       </article>
     </section>

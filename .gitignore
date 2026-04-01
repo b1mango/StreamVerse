@@ -13,3 +13,4 @@ vendor/douyin_api/**/__pycache__/
 vendor/douyin_api/**/*.pyc
 scripts/__pycache__/
 scripts/**/*.pyc
+tsconfig.tsbuildinfo

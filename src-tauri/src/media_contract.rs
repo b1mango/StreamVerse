@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 pub(crate) const DEFAULT_GRADIENT: &str =
     "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))";
 
+fn default_gradient() -> String {
+    DEFAULT_GRADIENT.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoFormat {
@@ -26,6 +30,8 @@ pub(crate) struct VideoFormat {
     pub(crate) audio_referer: Option<String>,
     #[serde(default)]
     pub(crate) audio_user_agent: Option<String>,
+    #[serde(default)]
+    pub(crate) file_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,17 +39,24 @@ pub(crate) struct VideoFormat {
 pub(crate) struct VideoAsset {
     #[serde(alias = "awemeId")]
     pub(crate) asset_id: String,
+    #[serde(default)]
     pub(crate) platform: String,
     pub(crate) source_url: String,
     pub(crate) title: String,
+    #[serde(default)]
     pub(crate) author: String,
+    #[serde(default)]
     pub(crate) duration_seconds: u32,
+    #[serde(default)]
     pub(crate) publish_date: String,
+    #[serde(default)]
     pub(crate) caption: String,
     pub(crate) category_label: Option<String>,
     pub(crate) group_title: Option<String>,
     pub(crate) cover_url: Option<String>,
+    #[serde(default = "default_gradient")]
     pub(crate) cover_gradient: String,
+    #[serde(default)]
     pub(crate) formats: Vec<VideoFormat>,
 }
 

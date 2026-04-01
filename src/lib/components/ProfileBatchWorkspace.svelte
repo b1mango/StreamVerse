@@ -1,5 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
+  import { t, tRaw } from "../i18n";
+  import { fetchThumbnail } from "../backend";
   import type {
     AnalysisProgress,
     AuthState,
@@ -21,6 +23,7 @@
   export let selectedIds: string[] = [];
   export let selectedFormatIdsByAssetId: Record<string, string> = {};
   export let downloadOptions: DownloadContentSelection;
+  export let downloadedAssetIds: string[] = [];
   export let authState: AuthState = "guest";
   export let heroEyebrow = "Profile Batch";
   export let heading = "主页批量下载";
@@ -45,6 +48,27 @@
   export let pasting = false;
   let filterText = "";
   let lastToggledIndex: number | null = null;
+
+  let thumbnailCache: Record<string, string> = {};
+  let thumbnailLastPreviewId = "";
+
+  $: if (preview && preview.items.length > 0) {
+    const previewId = preview.items.map(i => i.assetId).join(",");
+    if (previewId !== thumbnailLastPreviewId) {
+      thumbnailLastPreviewId = previewId;
+      thumbnailCache = {};
+      for (const item of preview.items) {
+        if (item.coverUrl) {
+          const url = item.coverUrl;
+          const aid = item.assetId;
+          fetchThumbnail(url).then((dataUri) => {
+            thumbnailCache[aid] = dataUri;
+            thumbnailCache = thumbnailCache;
+          }).catch(() => {});
+        }
+      }
+    }
+  }
 
   const dispatch = createEventDispatcher<{
     prepare: void;
@@ -77,6 +101,12 @@
     dispatch("selectionChange", { ids: next });
   }
 
+  let lastShiftKey = false;
+
+  function trackShiftKey(event: MouseEvent) {
+    lastShiftKey = event.shiftKey;
+  }
+
   function toggleSelection(event: Event, assetId: string, index: number) {
     const target = event.currentTarget as HTMLInputElement | null;
     if (!target) {
@@ -85,9 +115,8 @@
 
     const checked = target.checked;
     const ids = new Set(selectedIds);
-    const mouseEvent = event as MouseEvent;
 
-    if (mouseEvent.shiftKey && lastToggledIndex !== null) {
+    if (lastShiftKey && lastToggledIndex !== null) {
       const start = Math.min(lastToggledIndex, index);
       const end = Math.max(lastToggledIndex, index);
       for (const item of filteredItems.slice(start, end + 1)) {
@@ -119,6 +148,98 @@
     dispatch("clearSelection");
   }
 
+  function invertSelection() {
+    if (!preview) return;
+    const currentSet = new Set(selectedIds);
+    const inverted = preview.items
+      .filter((item) => !currentSet.has(item.assetId))
+      .map((item) => item.assetId);
+    syncSelectedIds(inverted);
+    lastToggledIndex = null;
+  }
+
+  // --- Drag-select ---
+  let dragActive = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let dragCurrentX = 0;
+  let dragCurrentY = 0;
+  let profileListEl: HTMLElement | null = null;
+  let selectionBeforeDrag: Set<string> = new Set();
+
+  function onDragStart(event: MouseEvent) {
+    // Only start drag on left button in empty space (not on interactive elements)
+    const target = event.target as HTMLElement;
+    if (target.closest("input, button, select, a, .profile-format-slot")) return;
+    if (event.button !== 0) return;
+
+    dragActive = true;
+    const rect = profileListEl?.getBoundingClientRect();
+    dragStartX = event.clientX;
+    dragStartY = event.clientY;
+    dragCurrentX = event.clientX;
+    dragCurrentY = event.clientY;
+    selectionBeforeDrag = new Set(selectedIds);
+
+    window.addEventListener("mousemove", onDragMove);
+    window.addEventListener("mouseup", onDragEnd);
+    event.preventDefault();
+  }
+
+  function onDragMove(event: MouseEvent) {
+    if (!dragActive) return;
+    dragCurrentX = event.clientX;
+    dragCurrentY = event.clientY;
+
+    // Determine selection rect
+    const left = Math.min(dragStartX, dragCurrentX);
+    const right = Math.max(dragStartX, dragCurrentX);
+    const top = Math.min(dragStartY, dragCurrentY);
+    const bottom = Math.max(dragStartY, dragCurrentY);
+
+    if (!profileListEl) return;
+
+    const rows = profileListEl.querySelectorAll<HTMLElement>(".profile-row");
+    const next = new Set(selectionBeforeDrag);
+
+    rows.forEach((row) => {
+      const rect = row.getBoundingClientRect();
+      const assetId = row.dataset.assetId;
+      if (!assetId) return;
+
+      const intersects =
+        rect.left < right && rect.right > left &&
+        rect.top < bottom && rect.bottom > top;
+
+      if (intersects) {
+        if (selectionBeforeDrag.has(assetId)) {
+          next.delete(assetId);
+        } else {
+          next.add(assetId);
+        }
+      } else {
+        // Restore to pre-drag state
+        if (selectionBeforeDrag.has(assetId)) {
+          next.add(assetId);
+        } else {
+          next.delete(assetId);
+        }
+      }
+    });
+
+    syncSelectedIds(orderedSelection(next));
+  }
+
+  function onDragEnd() {
+    dragActive = false;
+    window.removeEventListener("mousemove", onDragMove);
+    window.removeEventListener("mouseup", onDragEnd);
+  }
+
+  $: dragRectStyle = dragActive
+    ? `left:${Math.min(dragStartX, dragCurrentX)}px;top:${Math.min(dragStartY, dragCurrentY)}px;width:${Math.abs(dragCurrentX - dragStartX)}px;height:${Math.abs(dragCurrentY - dragStartY)}px`
+    : "";
+
   function formatsForItem(item: VideoAsset) {
     return visibleFormats(item, authState);
   }
@@ -135,7 +256,7 @@
     return (
       selectedFormat(item, currentFormatId(item), authState)?.label ??
       pickPreferredFormat(item, "recommended", authState)?.label ??
-      "等待选择"
+      tRaw("batch.awaitingSelection")
     );
   }
 
@@ -208,6 +329,7 @@
     ? Math.max(6, Math.min(100, Math.round((analysisProgress.current / Math.max(analysisProgress.total, 1)) * 100)))
     : 0;
   $: selectedIdSet = new Set(selectedIds);
+  $: downloadedIdSet = new Set(downloadedAssetIds);
   $: analysisCounterLabel = analysisProgress
     ? `已读取 ${analysisProgress.current} / ${analysisProgress.total} 个${itemLabel}`
     : "";
@@ -231,31 +353,31 @@
       <div class="section-head compact">
         <div>
           <p class="eyebrow">Batch Items</p>
-          <h3>批量下载内容</h3>
+          <h3>{$t("batch.downloadContent")}</h3>
         </div>
         <span class="chip subtle">
           {hasSelectedDownloadOptions(downloadOptions)
             ? summarizeDownloadOptions(downloadOptions)
-            : "未选择"}
+            : $t("common.notSelected")}
         </span>
       </div>
 
       <div class="option-grid">
         <label class="option-chip">
           <input bind:checked={downloadOptions.downloadVideo} type="checkbox" />
-          <span>视频</span>
+          <span>{$t("content.video")}</span>
         </label>
         <label class="option-chip">
           <input bind:checked={downloadOptions.downloadCover} type="checkbox" />
-          <span>封面</span>
+          <span>{$t("content.cover")}</span>
         </label>
         <label class="option-chip">
           <input bind:checked={downloadOptions.downloadCaption} type="checkbox" />
-          <span>文案</span>
+          <span>{$t("content.caption")}</span>
         </label>
         <label class="option-chip subtle-option">
           <input bind:checked={downloadOptions.downloadMetadata} type="checkbox" />
-          <span>元数据</span>
+          <span>{$t("content.metadata")}</span>
         </label>
       </div>
     </div>
@@ -279,13 +401,6 @@
       </button>
       <button
         class="secondary-button"
-        onclick={() => dispatch("paste")}
-        disabled={preparing || analyzing || enqueuing || pasting}
-      >
-        {pasting ? pasteLoadingLabel : pasteLabel}
-      </button>
-      <button
-        class="secondary-button"
         onclick={() => dispatch("enqueue")}
         disabled={!preview || enqueuing || !selectedIds.length}
       >
@@ -294,22 +409,6 @@
     </div>
 
   </article>
-
-  {#if analyzing && analysisProgress}
-    <article class="panel profile-progress-panel">
-      <div class="section-head compact">
-        <div>
-          <p class="eyebrow">Analyze Progress</p>
-          <h3>{analysisCounterLabel}</h3>
-        </div>
-        <span class="chip subtle">{analysisPercent}%</span>
-      </div>
-      <div class="task-progress analysis-progress-bar">
-        <div class="task-progress-fill" style={`width: ${analysisPercent}%`}></div>
-      </div>
-      <p class="analysis-progress-copy">{analysisProgress.message}</p>
-    </article>
-  {/if}
 
   {#if preview}
     <article class="panel profile-panel">
@@ -320,23 +419,26 @@
         </div>
 
         <div class="section-actions">
-          <span class="chip subtle">已选 {selectedIds.length} / {preview.items.length} 个{itemLabel}</span>
+          <span class="chip subtle">{$t("batch.selected")} {selectedIds.length} / {preview.items.length} {$t("common.unit")}{itemLabel}</span>
           <button class="text-button" onclick={selectAllItems} type="button">
-            全选
+            {$t("common.selectAll")}
+          </button>
+          <button class="text-button" onclick={invertSelection} type="button">
+            {$t("batch.invertSelection")}
           </button>
           <button class="text-button" onclick={clearSelectedItems} type="button">
-            清空
+            {$t("batch.clearSelection")}
           </button>
           <button class="text-button" onclick={() => dispatch("close")} type="button">
-            关闭
+            {$t("common.close")}
           </button>
         </div>
       </div>
 
       <div class="profile-toolbar">
         <div class="meta-row">
-          <span class="meta-item">已读取 {preview.fetchedCount} 个{itemLabel}</span>
-          <span class="meta-item">已选 {selectedIds.length} 个</span>
+          <span class="meta-item">{$t("batch.fetched")} {preview.fetchedCount} {$t("common.unit")}{itemLabel}</span>
+          <span class="meta-item">{$t("batch.selected")} {selectedIds.length} {$t("common.unit")}</span>
           {#each categoryStats as stat}
             <span class="meta-item subtle">{stat}</span>
           {/each}
@@ -346,23 +448,27 @@
           <input
             bind:value={filterText}
             class="settings-input"
-            placeholder={`筛选${itemLabel}标题`}
+            placeholder={`${$t("batch.filterPlaceholder")} ${itemLabel}`}
             type="text"
           />
         </label>
       </div>
 
-      <div class="profile-list">
+      <div class="profile-list" bind:this={profileListEl} onmousedown={onDragStart}>
+        {#if dragActive}
+          <div class="drag-select-rect" style={dragRectStyle}></div>
+        {/if}
         {#if filteredItems.length === 0}
-          <p class="empty-state">没有匹配的{itemLabel}</p>
+          <p class="empty-state">{$t("batch.noMatch")}{itemLabel}</p>
         {:else}
           {#each filteredItems as item, index (item.assetId)}
             {@const selected = selectedIdSet.has(item.assetId)}
-            <div class:selected-row={selected} class="profile-row">
+            <div class:selected-row={selected} class="profile-row" data-asset-id={item.assetId}>
               <div class="profile-check">
                 {#key `${item.assetId}:${selected ? "1" : "0"}`}
                   <input
                     checked={selected}
+                    onclick={(e) => trackShiftKey(e)}
                     onchange={(event) => toggleSelection(event, item.assetId, index)}
                     type="checkbox"
                   />
@@ -370,13 +476,23 @@
               </div>
 
               <div class="profile-copy">
-                <strong>{item.title}</strong>
-                <span>{itemMetaLine(item)}</span>
+                {#if thumbnailCache[item.assetId]}
+                  <img src={thumbnailCache[item.assetId]} alt={item.title} class="profile-thumb" />
+                {/if}
+                <div class="profile-text">
+                  <strong>{item.title}</strong>
+                  <span>
+                    {itemMetaLine(item)}
+                    {#if downloadedIdSet.has(item.assetId)}
+                      <span class="mini-tag accent" style="margin-left: 6px; display: inline-flex; font-size: 0.72rem;">{$t("common.alreadyDownloaded")}</span>
+                    {/if}
+                  </span>
+                </div>
               </div>
 
               {#if downloadOptions.downloadVideo && hasFormats(item)}
                 <div class="profile-format-slot">
-                  <small>下载清晰度：{currentFormatLabel(item)}</small>
+                  <small>{$t("batch.formatLabel")}：{selectedFormat(item, selectedFormatIdsByAssetId[item.assetId] ?? currentFormatId(item), authState)?.label ?? pickPreferredFormat(item, "recommended", authState)?.label ?? tRaw("batch.awaitingSelection")}</small>
                   <select
                     class="compact-select"
                     disabled={!selected}

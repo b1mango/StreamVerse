@@ -1,6 +1,8 @@
 export type AuthState = "guest" | "active" | "expired";
 export type DownloadMode = "manual";
 export type PlatformId = "douyin" | "bilibili" | "youtube";
+export type ThemeMode = "dark" | "light";
+export type LanguageCode = "zh-CN" | "en";
 export type ModuleId =
   | "douyin-single"
   | "douyin-profile"
@@ -47,6 +49,7 @@ export interface VideoFormat {
   audioDirectUrl?: string | null;
   audioReferer?: string | null;
   audioUserAgent?: string | null;
+  fileSizeBytes?: number | null;
 }
 
 export interface VideoAsset {
@@ -113,6 +116,13 @@ export interface BootstrapState {
   downloadMode: DownloadMode;
   qualityPreference: QualityPreference;
   autoRevealInFinder: boolean;
+  maxConcurrentDownloads: number;
+  proxyUrl: string | null;
+  speedLimit: string | null;
+  autoUpdate: boolean;
+  theme: ThemeMode;
+  notifyOnComplete: boolean;
+  language: LanguageCode;
   ffmpegAvailable: boolean;
   metrics: AppMetrics;
   modules: ModuleRuntimeState[];
@@ -134,6 +144,13 @@ export interface SettingsProfile {
   downloadMode: DownloadMode;
   qualityPreference: QualityPreference;
   autoRevealInFinder: boolean;
+  maxConcurrentDownloads: number;
+  proxyUrl: string | null;
+  speedLimit: string | null;
+  autoUpdate: boolean;
+  theme: ThemeMode;
+  notifyOnComplete: boolean;
+  language: LanguageCode;
   ffmpegAvailable: boolean;
 }
 
@@ -169,6 +186,13 @@ export interface SaveSettingsPayload {
   downloadMode: DownloadMode;
   qualityPreference: QualityPreference;
   autoRevealInFinder: boolean;
+  maxConcurrentDownloads: number;
+  proxyUrl: string | null;
+  speedLimit: string | null;
+  autoUpdate: boolean;
+  theme: ThemeMode;
+  notifyOnComplete: boolean;
+  language: LanguageCode;
 }
 
 export interface SetModuleEnabledPayload {

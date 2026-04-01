@@ -46,6 +46,8 @@ pub struct RawFormat {
     pub vcodec: Option<String>,
     pub acodec: Option<String>,
     pub tbr: Option<f64>,
+    pub filesize: Option<u64>,
+    pub filesize_approx: Option<u64>,
     pub url: Option<String>,
     pub protocol: Option<String>,
     pub http_headers: Option<RawHeaders>,
@@ -115,7 +117,13 @@ pub fn analyze_generic_url(
         caption: raw.description.unwrap_or_default(),
         category_label: None,
         group_title: None,
-        cover_url: raw.thumbnail.filter(|value| !value.trim().is_empty()),
+        cover_url: raw.thumbnail.filter(|value| !value.trim().is_empty()).map(|url| {
+            if url.starts_with("//") {
+                format!("https:{url}")
+            } else {
+                url
+            }
+        }),
         cover_gradient: DEFAULT_GRADIENT.to_string(),
         formats,
     })
@@ -280,6 +288,7 @@ fn fallback_streaming_format(id: &str, label: &str) -> VideoFormat {
         audio_direct_url: None,
         audio_referer: None,
         audio_user_agent: None,
+        file_size_bytes: None,
     }
 }
 
@@ -676,6 +685,7 @@ fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             audio_direct_url: None,
             audio_referer: None,
             audio_user_agent: None,
+            file_size_bytes: format.filesize.or(format.filesize_approx),
         })
         .collect::<Vec<_>>();
 
@@ -739,6 +749,14 @@ fn build_video_format(
         }
     }
 
+    let video_size = format.filesize.or(format.filesize_approx);
+    let audio_size = best_audio.and_then(|a| a.filesize.or(a.filesize_approx));
+    let combined_size = match (video_size, audio_size) {
+        (Some(v), Some(a)) => Some(v + a),
+        (Some(v), None) => Some(v),
+        _ => None,
+    };
+
     VideoFormat {
         id: format_id,
         label: build_label(format),
@@ -760,6 +778,7 @@ fn build_video_format(
         audio_direct_url: best_audio.and_then(direct_media_url),
         audio_referer: best_audio.and_then(format_referer),
         audio_user_agent: best_audio.and_then(format_user_agent),
+        file_size_bytes: combined_size,
     }
 }
 

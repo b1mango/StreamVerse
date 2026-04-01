@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
+  import { t } from "../i18n";
   import type { DownloadTask } from "../types";
   import { finishedTaskCount } from "../media";
   import { taskLabelMap } from "../options";
@@ -26,7 +27,7 @@
   <div class="section-head">
     <div>
       <p class="eyebrow">Recent Tasks</p>
-      <h3>最近任务</h3>
+      <h3>{$t("task.recentTasks")}</h3>
     </div>
 
     <div class="section-actions">
@@ -36,15 +37,15 @@
           onclick={() => dispatch("clearFinished")}
           disabled={clearingFinished}
         >
-          {clearingFinished ? "清理中…" : "清理已完成"}
+          {clearingFinished ? $t("task.clearing") : $t("task.clearFinished")}
         </button>
       {/if}
-      <span class="chip subtle">{tasks.length} 个</span>
+      <span class="chip subtle">{tasks.length} {$t("common.unit")}</span>
     </div>
   </div>
 
   {#if tasks.length === 0}
-    <p class="empty-state">还没有下载任务。先进入上面的平台工作区创建一个试试。</p>
+    <p class="empty-state">{$t("task.empty")}</p>
   {:else}
     <div class="task-list">
       {#each tasks as task (task.id)}
@@ -63,15 +64,14 @@
             {#if task.message}
               <small>{task.message}</small>
             {/if}
-            {#if task.outputPath}
-              <small>{task.outputPath}</small>
-            {/if}
           </div>
 
           <div class="task-side">
             <span>{task.progress}%</span>
-            <strong>{taskLabelMap[task.status]}</strong>
-            <small>{task.speedText} · ETA {task.etaText}</small>
+            <strong>{$t("task." + task.status)}</strong>
+            {#if task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled"}
+              <small>{task.speedText} · ETA {task.etaText}</small>
+            {/if}
 
             <div class="task-actions">
               {#if task.status === "downloading" && task.supportsPause}
@@ -81,7 +81,7 @@
                   disabled={pendingTaskAction(task.id)}
                   type="button"
                 >
-                  暂停
+                  {$t("common.pause")}
                 </button>
               {/if}
 
@@ -92,7 +92,7 @@
                   disabled={pendingTaskAction(task.id)}
                   type="button"
                 >
-                  继续
+                  {$t("common.resume")}
                 </button>
               {/if}
 
@@ -103,7 +103,7 @@
                   disabled={pendingTaskAction(task.id)}
                   type="button"
                 >
-                  取消
+                  {$t("common.cancel")}
                 </button>
               {/if}
 
@@ -114,7 +114,7 @@
                   disabled={pendingTaskAction(task.id)}
                   type="button"
                 >
-                  重试
+                  {$t("common.retry")}
                 </button>
               {/if}
 
@@ -124,7 +124,7 @@
                   onclick={() => dispatch("reveal", { task })}
                   type="button"
                 >
-                  定位文件
+                  {$t("task.revealFile")}
                 </button>
               {/if}
             </div>
