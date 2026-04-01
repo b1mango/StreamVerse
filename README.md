@@ -32,6 +32,10 @@
 
 ## 界面预览
 
+### 主页展示
+
+![StreamVerse 主页展示](docs/screenshots/home.png)
+
 ### 抖音工作区
 
 ![StreamVerse 抖音工作区](docs/screenshots/douyin-workspace.png)
