@@ -1,0 +1,158 @@
+name: Release Packs
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        type: string
+      version:
+        description: Pack version
+        required: true
+        type: string
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build-packs:
+    name: packs-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target_name: macos-aarch64
+            exe_suffix: ""
+          - os: windows-latest
+            target_name: windows-x86_64
+            exe_suffix: ".exe"
+
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build pack binaries
+        run: cargo build --release --bin streamverse-pack-douyin --bin streamverse-pack-bilibili --bin streamverse-pack-youtube
+        working-directory: src-tauri
+
+      - name: Package pack bundles
+        shell: bash
+        run: |
+          mkdir -p dist/packs
+          python scripts/package_pack_bundle.py \
+            --pack-id douyin-pack \
+            --version "${RELEASE_VERSION#v}" \
+            --binary-path "src-tauri/target/release/streamverse-pack-douyin${{ matrix.exe_suffix }}" \
+            --output "dist/packs/douyin-pack-${{ matrix.target_name }}.zip" \
+            --include-file "scripts/douyin_bridge.py:scripts/douyin_bridge.py" \
+            --include-dir "vendor/douyin_api:vendor/douyin_api"
+          python scripts/package_pack_bundle.py \
+            --pack-id bilibili-pack \
+            --version "${RELEASE_VERSION#v}" \
+            --binary-path "src-tauri/target/release/streamverse-pack-bilibili${{ matrix.exe_suffix }}" \
+            --output "dist/packs/bilibili-pack-${{ matrix.target_name }}.zip" \
+            --include-file "scripts/bilibili_profile_bridge.py:scripts/bilibili_profile_bridge.py"
+          python scripts/package_pack_bundle.py \
+            --pack-id youtube-pack \
+            --version "${RELEASE_VERSION#v}" \
+            --binary-path "src-tauri/target/release/streamverse-pack-youtube${{ matrix.exe_suffix }}" \
+            --output "dist/packs/youtube-pack-${{ matrix.target_name }}.zip"
+          python scripts/package_pack_bundle.py \
+            --pack-id browser-bridge \
+            --version "${RELEASE_VERSION#v}" \
+            --binary-name "browser-bridge" \
+            --resource-only \
+            --output "dist/packs/browser-bridge-${{ matrix.target_name }}.zip" \
+            --include-file "requirements-douyin-helper.txt:requirements-douyin-helper.txt" \
+            --include-file "scripts/profile_browser_scan.py:scripts/profile_browser_scan.py"
+          python scripts/package_pack_bundle.py \
+            --pack-id media-engine \
+            --version "${RELEASE_VERSION#v}" \
+            --binary-name "media-engine" \
+            --resource-only \
+            --output "dist/packs/media-engine-${{ matrix.target_name }}.zip" \
+            --include-file "node_modules/ffmpeg-static/ffmpeg${{ matrix.exe_suffix }}:bin/ffmpeg${{ matrix.exe_suffix }}"
+
+      - name: Upload pack artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packs-${{ matrix.target_name }}
+          path: dist/packs/*.zip
+          if-no-files-found: error
+
+  publish-packs:
+    name: publish-pack-release
+    runs-on: ubuntu-latest
+    needs: build-packs
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download pack artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/packs
+          pattern: packs-*
+          merge-multiple: true
+
+      - name: Generate release registry
+        run: |
+          python scripts/generate_release_registry.py \
+            --repository "${{ github.repository }}" \
+            --tag "${RELEASE_TAG}" \
+            --version "${RELEASE_VERSION#v}" \
+            --output "dist/packs/plugins.json" \
+            --pack "browser-bridge:browser-bridge:macos-aarch64:dist/packs/browser-bridge-macos-aarch64.zip:true" \
+            --pack "media-engine:media-engine:macos-aarch64:dist/packs/media-engine-macos-aarch64.zip:true" \
+            --pack "douyin-pack:streamverse-pack-douyin:macos-aarch64:dist/packs/douyin-pack-macos-aarch64.zip" \
+            --pack "bilibili-pack:streamverse-pack-bilibili:macos-aarch64:dist/packs/bilibili-pack-macos-aarch64.zip" \
+            --pack "youtube-pack:streamverse-pack-youtube:macos-aarch64:dist/packs/youtube-pack-macos-aarch64.zip" \
+            --pack "browser-bridge:browser-bridge:windows-x86_64:dist/packs/browser-bridge-windows-x86_64.zip:true" \
+            --pack "media-engine:media-engine:windows-x86_64:dist/packs/media-engine-windows-x86_64.zip:true" \
+            --pack "douyin-pack:streamverse-pack-douyin:windows-x86_64:dist/packs/douyin-pack-windows-x86_64.zip" \
+            --pack "bilibili-pack:streamverse-pack-bilibili:windows-x86_64:dist/packs/bilibili-pack-windows-x86_64.zip" \
+            --pack "youtube-pack:streamverse-pack-youtube:windows-x86_64:dist/packs/youtube-pack-windows-x86_64.zip"
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            dist/packs/*.zip
+            dist/packs/plugins.json
