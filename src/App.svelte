@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import PlatformHome from "./lib/components/PlatformHome.svelte";
   import ProfileBatchWorkspace from "./lib/components/ProfileBatchWorkspace.svelte";
   import SettingsPanel from "./lib/components/SettingsPanel.svelte";
@@ -27,7 +27,8 @@
     pickSaveDirectory,
     retryDownloadTask,
     resumeDownloadTask,
-    saveSettings
+    saveSettings,
+    detectBrowserCookies
   } from "./lib/backend";
   import {
     clampBatchLimit,
@@ -71,6 +72,7 @@
   let settingsSaving = false;
   let pickingDirectory = false;
   let pickingCookieFilePlatform: PlatformId | null = null;
+  let detectingCookiePlatform: PlatformId | null = null;
   let pickingTargetDirectory = false;
   let openingFolder = false;
   let clearingFinished = false;
@@ -80,6 +82,7 @@
   let tasks: DownloadTask[] = [];
   let pollTimer: number | undefined;
   let pollingTasks = false;
+  let unlistenTasks: (() => void) | undefined;
 
   let analysisModalOpen = false;
   let analysisModalProgress: AnalysisProgress | null = null;
@@ -213,36 +216,66 @@
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
   let completedTaskIds = new Set<string>();
+  let revealedBatchDirs = new Set<string>();
 
-  async function notifyIfNewCompletions(newTasks: DownloadTask[]) {
-    if (!notifyOnComplete || !isDesktopRuntime) return;
+  function detectNewCompletions(newTasks: DownloadTask[]): DownloadTask[] {
     const newlyCompleted = newTasks.filter(
       (t) => t.status === "completed" && !completedTaskIds.has(t.id)
     );
-    if (!newlyCompleted.length) return;
-
     for (const t of newlyCompleted) {
       completedTaskIds.add(t.id);
     }
+    return newlyCompleted;
+  }
 
-    let permissionGranted = await isPermissionGranted();
-    if (!permissionGranted) {
-      const permission = await requestPermission();
-      permissionGranted = permission === "granted";
+  async function revealIfNewCompletions(newlyCompleted: DownloadTask[]) {
+    if (!autoRevealInFinder || !isDesktopRuntime || !newlyCompleted.length) return;
+    try {
+      if (newlyCompleted.length === 1 && newlyCompleted[0].outputPath) {
+        // Single file: reveal the specific file
+        await openInFileManager(newlyCompleted[0].outputPath, true);
+      } else {
+        // Batch: reveal the download directory root once
+        const dir = resolvedTargetDirectory();
+        if (dir && !revealedBatchDirs.has(dir)) {
+          revealedBatchDirs.add(dir);
+          await openInFileManager(dir, false);
+          // Reset after 5s so future batches can reveal again
+          setTimeout(() => revealedBatchDirs.delete(dir), 5000);
+        }
+      }
+    } catch (err) {
+      console.warn("[StreamVerse] Auto-reveal failed:", err);
     }
-    if (!permissionGranted) return;
+  }
 
-    if (newlyCompleted.length === 1) {
-      sendNotification({
-        title: tRaw("notify.downloadComplete"),
-        body: newlyCompleted[0].title ?? tRaw("notify.taskCompleted")
-      });
-    } else {
-      sendNotification({
-        title: tRaw("notify.downloadComplete"),
-        body: `${newlyCompleted.length} ${tRaw("notify.tasksCompleted")}`
-      });
+  async function notifyIfNewCompletions(newlyCompleted: DownloadTask[]) {
+    if (!notifyOnComplete || !isDesktopRuntime || !newlyCompleted.length) return;
+
+    try {
+      let permOk = await isPermissionGranted();
+      if (!permOk) {
+        const result = await requestPermission();
+        permOk = result === "granted" || result === "default";
+      }
+      if (!permOk) return;
+
+      const title = tRaw("notify.downloadComplete");
+      const body = newlyCompleted.length === 1
+        ? (newlyCompleted[0].title ?? tRaw("notify.taskCompleted"))
+        : `${newlyCompleted.length} ${tRaw("notify.tasksCompleted")}`;
+
+      await sendNotification({ title, body });
+    } catch (err) {
+      console.warn("[StreamVerse] Notification failed:", err);
     }
+  }
+
+  async function handleNewCompletions(newTasks: DownloadTask[]) {
+    const newlyCompleted = detectNewCompletions(newTasks);
+    if (!newlyCompleted.length) return;
+    void revealIfNewCompletions(newlyCompleted);
+    void notifyIfNewCompletions(newlyCompleted);
   }
 
   onMount(() => {
@@ -251,6 +284,9 @@
     return () => {
       if (pollTimer) {
         window.clearInterval(pollTimer);
+      }
+      if (unlistenTasks) {
+        unlistenTasks();
       }
     };
   });
@@ -280,6 +316,24 @@
     }
 
     if (isDesktopRuntime) {
+      // Event-driven updates from backend
+      import("@tauri-apps/api/event").then(({ listen }) => {
+        listen<void>("tasks-changed", async () => {
+          if (pollingTasks) return;
+          pollingTasks = true;
+          try {
+            const freshTasks = await listDownloadTasks();
+            void handleNewCompletions(freshTasks);
+            tasks = freshTasks;
+          } finally {
+            pollingTasks = false;
+          }
+        }).then((unlisten) => {
+          unlistenTasks = unlisten;
+        });
+      });
+
+      // Fallback slow poll for any edge cases where event is missed
       pollTimer = window.setInterval(async () => {
         if (pollingTasks) {
           return;
@@ -288,12 +342,12 @@
         pollingTasks = true;
         try {
           const freshTasks = await listDownloadTasks();
-          void notifyIfNewCompletions(freshTasks);
+          void handleNewCompletions(freshTasks);
           tasks = freshTasks;
         } finally {
           pollingTasks = false;
         }
-      }, 280);
+      }, 2000);
     }
 
     loading = false;
@@ -972,6 +1026,33 @@
     }
   }
 
+  async function handleDetectCookie(platform: PlatformId) {
+    const browser = platformAuthDrafts[platform].cookieBrowser;
+    if (!browser) {
+      errorMessage = "请先选择浏览器来源后再获取 Cookie。";
+      return;
+    }
+    detectingCookiePlatform = platform;
+    errorMessage = "";
+
+    try {
+      const cookieFile = await detectBrowserCookies(platform, browser);
+      if (cookieFile) {
+        platformAuthDrafts = {
+          ...platformAuthDrafts,
+          [platform]: {
+            ...platformAuthDrafts[platform],
+            cookieFile: cookieFile
+          }
+        };
+      }
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    } finally {
+      detectingCookiePlatform = null;
+    }
+  }
+
   async function handleOpenCurrentDirectory() {
     const path = resolvedTargetDirectory();
     if (!path) {
@@ -1261,9 +1342,7 @@
             bind:downloadOptions={douyinSingleOptions}
             bind:inputValue={douyinSingleInput}
             bind:selectedFormatId={douyinSelectedFormatId}
-            description={isWindowsPlatform
-              ? "新手可直接粘贴作品链接后点“开始解析”。如果提示需要登录，请到设置里导入一次浏览器 Cookie 或粘贴 Cookie 文本，后续会自动复用。"
-              : "粘贴作品链接后开始解析，再选择清晰度下载。"}
+            description=""
             downloading={downloadingDouyinSingle}
             formatNote="抖音默认优先推荐兼容性更高的视频格式；如果本地播放器异常，可切换列表中的其他清晰度重试。"
             heading={$t("douyin.heading")}
@@ -1295,9 +1374,7 @@
             bind:downloadOptions={douyinProfileOptions}
             bind:inputValue={douyinProfileInput}
             authState={authStateFor("douyin")}
-            description={cookieFileFor("douyin")
-              ? "已检测到已保存登录态，直接点“读取主页”即可。若结果异常，再到设置里重新导入一次 Cookie。"
-              : "首次使用请先到设置导入一次浏览器 Cookie 或粘贴 Cookie 文本，然后返回这里读取主页作品列表。"}
+            description=""
             downloadedAssetIds={douyinDownloadedAssetIds}
             heading={$t("douyin.profileHeading")}
             heroEyebrow="Profile Batch"
@@ -1336,9 +1413,7 @@
             bind:downloadOptions={bilibiliOptions}
             bind:inputValue={bilibiliInput}
             bind:selectedFormatId={bilibiliSelectedFormatId}
-            description={isWindowsPlatform
-              ? "直接粘贴哔哩哔哩视频链接即可解析。若遇到会员或登录限制内容，请到设置里导入一次 Cookie，之后可持续使用。"
-              : "粘贴视频链接后开始解析，再选择清晰度下载。"}
+            description=""
             downloading={downloadingBilibili}
             formatNote=""
             heading={$t("bilibili.heading")}
@@ -1374,9 +1449,7 @@
             analysisProgress={bilibiliProfileAnalysisProgress}
             analyzeLabel={$t("bilibili.analyzeLabel")}
             analyzeLoadingLabel={$t("bilibili.analyzeLoading")}
-            description={cookieFileFor("bilibili")
-              ? "已保存登录态，直接读取主页即可；若报错，可在设置中重新导入一次 Cookie。"
-              : "若主页读取失败，请先到设置导入一次哔哩哔哩 Cookie，再回来重试。"}
+            description=""
             downloadedAssetIds={bilibiliDownloadedAssetIds}
             enqueuing={enqueuingBilibiliProfile}
             enqueueLabel={$t("bilibili.enqueueLabel")}
@@ -1461,21 +1534,30 @@
         bind:theme
         bind:notifyOnComplete
         bind:language
-        accountLabel={bootstrap.accountLabel}
         browserOptions={browserOptions}
         ffmpegAvailable={bootstrap.ffmpegAvailable}
-        isWindows={isWindowsPlatform}
         pickingDirectory={pickingDirectory}
-        pickingCookieFilePlatform={pickingCookieFilePlatform}
+        detectingCookiePlatform={detectingCookiePlatform}
         platformAuthProfiles={bootstrap.platformAuth}
         qualityOptions={qualityOptions}
         settingsSaving={settingsSaving}
         on:close={() => { if (bootstrap) syncSettings(bootstrap); settingsOpen = false; }}
         on:pickCookieFile={(event) => handlePickCookieFile(event.detail.platform)}
+        on:detectCookie={(event) => handleDetectCookie(event.detail.platform)}
         on:pickDirectory={handlePickSaveDirectory}
         on:save={handleSaveSettings}
       />
     </section>
+
+    <!-- Global floating scroll buttons -->
+    <div class="fab-scroll-group">
+      <button class="fab-scroll" onclick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} title={$t("task.scrollToTop")} type="button">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+      </button>
+      <button class="fab-scroll" onclick={() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })} title={$t("task.scrollToBottom")} type="button">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+    </div>
 
     {#if analysisModalOpen}
       <div class="analysis-modal-overlay">

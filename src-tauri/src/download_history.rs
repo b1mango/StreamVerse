@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -133,8 +132,7 @@ fn save_history(entries: &[DownloadHistoryEntry]) {
 }
 
 fn history_path() -> PathBuf {
-    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
+    PathBuf::from(crate::settings::home_dir())
         .join(".streamverse")
         .join("download-history.json")
 }

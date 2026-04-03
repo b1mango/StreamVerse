@@ -8,8 +8,10 @@ import type {
 } from "./types";
 
 export const browserOptions = [
-  { value: "", label: "未登录" },
-  { value: "chrome", label: "Chrome" }
+  { value: "", label: "未选择" },
+  { value: "chrome", label: "Chrome" },
+  { value: "edge", label: "Edge" },
+  { value: "firefox", label: "Firefox" }
 ];
 
 export const qualityOptions: Array<{ value: QualityPreference; label: string }> = [
@@ -20,7 +22,7 @@ export const qualityOptions: Array<{ value: QualityPreference; label: string }> 
 ];
 
 export const authMap: Record<AuthState, string> = {
-  guest: "游客模式",
+  guest: "未登录",
   active: "已登录",
   expired: "登录失效"
 };

@@ -10,6 +10,7 @@ import type {
 export function createDefaultDownloadOptions(): DownloadContentSelection {
   return {
     downloadVideo: true,
+    downloadAudio: false,
     downloadCover: false,
     downloadCaption: false,
     downloadMetadata: false
@@ -19,6 +20,7 @@ export function createDefaultDownloadOptions(): DownloadContentSelection {
 export function hasSelectedDownloadOptions(options: DownloadContentSelection) {
   return (
     options.downloadVideo ||
+    options.downloadAudio ||
     options.downloadCover ||
     options.downloadCaption ||
     options.downloadMetadata
@@ -28,6 +30,7 @@ export function hasSelectedDownloadOptions(options: DownloadContentSelection) {
 export function summarizeDownloadOptions(options: DownloadContentSelection) {
   return [
     options.downloadVideo ? "视频" : null,
+    options.downloadAudio ? "MP3" : null,
     options.downloadCover ? "封面" : null,
     options.downloadCaption ? "文案" : null,
     options.downloadMetadata ? "元数据" : null

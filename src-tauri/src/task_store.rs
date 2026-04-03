@@ -1,13 +1,21 @@
 use crate::{DownloadTask, TaskReplayRequest};
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tauri::Emitter;
 
 const MAX_TASK_HISTORY: usize = 200;
 
-pub type TaskStore = Arc<Mutex<Vec<StoredTaskEntry>>>;
+pub type TaskStore = Arc<TaskStoreInner>;
+
+pub struct TaskStoreInner {
+    pub entries: Mutex<Vec<StoredTaskEntry>>,
+    dirty: AtomicBool,
+    app_handle: Mutex<Option<tauri::AppHandle>>,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,16 +31,41 @@ struct PersistedTaskFile {
 }
 
 pub fn load_task_store() -> TaskStore {
-    Arc::new(Mutex::new(load_entries()))
+    let store = Arc::new(TaskStoreInner {
+        entries: Mutex::new(load_entries()),
+        dirty: AtomicBool::new(false),
+        app_handle: Mutex::new(None),
+    });
+
+    let flusher = Arc::clone(&store);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        if flusher.dirty.swap(false, Ordering::AcqRel) {
+            let guard = flusher.entries.lock().unwrap();
+            save_entries(&guard);
+        }
+    });
+
+    store
 }
 
 #[cfg(test)]
 pub fn new_empty_task_store() -> TaskStore {
-    Arc::new(Mutex::new(Vec::new()))
+    Arc::new(TaskStoreInner {
+        entries: Mutex::new(Vec::new()),
+        dirty: AtomicBool::new(false),
+        app_handle: Mutex::new(None),
+    })
+}
+
+/// Inject the Tauri AppHandle so events can be emitted.
+pub fn set_app_handle(store: &TaskStore, handle: tauri::AppHandle) {
+    *store.app_handle.lock().unwrap() = Some(handle);
 }
 
 pub fn list_tasks(store: &TaskStore) -> Vec<DownloadTask> {
     store
+        .entries
         .lock()
         .unwrap()
         .iter()
@@ -42,6 +75,7 @@ pub fn list_tasks(store: &TaskStore) -> Vec<DownloadTask> {
 
 pub fn replay_for_task(store: &TaskStore, task_id: &str) -> Option<TaskReplayRequest> {
     store
+        .entries
         .lock()
         .unwrap()
         .iter()
@@ -50,7 +84,7 @@ pub fn replay_for_task(store: &TaskStore, task_id: &str) -> Option<TaskReplayReq
 }
 
 pub fn set_replay(store: &TaskStore, task_id: &str, replay: TaskReplayRequest) {
-    let mut guard = store.lock().unwrap();
+    let mut guard = store.entries.lock().unwrap();
     if let Some(entry) = guard.iter_mut().find(|entry| entry.task.id == task_id) {
         entry.replay = Some(replay);
         entry.task.can_retry = true;
@@ -59,7 +93,7 @@ pub fn set_replay(store: &TaskStore, task_id: &str, replay: TaskReplayRequest) {
 }
 
 pub fn upsert_task(store: &TaskStore, next: DownloadTask) {
-    let mut guard = store.lock().unwrap();
+    let mut guard = store.entries.lock().unwrap();
     if let Some(existing) = guard.iter_mut().find(|entry| entry.task.id == next.id) {
         existing.task = next;
     } else {
@@ -72,14 +106,15 @@ pub fn upsert_task(store: &TaskStore, next: DownloadTask) {
         );
     }
     trim_entries(&mut guard);
-    save_entries(&guard);
+    store.dirty.store(true, Ordering::Release);
+    emit_tasks_changed(store);
 }
 
 pub fn mutate_task<F>(store: &TaskStore, task_id: &str, mutator: F) -> Result<DownloadTask, String>
 where
     F: FnOnce(&mut DownloadTask),
 {
-    let mut guard = store.lock().unwrap();
+    let mut guard = store.entries.lock().unwrap();
     let entry = guard
         .iter_mut()
         .find(|entry| entry.task.id == task_id)
@@ -87,11 +122,21 @@ where
     mutator(&mut entry.task);
     let updated = entry.task.clone();
     save_entries(&guard);
+    emit_tasks_changed(store);
     Ok(updated)
 }
 
+/// Force any pending dirty writes to disk immediately.
+#[allow(dead_code)]
+pub fn flush(store: &TaskStore) {
+    if store.dirty.swap(false, Ordering::AcqRel) {
+        let guard = store.entries.lock().unwrap();
+        save_entries(&guard);
+    }
+}
+
 pub fn clear_finished(store: &TaskStore) -> Vec<DownloadTask> {
-    let mut guard = store.lock().unwrap();
+    let mut guard = store.entries.lock().unwrap();
     guard.retain(|entry| {
         !matches!(
             entry.task.status.as_str(),
@@ -99,11 +144,13 @@ pub fn clear_finished(store: &TaskStore) -> Vec<DownloadTask> {
         )
     });
     save_entries(&guard);
-    guard.iter().map(|entry| entry.task.clone()).collect()
+    let result = guard.iter().map(|entry| entry.task.clone()).collect();
+    emit_tasks_changed(store);
+    result
 }
 
 pub fn normalize_interrupted_tasks(store: &TaskStore) {
-    let mut guard = store.lock().unwrap();
+    let mut guard = store.entries.lock().unwrap();
     let mut changed = false;
 
     for entry in guard.iter_mut() {
@@ -164,6 +211,11 @@ fn trim_entries(entries: &mut Vec<StoredTaskEntry>) {
 }
 
 fn tasks_path() -> PathBuf {
-    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".streamverse").join("tasks.json")
+    PathBuf::from(crate::settings::home_dir()).join(".streamverse").join("tasks.json")
+}
+
+fn emit_tasks_changed(store: &TaskStore) {
+    if let Some(handle) = store.app_handle.lock().unwrap().as_ref() {
+        let _ = handle.emit("tasks-changed", ());
+    }
 }

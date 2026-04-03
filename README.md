@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.3-brightgreen" alt="version" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.4-brightgreen" alt="version" /></a>
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-blue" alt="platforms" />
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="license" />
   <img src="https://img.shields.io/badge/tauri-v2-orange" alt="tauri" />
@@ -38,12 +38,14 @@ StreamVerse 是一个面向桌面的多平台视频下载工具。项目基于 *
 - 批量列表支持搜索筛选、全选 / 反选、逐项清晰度选择
 - 多项下载自动创建以标题命名的文件夹归档
 - YouTube 支持 DASH 多线程分片下载（`--concurrent-fragments`）
+- 下载限速对所有下载路径生效（直链 / DASH 合流）
 
 **任务队列**
 - 实时显示进度、速度、ETA
 - 支持暂停 / 继续 / 取消 / 重试
 - 任务历史跨重启持久化，中断任务恢复为可重试状态
 - 一键定位已下载文件（Windows 使用原生 Shell API）
+- 全局悬浮滚动按钮：批量列表过长时一键跳到顶部 / 底部
 
 **认证与网络**
 - 分平台独立管理认证：每个平台独立配置浏览器来源和 cookies.txt
@@ -130,6 +132,7 @@ npm run tauri:build     # 构建安装包
 - YouTube 暂仅支持单视频下载，频道批量下载在规划中
 - 主页批量读取仅覆盖已发布作品，不含喜欢、收藏、直播等
 - 部分抖音链接需要浏览器 Cookie 才能正常解析
+- Windows Chrome 115+ 启用 App-Bound Encryption 后无法自动读取 Cookie，需手动导出 cookies.txt
 
 ## 文档
 

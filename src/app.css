@@ -941,6 +941,58 @@ input {
   100% { transform: translateX(430%); }
 }
 
+.task-list-scroll {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.task-scroll-controls {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.task-scroll-btn {
+  padding: 6px 12px;
+  font-size: 0.78rem;
+}
+
+/* ─── Floating scroll FABs ─── */
+.fab-scroll-group {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fab-scroll {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(15, 18, 24, 0.92);
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.fab-scroll:hover {
+  background: rgba(48, 204, 176, 0.14);
+  border-color: rgba(48, 204, 176, 0.28);
+  color: var(--mint);
+  transform: translateY(-1px);
+}
+
 /* Suppress all transitions during theme switch */
 .no-transition,
 .no-transition *,
@@ -1000,13 +1052,13 @@ input {
   transition: border-color 180ms ease, box-shadow 180ms ease;
 }
 
-select.settings-input option {
+select option {
   background: #0f1218;
   color: var(--text);
 }
 
-select.settings-input option:hover,
-select.settings-input option:checked {
+select option:hover,
+select option:checked {
   background: #1a2030;
   color: var(--text);
 }
@@ -1044,12 +1096,82 @@ select.settings-input option:checked {
   line-height: 1.6;
 }
 
+.cookie-method-details {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.cookie-method-summary {
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.cookie-method-summary:hover {
+  color: var(--text);
+}
+
+.cookie-method-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cookie-manual-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cookie-manual-guide p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.cookie-once-hint {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.cookie-text-input {
+  font-size: 0.78rem;
+  font-family: monospace;
+  resize: vertical;
+  min-height: 56px;
+}
+
 .settings-actions,
 .settings-submit {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.settings-input-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-input-group .settings-input {
+  flex: 1;
+}
+
+.settings-unit-select {
+  width: auto;
+  min-width: 80px;
+  flex: 0 0 auto;
 }
 
 .settings-status {
@@ -1540,6 +1662,17 @@ select.settings-input option:checked {
   box-shadow: 0 0 0 3px rgba(13, 155, 122, 0.08);
 }
 
+[data-theme="light"] select option {
+  background: #ffffff;
+  color: var(--text);
+}
+
+[data-theme="light"] select option:hover,
+[data-theme="light"] select option:checked {
+  background: #f0f1f3;
+  color: var(--text);
+}
+
 [data-theme="light"] input[type="text"],
 [data-theme="light"] input[type="number"],
 [data-theme="light"] textarea {
@@ -1809,4 +1942,46 @@ select.settings-input option:checked {
   background: #fff;
   border-color: rgba(0, 0, 0, 0.08);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.15);
+}
+
+/* Danger text-button */
+[data-theme="light"] .text-button.danger {
+  color: #b91c1c;
+  border-bottom-color: rgba(185, 28, 28, 0.24);
+}
+
+/* Accent chip */
+[data-theme="light"] .chip.accent {
+  color: var(--mint);
+  background: var(--mint-soft);
+  border-color: rgba(13, 155, 122, 0.18);
+}
+
+/* Settings guide card */
+[data-theme="light"] .settings-guide-card {
+  border-color: rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+/* Cookie method details */
+[data-theme="light"] .cookie-method-details {
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .cookie-method-summary {
+  background: rgba(0, 0, 0, 0.025);
+}
+
+/* Floating scroll FABs — light mode */
+[data-theme="light"] .fab-scroll {
+  background: rgba(255, 255, 255, 0.94);
+  border-color: rgba(0, 0, 0, 0.10);
+  color: var(--muted);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10);
+}
+
+[data-theme="light"] .fab-scroll:hover {
+  background: rgba(13, 155, 122, 0.08);
+  border-color: rgba(13, 155, 122, 0.28);
+  color: var(--mint);
 }

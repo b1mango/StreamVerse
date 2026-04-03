@@ -290,8 +290,7 @@ fn writable_pack_work_dir() -> PathBuf {
 }
 
 fn app_data_root() -> PathBuf {
-    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".streamverse")
+    PathBuf::from(crate::settings::home_dir()).join(".streamverse")
 }
 
 fn ensure_writable_dir(path: PathBuf) -> Option<PathBuf> {

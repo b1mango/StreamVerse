@@ -190,8 +190,7 @@ struct ToolingState {
 }
 
 fn analysis_progress_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
+    PathBuf::from(settings::home_dir())
         .join(".streamverse")
         .join("analysis-progress")
 }
@@ -495,7 +494,8 @@ fn create_download_task(
         format_id
             .as_deref()
             .is_some_and(|value| value.contains('+'))
-            || audio_direct_url.is_some(),
+            || audio_direct_url.is_some()
+            || download_options.download_audio,
     )?;
     let auth = settings::platform_auth_for(&settings.platform_auth, &platform);
     let cookie_browser = auth.cookie_browser.as_deref();
@@ -551,6 +551,7 @@ fn create_profile_download_tasks(
     }
 
     if !download_options.download_video
+        && !download_options.download_audio
         && !download_options.download_cover
         && !download_options.download_caption
         && !download_options.download_metadata
@@ -677,9 +678,10 @@ fn create_profile_download_tasks(
                 continue;
             }
 
-            if selected_format
+            if (selected_format
                 .as_ref()
                 .is_some_and(|format| format.requires_processing)
+                || download_options.download_audio)
                 && !ytdlp::ffmpeg_available(runtime_ffmpeg_path.as_deref())
             {
                 match ensure_ffmpeg_path(runtime_ffmpeg_path.as_deref(), true) {
@@ -877,7 +879,8 @@ fn retry_download_task(
             .format_id
             .as_deref()
             .is_some_and(|value| value.contains('+'))
-            || replay.audio_direct_url.is_some(),
+            || replay.audio_direct_url.is_some()
+            || replay.download_options.download_audio,
     )?;
 
     ytdlp::download_video(
@@ -906,6 +909,22 @@ fn retry_download_task(
         replay.audio_referer.as_deref(),
         replay.audio_user_agent.as_deref(),
     )
+}
+
+#[tauri::command]
+async fn detect_browser_cookies(platform: String, browser: String) -> Result<String, String> {
+    let _ = settings::normalize_auth_platform_id(&platform)?;
+    let _ = settings::normalize_cookie_browser(Some(browser.clone()))?;
+
+    // Extract cookies from the selected browser using yt-dlp --cookies-from-browser
+    // No need to open the platform URL — yt-dlp reads the browser's cookie database directly
+    let cookie_file = tauri::async_runtime::spawn_blocking(move || {
+        ytdlp::extract_browser_cookies(&browser, &platform)
+    })
+    .await
+    .map_err(|e| format!("任务执行失败：{e}"))??;
+
+    Ok(cookie_file)
 }
 
 #[tauri::command]
@@ -1252,13 +1271,14 @@ fn build_platform_auth_profiles(
 }
 
 #[tauri::command]
-fn fetch_thumbnail(url: String) -> Result<String, String> {
-    let response = reqwest::blocking::Client::builder()
+async fn fetch_thumbnail(url: String) -> Result<String, String> {
+    let response = reqwest::Client::builder()
+        .no_proxy()
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?
         .get(&url)
-        .header("Referer", "https://www.bilibili.com/")
         .send()
+        .await
         .map_err(|e| format!("缩略图请求失败: {e}"))?;
 
     if !response.status().is_success() {
@@ -1274,6 +1294,7 @@ fn fetch_thumbnail(url: String) -> Result<String, String> {
 
     let bytes = response
         .bytes()
+        .await
         .map_err(|e| format!("读取缩略图失败: {e}"))?;
 
     let mut encoded = String::from("data:");
@@ -1335,6 +1356,10 @@ fn main() {
             let ffmpeg_path = ytdlp::resolve_ffmpeg_path(app.handle())
                 .map(|path| path.to_string_lossy().to_string());
             app.manage(ToolingState { ffmpeg_path });
+
+            let state: tauri::State<'_, AppState> = app.state();
+            task_store::set_app_handle(&state.tasks, app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1353,6 +1378,7 @@ fn main() {
             cancel_download_task,
             retry_download_task,
             save_settings,
+            detect_browser_cookies,
             set_module_enabled,
             install_module_pack,
             uninstall_module_pack,

@@ -1,8 +1,8 @@
 #[cfg(test)]
 use crate::VideoFormat;
 use crate::{
-    download_history, pack_manager, parser, platforms, task_store, DownloadContentSelection,
-    DownloadTask, TaskReplayRequest,
+    download_history, pack_manager, parser, platforms, settings, task_store,
+    DownloadContentSelection, DownloadTask, TaskReplayRequest,
 };
 use reqwest::blocking::Client;
 use reqwest::Proxy;
@@ -13,6 +13,7 @@ use serde::Serialize;
 #[cfg(test)]
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -60,6 +61,7 @@ struct DownloadArtifacts {
 #[derive(Default)]
 struct ArtifactSummary {
     video_written: bool,
+    audio_written: bool,
     text_written: bool,
     metadata_written: bool,
     cover_written: bool,
@@ -140,6 +142,7 @@ struct RawHeaders {
 impl DownloadContentSelection {
     fn has_any_selection(&self) -> bool {
         self.download_video
+            || self.download_audio
             || self.download_cover
             || self.download_caption
             || self.download_metadata
@@ -147,6 +150,7 @@ impl DownloadContentSelection {
 
     fn selected_count(&self) -> usize {
         usize::from(self.download_video)
+            + usize::from(self.download_audio)
             + usize::from(self.download_cover)
             + usize::from(self.download_caption)
             + usize::from(self.download_metadata)
@@ -160,6 +164,9 @@ impl DownloadContentSelection {
         let mut labels = Vec::new();
         if self.download_video {
             labels.push("视频");
+        }
+        if self.download_audio {
+            labels.push("音频");
         }
         if self.download_cover {
             labels.push("封面");
@@ -257,6 +264,15 @@ impl OutputLayout {
         };
         unique_output_path(self.asset_root().join(file_name))
     }
+
+    fn audio_path(&self) -> PathBuf {
+        let file_name = if self.bundle_dir.is_some() {
+            "audio.mp3".to_string()
+        } else {
+            format!("{}.mp3", self.single_stem)
+        };
+        unique_output_path(self.asset_root().join(file_name))
+    }
 }
 
 pub fn new_task_controller_store() -> TaskControllerStore {
@@ -304,6 +320,45 @@ fn current_speed_limit() -> Option<String> {
         .get()
         .and_then(|m| m.lock().ok())
         .and_then(|g| g.clone())
+}
+
+/// Parse a speed limit string like "500K" or "10M" into bytes per second.
+fn parse_speed_limit_bytes(limit: Option<&str>) -> Option<u64> {
+    let limit = limit?.trim();
+    if limit.is_empty() {
+        return None;
+    }
+    let (num_part, unit) = if limit.ends_with('M') || limit.ends_with('m') {
+        (&limit[..limit.len() - 1], 1024u64 * 1024)
+    } else if limit.ends_with('K') || limit.ends_with('k') {
+        (&limit[..limit.len() - 1], 1024u64)
+    } else {
+        (limit, 1u64) // raw bytes
+    };
+    let value: u64 = num_part.parse().ok()?;
+    if value == 0 {
+        return None;
+    }
+    Some(value * unit)
+}
+
+/// Sleep to enforce speed limit. Returns the updated window state.
+fn throttle_transfer(
+    window_start: Instant,
+    window_bytes: u64,
+    bytes_per_sec: u64,
+) -> (Instant, u64) {
+    let elapsed = window_start.elapsed();
+    let expected = Duration::from_secs_f64(window_bytes as f64 / bytes_per_sec as f64);
+    if expected > elapsed {
+        thread::sleep(expected - elapsed);
+    }
+    // Reset window every second to avoid drift
+    if window_start.elapsed() >= Duration::from_secs(1) {
+        (Instant::now(), 0)
+    } else {
+        (window_start, window_bytes)
+    }
 }
 
 fn acquire_download_slot() {
@@ -360,6 +415,10 @@ pub fn download_video(
         return Err("至少要选择一种要保存的内容。".to_string());
     }
 
+    if download_options.download_audio && !download_options.download_video {
+        return Err("提取 MP3 音频需要同时勾选视频下载。".to_string());
+    }
+
     let output_dir = PathBuf::from(save_directory);
     fs::create_dir_all(&output_dir).map_err(|error| format!("创建下载目录失败：{error}"))?;
 
@@ -386,6 +445,12 @@ pub fn download_video(
             "{} 当前选中的清晰度需要 FFmpeg 合并音视频流。请先安装 FFmpeg，或切换到可直接保存的格式后再下载。",
             platforms::human_platform_name(platform)
         ));
+    }
+
+    if download_options.download_audio && !ffmpeg_available(ffmpeg_path) {
+        return Err(
+            "提取 MP3 音频需要 FFmpeg。请先在设置中安装媒体引擎组件。".to_string(),
+        );
     }
 
     let controller = Arc::new(TaskController::new(supports_pause, supports_cancel));
@@ -479,6 +544,7 @@ pub fn download_video(
                 output_layout,
                 download_options,
                 auto_reveal_in_file_manager,
+                ffmpeg_path,
                 controller,
             );
         });
@@ -527,6 +593,7 @@ pub fn download_video(
                     auto_reveal_in_file_manager,
                     referer,
                     user_agent,
+                    ffmpeg_path,
                     controller,
                 );
                 release_download_slot();
@@ -569,7 +636,7 @@ pub fn download_video(
             .arg("20")
             .arg("--newline")
             .arg("--progress-delta")
-            .arg("0.1")
+            .arg("0.5")
             .arg("--progress-template")
             .arg("download:progress:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s")
             .arg("--output")
@@ -764,6 +831,7 @@ pub fn download_video(
                         &artifacts,
                         format_label_text.as_deref(),
                         &download_options,
+                        ffmpeg_path.as_deref(),
                     );
                     if output_layout.bundle_dir.is_some() {
                         summary.output_path = output_layout.bundle_entry_path();
@@ -771,6 +839,7 @@ pub fn download_video(
                     summary
                 })
                 .unwrap_or_else(|| ArtifactSummary {
+                    output_path: Some(output_layout.destination_path()),
                     destination_path: output_layout.destination_path(),
                     warnings: vec![
                         "已下载视频，但未能确认最终文件路径，未生成封面和文案文件。".to_string()
@@ -842,6 +911,7 @@ fn metadata_only_worker(
     output_layout: OutputLayout,
     download_options: DownloadContentSelection,
     auto_reveal_in_file_manager: bool,
+    ffmpeg_path: Option<String>,
     controller: Arc<TaskController>,
 ) {
     upsert_task(
@@ -870,7 +940,7 @@ fn metadata_only_worker(
     }
 
     let summary =
-        persist_download_artifacts(&output_layout, None, &artifacts, None, &download_options);
+        persist_download_artifacts(&output_layout, None, &artifacts, None, &download_options, ffmpeg_path.as_deref());
 
     if controller.is_cancel_requested() {
         unregister_controller(&controller_store, &task_id);
@@ -935,6 +1005,7 @@ fn spawn_stream_download_worker(
     controller: Arc<TaskController>,
     progress: Arc<AtomicU64>,
     sender: mpsc::Sender<(StreamKind, StreamWorkerOutcome)>,
+    rate_limit_bytes: Option<u64>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let outcome = stream_response_to_file(
@@ -944,6 +1015,7 @@ fn spawn_stream_download_worker(
             &temp_path,
             &controller,
             &progress,
+            rate_limit_bytes,
         );
         let _ = sender.send((kind, outcome));
     })
@@ -956,8 +1028,11 @@ fn stream_response_to_file(
     temp_path: &Path,
     controller: &TaskController,
     progress: &AtomicU64,
+    rate_limit_bytes: Option<u64>,
 ) -> StreamWorkerOutcome {
-    let mut buffer = [0u8; 256 * 1024];
+    let mut buffer = [0u8; 1024 * 1024];
+    let mut throttle_window_start = Instant::now();
+    let mut throttle_window_bytes: u64 = 0;
 
     loop {
         if controller.is_cancel_requested() {
@@ -997,6 +1072,14 @@ fn stream_response_to_file(
         }
 
         progress.fetch_add(bytes_read as u64, Ordering::Relaxed);
+
+        if let Some(limit) = rate_limit_bytes {
+            throttle_window_bytes += bytes_read as u64;
+            let (new_start, new_bytes) =
+                throttle_transfer(throttle_window_start, throttle_window_bytes, limit);
+            throttle_window_start = new_start;
+            throttle_window_bytes = new_bytes;
+        }
     }
 
     if let Err(error) = file.flush() {
@@ -1023,6 +1106,7 @@ fn direct_download_worker(
     auto_reveal_in_file_manager: bool,
     referer: Option<String>,
     user_agent: Option<String>,
+    ffmpeg_path: Option<String>,
     controller: Arc<TaskController>,
 ) {
     upsert_task(
@@ -1067,7 +1151,7 @@ fn direct_download_worker(
         request = request.header(USER_AGENT, user_agent);
     }
 
-    let mut response = match request.send() {
+    let response = match request.send() {
         Ok(response) => response,
         Err(error) => {
             unregister_controller(&controller_store, &task_id);
@@ -1090,21 +1174,68 @@ fn direct_download_worker(
     let final_path = output_layout.video_path(&extension);
     let temp_path = final_path.with_extension(format!("{extension}.download"));
 
-    let mut file = match File::create(&temp_path) {
-        Ok(file) => file,
-        Err(error) => {
-            unregister_controller(&controller_store, &task_id);
-            fail_task(&task_store, &task_id, format!("创建临时文件失败：{error}"));
-            return;
+    // Resume support: check for existing partial download
+    let existing_bytes = fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+    let mut resumed = false;
+
+    let (mut response, mut downloaded_bytes) = if existing_bytes > 0 {
+        // Try Range request for resume
+        let mut resume_request = client.get(&direct_url);
+        if let Some(referer) = referer.as_deref() {
+            resume_request = resume_request.header(REFERER, referer);
+        }
+        if let Some(user_agent) = user_agent.as_deref() {
+            resume_request = resume_request.header(USER_AGENT, user_agent);
+        }
+        resume_request = resume_request.header("Range", format!("bytes={}-", existing_bytes));
+
+        match resume_request.send() {
+            Ok(range_resp) if range_resp.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
+                resumed = true;
+                (range_resp, existing_bytes)
+            }
+            _ => {
+                // Server doesn't support Range — start over
+                let _ = fs::remove_file(&temp_path);
+                (response, 0u64)
+            }
+        }
+    } else {
+        (response, 0u64)
+    };
+
+    let mut file = if resumed {
+        match fs::OpenOptions::new().append(true).open(&temp_path) {
+            Ok(file) => file,
+            Err(error) => {
+                unregister_controller(&controller_store, &task_id);
+                fail_task(&task_store, &task_id, format!("打开续传文件失败：{error}"));
+                return;
+            }
+        }
+    } else {
+        match File::create(&temp_path) {
+            Ok(file) => file,
+            Err(error) => {
+                unregister_controller(&controller_store, &task_id);
+                fail_task(&task_store, &task_id, format!("创建临时文件失败：{error}"));
+                return;
+            }
         }
     };
 
-    let total_bytes = response.content_length().unwrap_or(0);
-    let mut downloaded_bytes = 0u64;
-    let mut buffer = [0u8; 256 * 1024];
-    let started_at = Instant::now();
+    let total_bytes = if resumed {
+        existing_bytes + response.content_length().unwrap_or(0)
+    } else {
+        response.content_length().unwrap_or(0)
+    };
+    let mut buffer = [0u8; 1024 * 1024];
     let mut last_report = Instant::now();
-    let mut paused_for = Duration::ZERO;
+    let mut speed_tracker = SpeedTracker::new();
+    speed_tracker.record(Instant::now(), 0);
+    let rate_limit_bytes = parse_speed_limit_bytes(current_speed_limit().as_deref());
+    let mut throttle_window_start = Instant::now();
+    let mut throttle_window_bytes: u64 = 0;
 
     loop {
         if controller.is_cancel_requested() {
@@ -1122,17 +1253,10 @@ fn direct_download_worker(
                     platform: artifacts.platform.clone(),
                     title: title.clone(),
                     progress: compute_percent(downloaded_bytes, total_bytes),
-                    speed_text: human_speed(
-                        downloaded_bytes,
-                        started_at.elapsed().saturating_sub(paused_for),
-                    ),
+                    speed_text: speed_tracker.human_speed_text(),
                     format_label: format_label.clone(),
                     status: "paused".to_string(),
-                    eta_text: human_eta(
-                        downloaded_bytes,
-                        total_bytes,
-                        started_at.elapsed().saturating_sub(paused_for),
-                    ),
+                    eta_text: speed_tracker.human_eta_text(downloaded_bytes, total_bytes),
                     message: Some("已暂停，可以继续或取消。".to_string()),
                     output_path: None,
                     supports_pause: true,
@@ -1141,7 +1265,7 @@ fn direct_download_worker(
                 },
             );
 
-            let paused_at = Instant::now();
+            let _paused_at = Instant::now();
             while controller.is_pause_requested() {
                 if controller.is_cancel_requested() {
                     let _ = fs::remove_file(&temp_path);
@@ -1152,7 +1276,9 @@ fn direct_download_worker(
                 thread::sleep(Duration::from_millis(180));
             }
 
-            paused_for += paused_at.elapsed();
+            speed_tracker.record(Instant::now(), downloaded_bytes);
+            throttle_window_start = Instant::now();
+            throttle_window_bytes = 0;
             upsert_task(
                 &task_store,
                 DownloadTask {
@@ -1160,17 +1286,10 @@ fn direct_download_worker(
                     platform: artifacts.platform.clone(),
                     title: title.clone(),
                     progress: compute_percent(downloaded_bytes, total_bytes),
-                    speed_text: human_speed(
-                        downloaded_bytes,
-                        started_at.elapsed().saturating_sub(paused_for),
-                    ),
+                    speed_text: speed_tracker.human_speed_text(),
                     format_label: format_label.clone(),
                     status: "downloading".to_string(),
-                    eta_text: human_eta(
-                        downloaded_bytes,
-                        total_bytes,
-                        started_at.elapsed().saturating_sub(paused_for),
-                    ),
+                    eta_text: speed_tracker.human_eta_text(downloaded_bytes, total_bytes),
                     message: Some("继续下载…".to_string()),
                     output_path: None,
                     supports_pause: true,
@@ -1183,7 +1302,7 @@ fn direct_download_worker(
         let bytes_read = match response.read(&mut buffer) {
             Ok(bytes_read) => bytes_read,
             Err(error) => {
-                let _ = fs::remove_file(&temp_path);
+                // Keep temp file for resume on retry
                 unregister_controller(&controller_store, &task_id);
                 fail_task(&task_store, &task_id, format!("读取下载响应失败：{error}"));
                 return;
@@ -1195,15 +1314,24 @@ fn direct_download_worker(
         }
 
         if let Err(error) = file.write_all(&buffer[..bytes_read]) {
-            let _ = fs::remove_file(&temp_path);
+            // Keep temp file for resume on retry
             unregister_controller(&controller_store, &task_id);
             fail_task(&task_store, &task_id, format!("写入下载文件失败：{error}"));
             return;
         }
 
         downloaded_bytes += bytes_read as u64;
+
+        if let Some(limit) = rate_limit_bytes {
+            throttle_window_bytes += bytes_read as u64;
+            let (new_start, new_bytes) =
+                throttle_transfer(throttle_window_start, throttle_window_bytes, limit);
+            throttle_window_start = new_start;
+            throttle_window_bytes = new_bytes;
+        }
+
         if last_report.elapsed() >= Duration::from_millis(250) {
-            let active_elapsed = started_at.elapsed().saturating_sub(paused_for);
+            speed_tracker.record(Instant::now(), downloaded_bytes);
             upsert_task(
                 &task_store,
                 DownloadTask {
@@ -1211,10 +1339,10 @@ fn direct_download_worker(
                     platform: artifacts.platform.clone(),
                     title: title.clone(),
                     progress: compute_percent(downloaded_bytes, total_bytes),
-                    speed_text: human_speed(downloaded_bytes, active_elapsed),
+                    speed_text: speed_tracker.human_speed_text(),
                     format_label: format_label.clone(),
                     status: "downloading".to_string(),
-                    eta_text: human_eta(downloaded_bytes, total_bytes, active_elapsed),
+                    eta_text: speed_tracker.human_eta_text(downloaded_bytes, total_bytes),
                     message: Some("正在下载…".to_string()),
                     output_path: None,
                     supports_pause: true,
@@ -1246,6 +1374,7 @@ fn direct_download_worker(
         &artifacts,
         Some(&format_label),
         &download_options,
+        ffmpeg_path.as_deref(),
     );
     if output_layout.bundle_dir.is_some() {
         artifact_summary.output_path = output_layout.bundle_entry_path();
@@ -1336,18 +1465,25 @@ fn dash_download_worker(
         return;
     }
 
-    let video_head_total = probe_content_length(
-        &client,
-        &video_direct_url,
-        video_referer.as_deref(),
-        video_user_agent.as_deref(),
-    );
-    let audio_head_total = probe_content_length(
-        &client,
-        &audio_direct_url,
-        audio_referer.as_deref(),
-        audio_user_agent.as_deref(),
-    );
+    let (video_head_total, audio_head_total) = std::thread::scope(|s| {
+        let v = s.spawn(|| {
+            probe_content_length(
+                &client,
+                &video_direct_url,
+                video_referer.as_deref(),
+                video_user_agent.as_deref(),
+            )
+        });
+        let a = s.spawn(|| {
+            probe_content_length(
+                &client,
+                &audio_direct_url,
+                audio_referer.as_deref(),
+                audio_user_agent.as_deref(),
+            )
+        });
+        (v.join().unwrap_or(0), a.join().unwrap_or(0))
+    });
 
     let mut video_request = client.get(&video_direct_url);
     if let Some(referer) = video_referer.as_deref() {
@@ -1448,6 +1584,9 @@ fn dash_download_worker(
     let (sender, receiver) = mpsc::channel::<(StreamKind, StreamWorkerOutcome)>();
     let video_progress = Arc::new(AtomicU64::new(0));
     let audio_progress = Arc::new(AtomicU64::new(0));
+    let rate_limit_bytes = parse_speed_limit_bytes(current_speed_limit().as_deref());
+    // Split rate limit between two streams
+    let per_stream_limit = rate_limit_bytes.map(|l| (l / 2).max(1));
     let video_handle = spawn_stream_download_worker(
         StreamKind::Video,
         video_response,
@@ -1456,6 +1595,7 @@ fn dash_download_worker(
         Arc::clone(&controller),
         Arc::clone(&video_progress),
         sender.clone(),
+        per_stream_limit,
     );
     let audio_handle = spawn_stream_download_worker(
         StreamKind::Audio,
@@ -1465,11 +1605,12 @@ fn dash_download_worker(
         Arc::clone(&controller),
         Arc::clone(&audio_progress),
         sender,
+        per_stream_limit,
     );
 
-    let started_at = Instant::now();
     let mut last_report = Instant::now();
-    let mut paused_for = Duration::ZERO;
+    let mut speed_tracker = SpeedTracker::new();
+    speed_tracker.record(Instant::now(), 0);
     let mut video_finished = false;
     let mut audio_finished = false;
     let mut cancelled = false;
@@ -1525,31 +1666,10 @@ fn dash_download_worker(
                     } else {
                         dash_phase_progress(video_downloaded, video_total, 0, 85)
                     },
-                    speed_text: human_speed(
-                        downloaded_known,
-                        started_at.elapsed().saturating_sub(paused_for),
-                    ),
+                    speed_text: speed_tracker.human_speed_text(),
                     format_label: format_label.clone(),
                     status: "paused".to_string(),
-                    eta_text: if total_known > 0 {
-                        human_eta(
-                            downloaded_known,
-                            total_known,
-                            started_at.elapsed().saturating_sub(paused_for),
-                        )
-                    } else if video_finished {
-                        dash_phase_eta(
-                            audio_downloaded,
-                            audio_total,
-                            started_at.elapsed().saturating_sub(paused_for),
-                        )
-                    } else {
-                        dash_phase_eta(
-                            video_downloaded,
-                            video_total,
-                            started_at.elapsed().saturating_sub(paused_for),
-                        )
-                    },
+                    eta_text: speed_tracker.human_eta_text(downloaded_known, total_known),
                     message: Some("已暂停，可以继续或取消。".to_string()),
                     output_path: None,
                     supports_pause: true,
@@ -1558,7 +1678,7 @@ fn dash_download_worker(
                 },
             );
 
-            let paused_at = Instant::now();
+            let _paused_at = Instant::now();
             while controller.is_pause_requested() {
                 while let Ok((kind, outcome)) = receiver.try_recv() {
                     finished_count += 1;
@@ -1593,13 +1713,12 @@ fn dash_download_worker(
                 thread::sleep(Duration::from_millis(180));
             }
 
-            paused_for += paused_at.elapsed();
             last_report = Instant::now();
             continue;
         }
 
         if last_report.elapsed() >= Duration::from_millis(180) {
-            let active_elapsed = started_at.elapsed().saturating_sub(paused_for);
+            speed_tracker.record(Instant::now(), downloaded_known);
             upsert_task(
                 &task_store,
                 DownloadTask {
@@ -1613,16 +1732,10 @@ fn dash_download_worker(
                     } else {
                         dash_phase_progress(video_downloaded, video_total, 0, 85)
                     },
-                    speed_text: human_speed(downloaded_known, active_elapsed),
+                    speed_text: speed_tracker.human_speed_text(),
                     format_label: format_label.clone(),
                     status: "downloading".to_string(),
-                    eta_text: if total_known > 0 {
-                        human_eta(downloaded_known, total_known, active_elapsed)
-                    } else if video_finished {
-                        dash_phase_eta(audio_downloaded, audio_total, active_elapsed)
-                    } else {
-                        dash_phase_eta(video_downloaded, video_total, active_elapsed)
-                    },
+                    eta_text: speed_tracker.human_eta_text(downloaded_known, total_known),
                     message: Some(dash_message(video_finished, audio_finished).to_string()),
                     output_path: None,
                     supports_pause: true,
@@ -1737,6 +1850,7 @@ fn dash_download_worker(
         &artifacts,
         Some(&format_label),
         &download_options,
+        ffmpeg_path.as_deref(),
     );
     if output_layout.bundle_dir.is_some() {
         artifact_summary.output_path = output_layout.bundle_entry_path();
@@ -1954,6 +2068,7 @@ fn persist_download_artifacts(
     artifacts: &DownloadArtifacts,
     format_label: Option<&str>,
     download_options: &DownloadContentSelection,
+    ffmpeg_path: Option<&str>,
 ) -> ArtifactSummary {
     let mut summary = ArtifactSummary {
         video_written: video_path.is_some(),
@@ -1966,6 +2081,53 @@ fn persist_download_artifacts(
         warnings: Vec::new(),
         ..ArtifactSummary::default()
     };
+
+    if download_options.download_audio {
+        if let Some(source_video) = video_path {
+            let audio_output = output_layout.audio_path();
+            let ffmpeg_binary = ffmpeg_path
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("ffmpeg");
+            let result = silent_command(ffmpeg_binary)
+                .arg("-y")
+                .arg("-i")
+                .arg(source_video)
+                .arg("-vn")
+                .arg("-acodec")
+                .arg("libmp3lame")
+                .arg("-q:a")
+                .arg("2")
+                .arg(&audio_output)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output();
+            match result {
+                Ok(output) if output.status.success() => {
+                    summary.audio_written = true;
+                    if summary.output_path.is_none() {
+                        summary.output_path =
+                            Some(audio_output.to_string_lossy().to_string());
+                    }
+                }
+                Ok(output) => {
+                    let stderr_text = String::from_utf8_lossy(&output.stderr);
+                    summary.warnings.push(format!(
+                        "MP3 提取失败：{}",
+                        stderr_text.lines().last().unwrap_or("未知错误")
+                    ));
+                }
+                Err(error) => {
+                    summary
+                        .warnings
+                        .push(format!("启动 FFmpeg 提取音频失败：{error}"));
+                }
+            }
+        } else {
+            summary
+                .warnings
+                .push("没有可用的视频文件，无法提取音频。".to_string());
+        }
+    }
 
     if download_options.download_caption {
         let text_path = output_layout.caption_path();
@@ -2105,6 +2267,9 @@ fn build_completion_message(output_dir_text: &str, summary: &ArtifactSummary) ->
     let mut items = Vec::new();
     if summary.video_written {
         items.push("视频".to_string());
+    }
+    if summary.audio_written {
+        items.push("音频".to_string());
     }
     if summary.text_written {
         items.push("文案".to_string());
@@ -2356,7 +2521,13 @@ fn unique_output_dir(base_path: PathBuf) -> PathBuf {
 
 fn compute_percent(downloaded_bytes: u64, total_bytes: u64) -> u32 {
     if total_bytes == 0 {
-        return 0;
+        // Unknown total: show indeterminate-style progress capped at 90%
+        if downloaded_bytes == 0 {
+            return 0;
+        }
+        // Asymptotic curve: quickly rises then flattens near 90%
+        let mb = downloaded_bytes as f64 / (1024.0 * 1024.0);
+        return (90.0 * (1.0 - (-mb / 50.0).exp())).round().clamp(1.0, 90.0) as u32;
     }
 
     ((downloaded_bytes as f64 / total_bytes as f64) * 100.0)
@@ -2366,7 +2537,11 @@ fn compute_percent(downloaded_bytes: u64, total_bytes: u64) -> u32 {
 
 fn dash_combined_progress(downloaded_bytes: u64, total_bytes: u64) -> u32 {
     if total_bytes == 0 {
-        return 0;
+        if downloaded_bytes == 0 {
+            return 0;
+        }
+        let mb = downloaded_bytes as f64 / (1024.0 * 1024.0);
+        return (90.0 * (1.0 - (-mb / 100.0).exp())).round().clamp(1.0, 90.0) as u32;
     }
 
     ((downloaded_bytes as f64 / total_bytes as f64) * 96.0)
@@ -2380,7 +2555,14 @@ fn dash_phase_progress(downloaded_bytes: u64, total_bytes: u64, start: u32, end:
     }
 
     if total_bytes == 0 {
-        return start.max(1);
+        if downloaded_bytes == 0 {
+            return start.max(1);
+        }
+        // Unknown total: asymptotic progress within [start, end)
+        let span = (end - start) as f64;
+        let mb = downloaded_bytes as f64 / (1024.0 * 1024.0);
+        let offset = (span * (1.0 - (-mb / 50.0).exp())).round().clamp(0.0, span - 1.0) as u32;
+        return (start + offset).clamp(start, end - 1);
     }
 
     let span = (end - start) as f64;
@@ -2388,15 +2570,6 @@ fn dash_phase_progress(downloaded_bytes: u64, total_bytes: u64, start: u32, end:
         .round()
         .clamp(0.0, span) as u32;
     (start + offset).clamp(start, end)
-}
-
-fn dash_phase_eta(downloaded_bytes: u64, total_bytes: u64, elapsed: Duration) -> String {
-    let eta = human_eta(downloaded_bytes, total_bytes, elapsed);
-    if eta == "—" {
-        "准备中".to_string()
-    } else {
-        eta
-    }
 }
 
 fn dash_output_extension(video_extension: &str, audio_extension: &str) -> String {
@@ -2441,34 +2614,62 @@ fn probe_content_length(
         .unwrap_or(0)
 }
 
-fn human_speed(downloaded_bytes: u64, elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs_f64();
-    if seconds <= 0.0 {
-        return "-".to_string();
-    }
-
-    human_bytes(downloaded_bytes as f64 / seconds, "/s")
+/// 3-second sliding window speed tracker for direct downloads.
+struct SpeedTracker {
+    samples: VecDeque<(Instant, u64)>,
+    window: Duration,
 }
 
-fn human_eta(downloaded_bytes: u64, total_bytes: u64, elapsed: Duration) -> String {
-    if total_bytes == 0 || downloaded_bytes >= total_bytes {
-        return "—".to_string();
+impl SpeedTracker {
+    fn new() -> Self {
+        Self {
+            samples: VecDeque::new(),
+            window: Duration::from_secs(3),
+        }
     }
 
-    let seconds = elapsed.as_secs_f64();
-    if seconds <= 0.0 {
-        return "—".to_string();
+    fn record(&mut self, now: Instant, bytes: u64) {
+        self.samples.push_back((now, bytes));
+        let cutoff = now.checked_sub(self.window).unwrap_or(now);
+        while self.samples.front().is_some_and(|(t, _)| *t < cutoff) {
+            self.samples.pop_front();
+        }
     }
 
-    let speed = downloaded_bytes as f64 / seconds;
-    if speed <= 0.0 {
-        return "—".to_string();
+    fn speed_bps(&self) -> Option<f64> {
+        if self.samples.len() < 2 {
+            return None;
+        }
+        let (first_t, first_b) = self.samples.front().unwrap();
+        let (last_t, last_b) = self.samples.back().unwrap();
+        let dt = last_t.duration_since(*first_t).as_secs_f64();
+        if dt <= 0.0 {
+            return None;
+        }
+        Some((*last_b - *first_b) as f64 / dt)
     }
 
-    let remaining = ((total_bytes - downloaded_bytes) as f64 / speed).round() as u64;
-    let minutes = remaining / 60;
-    let seconds = remaining % 60;
-    format!("{minutes:02}:{seconds:02}")
+    fn human_speed_text(&self) -> String {
+        match self.speed_bps() {
+            Some(bps) if bps > 0.0 => human_bytes(bps, "/s"),
+            _ => "-".to_string(),
+        }
+    }
+
+    fn human_eta_text(&self, downloaded_bytes: u64, total_bytes: u64) -> String {
+        if total_bytes == 0 || downloaded_bytes >= total_bytes {
+            return "—".to_string();
+        }
+        match self.speed_bps() {
+            Some(bps) if bps > 0.0 => {
+                let remaining = ((total_bytes - downloaded_bytes) as f64 / bps).round() as u64;
+                let minutes = remaining / 60;
+                let seconds = remaining % 60;
+                format!("{minutes:02}:{seconds:02}")
+            }
+            _ => "—".to_string(),
+        }
+    }
 }
 
 fn human_bytes(bytes: f64, suffix: &str) -> String {
@@ -2486,6 +2687,125 @@ fn human_bytes(bytes: f64, suffix: &str) -> String {
     } else {
         format!("{value:.2} {}{}", UNITS[unit_index], suffix)
     }
+}
+
+/// Use the `rookie` crate to extract cookies directly from a browser's cookie database.
+/// This bypasses Chrome's App-Bound Encryption (DPAPI) on Windows.
+fn extract_cookies_via_rookie(browser: &str, platform: &str) -> Result<String, String> {
+    let domains: Vec<String> = match platform {
+        "douyin" => vec![".douyin.com".into(), ".iesdouyin.com".into()],
+        "bilibili" => vec![".bilibili.com".into()],
+        "youtube" => vec![".youtube.com".into(), ".google.com".into()],
+        _ => return Err(format!("不支持的平台：{platform}")),
+    };
+
+    let cookies = match browser.to_lowercase().as_str() {
+        "chrome" => rookie::chrome(Some(domains)),
+        "edge" => rookie::edge(Some(domains)),
+        "firefox" => rookie::firefox(Some(domains)),
+        _ => return Err(format!("rookie 不支持的浏览器：{browser}")),
+    }
+    .map_err(|e| format!("从 {} 读取 Cookie 失败：{e}", browser.to_uppercase()))?;
+
+    if cookies.is_empty() {
+        return Err(format!(
+            "从 {} 未读取到 {} 的 Cookie，请先在浏览器中登录该平台。",
+            browser.to_uppercase(),
+            platform
+        ));
+    }
+
+    // Convert to Netscape cookie format
+    let mut lines = vec!["# Netscape HTTP Cookie File".to_string()];
+    for c in &cookies {
+        let http_only_prefix = if c.http_only { "#HttpOnly_" } else { "" };
+        let domain = &c.domain;
+        let flag = if domain.starts_with('.') { "TRUE" } else { "FALSE" };
+        let secure = if c.secure { "TRUE" } else { "FALSE" };
+        let expires = c.expires.unwrap_or(0);
+        lines.push(format!(
+            "{http_only_prefix}{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}",
+            path = c.path,
+            name = c.name,
+            value = c.value,
+        ));
+    }
+    let content = lines.join("\n") + "\n";
+
+    let home = settings::home_dir();
+    let cookie_dir = PathBuf::from(&home).join(".streamverse").join("auth");
+    if let Err(e) = fs::create_dir_all(&cookie_dir) {
+        return Err(format!("创建 Cookie 目录失败：{e}"));
+    }
+    let cookie_output = cookie_dir.join(format!("saved-{platform}-cookies.txt"));
+    fs::write(&cookie_output, content)
+        .map_err(|e| format!("写入 Cookie 文件失败：{e}"))?;
+
+    Ok(cookie_output.to_string_lossy().to_string())
+}
+
+/// Extract cookies from a browser: try `rookie` first (native, bypasses DPAPI),
+/// fall back to yt-dlp `--cookies-from-browser` if rookie fails.
+pub fn extract_browser_cookies(browser: &str, platform: &str) -> Result<String, String> {
+    // Try rookie first — works even with Chrome App-Bound Encryption
+    match extract_cookies_via_rookie(browser, platform) {
+        Ok(path) => return Ok(path),
+        Err(rookie_err) => {
+            eprintln!("[rookie] Cookie extraction failed: {rookie_err}");
+            // Fall through to yt-dlp method
+        }
+    }
+
+    let ytdlp_binary = resolve_ytdlp_path()?;
+
+    let test_url = match platform {
+        "douyin" => "https://www.douyin.com",
+        "bilibili" => "https://www.bilibili.com",
+        "youtube" => "https://www.youtube.com",
+        _ => return Err(format!("不支持的平台：{platform}")),
+    };
+
+    let home = settings::home_dir();
+    let cookie_dir = PathBuf::from(&home).join(".streamverse").join("auth");
+    if let Err(e) = fs::create_dir_all(&cookie_dir) {
+        return Err(format!("创建 Cookie 目录失败：{e}"));
+    }
+    let cookie_output = cookie_dir.join(format!("saved-{platform}-cookies.txt"));
+
+    let browser_arg = normalize_cookie_browser_arg(browser);
+
+    let mut cmd = silent_command(&ytdlp_binary);
+    cmd.arg("--cookies-from-browser")
+        .arg(&browser_arg)
+        .arg("--cookies")
+        .arg(&cookie_output)
+        .arg("--skip-download")
+        .arg("--no-warnings")
+        .arg("--quiet")
+        .arg(test_url);
+
+    extend_runtime_path(&mut cmd);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("启动 yt-dlp 失败：{e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Failed to decrypt") || stderr.contains("DPAPI") {
+            return Err(format!(
+                "无法自动获取 {} 的 Cookie（浏览器安全限制）。请使用「手动粘贴」方式：在浏览器中按 F12 打开开发者工具，从网络请求头中复制 Cookie 值，粘贴到设置里的 Cookie 文本框中保存即可。",
+                browser.to_uppercase()
+            ));
+        }
+        return Err(format!("从 {} 提取 Cookie 失败：{}", browser, stderr.trim()));
+    }
+
+    if !cookie_output.exists() || fs::metadata(&cookie_output).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Err(format!("Cookie 文件为空，请先在 {} 中登录 {} 后再试。", browser.to_uppercase(), platform));
+    }
+
+    Ok(cookie_output.to_string_lossy().to_string())
 }
 
 fn append_auth_args(
@@ -2507,7 +2827,8 @@ fn append_auth_args(
 fn normalize_cookie_browser_arg(browser: &str) -> String {
     #[cfg(target_os = "windows")]
     {
-        if browser.to_lowercase() == "chrome" {
+        let lower = browser.to_lowercase();
+        if matches!(lower.as_str(), "chrome" | "edge") {
             ensure_chrome_cookie_unlock_plugin();
         }
     }
@@ -2553,7 +2874,15 @@ fn append_platform_ytdlp_args(command: &mut Command, platform: &str) {
         .arg("--extractor-args")
         .arg(YOUTUBE_EXTRACTOR_ARGS)
         .arg("--concurrent-fragments")
-        .arg("4");
+        .arg("8")
+        .arg("--http-chunk-size")
+        .arg("10485760")
+        .arg("--retries")
+        .arg("10")
+        .arg("--fragment-retries")
+        .arg("10")
+        .arg("--buffer-size")
+        .arg("1M");
 }
 
 fn append_network_args(command: &mut Command, proxy_url: Option<&str>, speed_limit: Option<&str>) {
@@ -3170,6 +3499,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             Arc::new(TaskController::new(true, true)),
         );
 
@@ -3390,6 +3720,7 @@ mod tests {
             &sample_artifacts(Some(format!("http://{address}/cover.jpg"))),
             Some("1080P"),
             &options,
+            None,
         );
 
         server.join().unwrap();
@@ -3439,6 +3770,7 @@ mod tests {
     fn video_only_options() -> DownloadContentSelection {
         DownloadContentSelection {
             download_video: true,
+            download_audio: false,
             download_cover: false,
             download_caption: false,
             download_metadata: false,
@@ -3448,6 +3780,7 @@ mod tests {
     fn bundle_options() -> DownloadContentSelection {
         DownloadContentSelection {
             download_video: true,
+            download_audio: false,
             download_cover: true,
             download_caption: true,
             download_metadata: true,

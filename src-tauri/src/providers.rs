@@ -69,6 +69,39 @@ fn normalize_douyin_error(error: String) -> String {
         return "抖音登录态已失效，或当前 Cookie 来源不可用。请重新登录抖音后再试；如果你使用的是 Chrome，建议改为导入 cookies.txt 文件。".to_string();
     }
 
+    if error.contains("timed out")
+        || error.contains("Timeout")
+        || error.contains("ConnectTimeout")
+        || error.contains("ReadTimeout")
+    {
+        return "网络连接超时，请检查网络连接后重试。".to_string();
+    }
+
+    if error.contains("getaddrinfo failed")
+        || error.contains("Name or service not known")
+        || error.contains("nodename nor servname")
+    {
+        return "DNS 解析失败，请检查网络连接或尝试更换 DNS 服务器。".to_string();
+    }
+
+    if error.contains("SSL")
+        || error.contains("CERTIFICATE_VERIFY_FAILED")
+        || error.contains("certificate verify failed")
+    {
+        return "SSL 证书验证失败，请检查系统时间是否正确以及网络环境是否安全。".to_string();
+    }
+
+    if error.contains("HTTP Error 429")
+        || error.contains("Too Many Requests")
+        || error.contains("rate limit")
+    {
+        return "请求过于频繁被限流，请稍等几分钟后重试。".to_string();
+    }
+
+    if error.contains("HTTP Error 403") || error.contains("Forbidden") {
+        return "访问被拒绝（403），可能需要重新登录或更换 Cookie。".to_string();
+    }
+
     error
 }
 

@@ -25,12 +25,10 @@
   };
   export let qualityPreference: QualityPreference = "recommended";
   export let autoRevealInFinder = false;
-  export let accountLabel = "未登录";
   export let ffmpegAvailable = false;
-  export let isWindows = false;
   export let settingsSaving = false;
   export let pickingDirectory = false;
-  export let pickingCookieFilePlatform: PlatformId | null = null;
+  export let detectingCookiePlatform: PlatformId | null = null;
   export let browserOptions: Array<{ value: string; label: string }> = [];
   export let qualityOptions: Array<{ value: QualityPreference; label: string }> = [];
 
@@ -41,6 +39,21 @@
   export let theme: ThemeMode = "dark";
   export let notifyOnComplete = true;
   export let language: LanguageCode = "zh-CN";
+
+  // Parse speedLimit into value + unit for the UI
+  let speedLimitValue = "";
+  let speedLimitUnit: "K" | "M" = "M";
+  {
+    const match = (speedLimit || "").match(/^(\d+(?:\.\d+)?)\s*([KkMm])?/);
+    if (match) {
+      speedLimitValue = match[1];
+      speedLimitUnit = (match[2] || "M").toUpperCase() as "K" | "M";
+    }
+  }
+
+  function updateSpeedLimit() {
+    speedLimit = speedLimitValue ? `${speedLimitValue}${speedLimitUnit}` : "";
+  }
 
   const themeOptions: Array<{ value: ThemeMode; label: string }> = [
     { value: "dark", label: "深色模式" },
@@ -57,6 +70,7 @@
     save: void;
     pickDirectory: void;
     pickCookieFile: { platform: PlatformId };
+    detectCookie: { platform: PlatformId };
   }>();
 
   const authPlatforms: PlatformId[] = ["douyin", "bilibili", "youtube"];
@@ -139,7 +153,7 @@
       <div class="settings-auth-block">
         <div>
           <span class="settings-label">{$t('settings.platformAuth')}</span>
-          <p class="settings-hint">{$t('settings.platformAuthHint')}</p>
+          <p class="cookie-once-hint">{$t('settings.cookieOnceHint')}</p>
         </div>
 
         {#each authPlatforms as platform}
@@ -147,81 +161,75 @@
             <div class="settings-auth-head">
               <div>
                 <strong>{platformMeta[platform].label}</strong>
-                <p class="settings-hint">
-                  {$t('settings.currentStatus')}：{authProfile(platform).accountLabel}
-                </p>
               </div>
               <span class="chip subtle">{$t(`auth.${authProfile(platform).authState}`)}</span>
             </div>
 
-            <label class="settings-field">
-              <span class="settings-label">{$t('settings.browserSource')}</span>
-              <select
-                class="settings-input"
-                value={authDraft(platform).cookieBrowser ?? ""}
-                onchange={(event) =>
-                  updateAuthDraft(
-                    platform,
-                    'cookieBrowser',
-                    (event.currentTarget as HTMLSelectElement).value || null
-                  )}
-              >
-                {#each browserOptions as option}
-                  <option value={option.value}>{option.label}</option>
-                {/each}
-              </select>
-            </label>
+            <!-- Method 1: Manual (recommended) -->
+            <details class="cookie-method-details" open>
+              <summary class="cookie-method-summary">{$t('settings.cookieMethodManual')}</summary>
+              <div class="cookie-method-body">
+                <div class="cookie-manual-guide">
+                  <p>{$t('settings.cookieManualStep1')}</p>
+                  <p>{$t('settings.cookieManualStep2')}</p>
+                  <p>{$t('settings.cookieManualStep3')}</p>
+                  <p>{$t('settings.cookieManualStep4')}</p>
+                  <p>{$t('settings.cookieManualStep5')}</p>
+                </div>
 
-            <label class="settings-field">
-              <span class="settings-label">{$t('settings.cookieFile')}</span>
-              <input
-                class="settings-input"
-                placeholder={$t('settings.cookieFilePlaceholder')}
-                type="text"
-                value={authDraft(platform).cookieFile ?? ""}
-                oninput={(event) =>
-                  updateAuthDraft(
-                    platform,
-                    'cookieFile',
-                    (event.currentTarget as HTMLInputElement).value || null
-                  )}
-              />
-            </label>
-
-            <div class="settings-actions">
-              <button
-                class="secondary-button"
-                onclick={() => dispatch('pickCookieFile', { platform })}
-                disabled={Boolean(pickingCookieFilePlatform) || settingsSaving}
-              >
-                {pickingCookieFilePlatform === platform
-                  ? $t('settings.pickingCookieFile')
-                  : $t('settings.pickCookieFile')}
-              </button>
-            </div>
-
-            {#if isWindows && platform !== 'youtube'}
-              <div class="settings-guide-card compact-guide">
-                <strong>{$t('settings.cookieGuideTitle')}</strong>
-                <p>{$t('settings.cookieGuideBody')}</p>
+                <label class="settings-field">
+                  <span class="settings-label">{$t('settings.cookieTextLabel')}</span>
+                  <textarea
+                    class="settings-input cookie-text-input"
+                    rows="3"
+                    placeholder={$t('settings.cookieTextPlaceholder')}
+                    value={platformAuthDrafts[platform].cookieText ?? ""}
+                    oninput={(event) =>
+                      updateAuthDraft(
+                        platform,
+                        'cookieText',
+                        (event.currentTarget as HTMLTextAreaElement).value || null
+                      )}
+                  ></textarea>
+                </label>
               </div>
+            </details>
 
-              <label class="settings-field">
-                <span class="settings-label">{$t('settings.cookieText')}</span>
-                <textarea
-                  class="settings-input settings-textarea"
-                  placeholder={$t('settings.cookieTextPlaceholder')}
-                  rows="5"
-                  value={authDraft(platform).cookieText ?? ""}
-                  oninput={(event) =>
-                    updateAuthDraft(
-                      platform,
-                      'cookieText',
-                      (event.currentTarget as HTMLTextAreaElement).value || null
-                    )}
-                ></textarea>
-              </label>
-            {/if}
+            <!-- Method 2: Auto-detect -->
+            <details class="cookie-method-details">
+              <summary class="cookie-method-summary">{$t('settings.cookieMethodAuto')}</summary>
+              <div class="cookie-method-body">
+                <label class="settings-field">
+                  <span class="settings-label">{$t('settings.browserSource')}</span>
+                  <select
+                    class="settings-input"
+                    value={platformAuthDrafts[platform].cookieBrowser ?? ""}
+                    onchange={(event) =>
+                      updateAuthDraft(
+                        platform,
+                        'cookieBrowser',
+                        (event.currentTarget as HTMLSelectElement).value || null
+                      )}
+                  >
+                    {#each browserOptions as option}
+                      <option value={option.value}>{option.label}</option>
+                    {/each}
+                  </select>
+                </label>
+
+                <div class="settings-actions">
+                  <button
+                    class="secondary-button"
+                    onclick={() => dispatch('detectCookie', { platform })}
+                    disabled={!platformAuthDrafts[platform].cookieBrowser || Boolean(detectingCookiePlatform) || settingsSaving}
+                  >
+                    {detectingCookiePlatform === platform
+                      ? $t('settings.detectingCookie')
+                      : $t('settings.detectCookie')}
+                  </button>
+                </div>
+              </div>
+            </details>
           </section>
         {/each}
       </div>
@@ -233,11 +241,6 @@
             <option value={option.value}>{option.label}</option>
           {/each}
         </select>
-      </label>
-
-      <label class="checkbox-row">
-        <input bind:checked={autoRevealInFinder} type="checkbox" />
-        <span>{$t('settings.autoReveal')}</span>
       </label>
 
       <hr class="settings-divider" />
@@ -266,12 +269,24 @@
 
       <label class="settings-field">
         <span class="settings-label">{$t('settings.speedLimit')}</span>
-        <input
-          bind:value={speedLimit}
-          class="settings-input"
-          placeholder={$t('settings.speedLimitPlaceholder')}
-          type="text"
-        />
+        <div class="settings-input-group">
+          <input
+            bind:value={speedLimitValue}
+            class="settings-input"
+            placeholder={$t('settings.speedLimitPlaceholder')}
+            type="number"
+            min="0"
+            oninput={() => updateSpeedLimit()}
+          />
+          <select
+            class="settings-input settings-unit-select"
+            bind:value={speedLimitUnit}
+            onchange={() => updateSpeedLimit()}
+          >
+            <option value="K">{$t('settings.speedLimitUnit.kb')}</option>
+            <option value="M">{$t('settings.speedLimitUnit.mb')}</option>
+          </select>
+        </div>
       </label>
 
       <hr class="settings-divider" />
@@ -303,6 +318,11 @@
       </label>
 
       <label class="checkbox-row">
+        <input bind:checked={autoRevealInFinder} type="checkbox" />
+        <span>{$t('settings.autoReveal')}</span>
+      </label>
+
+      <label class="checkbox-row">
         <input bind:checked={notifyOnComplete} type="checkbox" />
         <span>{$t('settings.notifyOnComplete')}</span>
       </label>
@@ -313,7 +333,6 @@
       </label>
 
       <div class="settings-status">
-        <span class="meta-item">{accountLabel}</span>
         <span class="meta-item">FFmpeg: {ffmpegAvailable ? $t('settings.ffmpegDetected') : $t('settings.ffmpegMissing')}</span>
       </div>
 

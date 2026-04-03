@@ -343,6 +343,17 @@ export async function pickCookieFile(
   return maybeInvoke<string | null>("pick_cookie_file", { currentFile });
 }
 
+export async function detectBrowserCookies(
+  platform: string,
+  browser: string
+): Promise<string> {
+  if (!hasTauriRuntime()) {
+    return `~/.streamverse/auth/saved-${platform}-cookies.txt`;
+  }
+
+  return maybeInvoke<string>("detect_browser_cookies", { platform, browser });
+}
+
 export async function openInFileManager(
   path: string,
   revealParent = false

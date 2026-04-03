@@ -197,7 +197,7 @@ pub fn normalize_cookie_browser(input: Option<String>) -> Result<Option<String>,
 
     match normalized.as_deref() {
         None => Ok(None),
-        Some("chrome") => Ok(normalized),
+        Some("chrome" | "edge" | "firefox") => Ok(normalized),
         Some(other) => Err(format!("不支持的浏览器来源：{other}")),
     }
 }
@@ -474,7 +474,7 @@ fn cookie_precheck_spec(platform: &str) -> Option<CookiePrecheckSpec> {
     }
 }
 
-fn home_dir() -> String {
+pub(crate) fn home_dir() -> String {
     #[cfg(target_os = "windows")]
     {
         env::var("USERPROFILE")
@@ -529,6 +529,7 @@ fn expand_home(input: &str) -> String {
 fn human_browser_name(value: &str) -> &'static str {
     match value {
         "chrome" => "Chrome",
+        "edge" => "Edge",
         _ => "Custom",
     }
 }
@@ -665,6 +666,40 @@ fn normalize_cookie_header_text(input: &str) -> Result<String, String> {
     Ok(lines.join("\n") + "\n")
 }
 
+/// Detect which browsers have cookie databases installed on the system.
+/// Returns browser identifiers in preference order (Edge, Chrome).
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+pub fn detect_installed_browsers() -> Vec<String> {
+    let mut found = Vec::new();
+    let local = env::var("LOCALAPPDATA").unwrap_or_default();
+
+    // Edge — most common on Windows, Chromium-based
+    if !local.is_empty()
+        && Path::new(&local)
+            .join("Microsoft\\Edge\\User Data\\Default\\Network\\Cookies")
+            .exists()
+    {
+        found.push("edge".to_string());
+    }
+
+    // Chrome
+    if !local.is_empty()
+        && Path::new(&local)
+            .join("Google\\Chrome\\User Data\\Default\\Network\\Cookies")
+            .exists()
+    {
+        found.push("chrome".to_string());
+    }
+
+    found
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn detect_installed_browsers() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -710,7 +745,11 @@ mod tests {
             normalize_cookie_browser(Some(" chrome ".to_string())).unwrap(),
             Some("chrome".to_string())
         );
-        assert!(normalize_cookie_browser(Some("edge".to_string())).is_err());
+        assert_eq!(
+            normalize_cookie_browser(Some("edge".to_string())).unwrap(),
+            Some("edge".to_string())
+        );
+        assert!(normalize_cookie_browser(Some("firefox".to_string())).is_err());
     }
 
     #[test]

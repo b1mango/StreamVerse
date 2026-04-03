@@ -27,6 +27,7 @@ export type DownloadStatus =
 
 export interface DownloadContentSelection {
   downloadVideo: boolean;
+  downloadAudio: boolean;
   downloadCover: boolean;
   downloadCaption: boolean;
   downloadMetadata: boolean;

@@ -107,8 +107,12 @@
 
       <div class="option-grid">
         <label class="option-chip">
-          <input bind:checked={downloadOptions.downloadVideo} type="checkbox" />
+          <input bind:checked={downloadOptions.downloadVideo} type="checkbox" onchange={() => { if (!downloadOptions.downloadVideo) downloadOptions.downloadAudio = false; }} />
           <span>{$t("content.video")}</span>
+        </label>
+        <label class="option-chip" class:subtle-option={!downloadOptions.downloadVideo}>
+          <input bind:checked={downloadOptions.downloadAudio} type="checkbox" disabled={!downloadOptions.downloadVideo} />
+          <span>{$t("content.audio")}</span>
         </label>
         <label class="option-chip">
           <input bind:checked={downloadOptions.downloadCover} type="checkbox" />

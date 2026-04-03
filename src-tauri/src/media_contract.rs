@@ -83,6 +83,8 @@ pub(crate) struct BatchItemSelection {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DownloadContentSelection {
     pub(crate) download_video: bool,
+    #[serde(default)]
+    pub(crate) download_audio: bool,
     pub(crate) download_cover: bool,
     pub(crate) download_caption: bool,
     pub(crate) download_metadata: bool,

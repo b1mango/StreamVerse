@@ -2,6 +2,25 @@
 
 All notable changes to `StreamVerse` will be documented in this file.
 
+## [0.1.4] — 2026-04-04
+
+### 新增
+- **全局悬浮滚动按钮**：页面右下角固定悬浮「回到顶部 / 跳到底部」按钮，批量列表 700+ 条目时快速定位，毛玻璃风格匹配整体 UI
+- **下载限速全路径覆盖**：速度限制现在对直链下载和 DASH 合流下载均生效（此前仅对 yt-dlp 子进程生效）
+
+### 修复
+- **深色模式下拉菜单白底白字**：修复 `<select>` 组件的 `<option>` 在深色模式下背景为白色导致文字不可见
+- **4K 视频进度卡在 1%**：当 CDN 不返回 Content-Length 时，进度条改用渐近曲线 $1 - e^{-x/50}$ 代替固定 0/1
+- **已完成任务缺少「定位文件」按钮**：yt-dlp 回退路径的 ArtifactSummary 现在正确设置 `output_path`
+- **浅色模式多处组件样式缺失**：补全 `.text-button.danger`、`.chip.accent`、`.settings-guide-card`、`.cookie-method-summary`、`.cookie-method-details` 的浅色样式
+- **CSS 变量引用错误**：`.cookie-method-summary:hover` 引用了未定义的 `var(--foreground)`，修正为 `var(--text)`
+
+### 变更
+- 滚动按钮从任务队列面板级别移至全局页面级别
+- 移除任务列表的 `max-height` 限制，恢复自然流动布局
+
+---
+
 ## [0.1.3] — 2026-04-02
 
 ### 新增

@@ -7,5 +7,16 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420
   },
+  build: {
+    target: "chrome105",
+    cssMinify: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          tauri: ["@tauri-apps/api"],
+        },
+      },
+    },
+  },
   clearScreen: false
 });
