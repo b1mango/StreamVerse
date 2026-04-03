@@ -206,6 +206,49 @@
     return authProfileFor(platform).cookieFile;
   }
 
+  function getPageScrollElement(): HTMLElement {
+    const body = document.body;
+    const html = document.documentElement;
+    const candidates = [document.scrollingElement, body, html].filter(
+      (target): target is HTMLElement => Boolean(target)
+    );
+
+    const scrollables = candidates.filter(
+      (target) => target.scrollHeight > target.clientHeight + 1
+    );
+
+    if (scrollables.length > 0) {
+      return scrollables.sort(
+        (left, right) =>
+          right.scrollHeight - right.clientHeight - (left.scrollHeight - left.clientHeight)
+      )[0];
+    }
+
+    return body;
+  }
+
+  function scrollPageTo(top: number) {
+    if (typeof window === "undefined") return;
+
+    const scrollElement = getPageScrollElement();
+    const maxTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+    const targetTop = Math.max(0, Math.min(top, maxTop));
+
+    if (typeof scrollElement.scrollTo === "function") {
+      scrollElement.scrollTo({ top: targetTop, behavior: "smooth" });
+    } else {
+      scrollElement.scrollTop = targetTop;
+    }
+  }
+
+  function scrollToTop() {
+    scrollPageTo(0);
+  }
+
+  function scrollToBottom() {
+    scrollPageTo(Number.MAX_SAFE_INTEGER);
+  }
+
   import {
     isPermissionGranted,
     requestPermission,
@@ -1551,10 +1594,10 @@
 
     <!-- Global floating scroll buttons -->
     <div class="fab-scroll-group">
-      <button class="fab-scroll" onclick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} title={$t("task.scrollToTop")} type="button">
+      <button class="fab-scroll" onclick={scrollToTop} title={$t("task.scrollToTop")} type="button">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
       </button>
-      <button class="fab-scroll" onclick={() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })} title={$t("task.scrollToBottom")} type="button">
+      <button class="fab-scroll" onclick={scrollToBottom} title={$t("task.scrollToBottom")} type="button">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
     </div>
