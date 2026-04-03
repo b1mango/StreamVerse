@@ -37,6 +37,7 @@ body {
   height: 100%;
   border-radius: 8px;
   overflow-y: auto;
+  scroll-behavior: smooth;
   background:
     radial-gradient(circle at top, rgba(48, 204, 176, 0.08), transparent 34%),
     linear-gradient(180deg, #090c11 0%, #0b0f15 100%);
