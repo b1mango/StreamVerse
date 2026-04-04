@@ -153,7 +153,7 @@
   "douyin.pasteLoading": "读取剪贴板…",
   "douyin.openBrowser": "打开浏览器",
   "douyin.openingBrowser": "打开中…",
-  "douyin.analyzeLabel": "读取完整列表",
+  "douyin.analyzeLabel": "读取主页视频",
   "douyin.analyzeLoading": "读取中…",
   "bilibili.heading": "Bilibili 单视频下载",
   "bilibili.placeholder": "粘贴 Bilibili 视频链接、分享文案、BV 号或 b23.tv 短链",
@@ -162,8 +162,8 @@
   "bilibili.itemLabel": "视频",
   "bilibili.analyzeLabel": "解析主页",
   "bilibili.analyzeLoading": "读取视频中…",
-  "bilibili.enqueueLabel": "将所选视频加入队列",
-  "bilibili.enqueuingLabel": "加入队列中…",
+  "bilibili.enqueueLabel": "下载所选视频",
+  "bilibili.enqueuingLabel": "下载中…",
   "youtube.heading": "YouTube 单视频下载",
   "youtube.placeholder": "粘贴 YouTube 视频链接、分享文案或 youtu.be 短链"
 }

@@ -153,7 +153,7 @@
   "douyin.pasteLoading": "Reading clipboard…",
   "douyin.openBrowser": "Open Browser",
   "douyin.openingBrowser": "Opening…",
-  "douyin.analyzeLabel": "Read Full List",
+  "douyin.analyzeLabel": "Read Profile Videos",
   "douyin.analyzeLoading": "Reading…",
   "bilibili.heading": "Bilibili Single Video",
   "bilibili.placeholder": "Paste Bilibili video link, share text, BV number, or b23.tv short link",
@@ -162,8 +162,8 @@
   "bilibili.itemLabel": "video",
   "bilibili.analyzeLabel": "Parse Profile",
   "bilibili.analyzeLoading": "Reading videos…",
-  "bilibili.enqueueLabel": "Enqueue selected videos",
-  "bilibili.enqueuingLabel": "Enqueuing…",
+  "bilibili.enqueueLabel": "Download selected videos",
+  "bilibili.enqueuingLabel": "Downloading…",
   "youtube.heading": "YouTube Single Video",
   "youtube.placeholder": "Paste YouTube video link, share text, or youtu.be short link"
 }

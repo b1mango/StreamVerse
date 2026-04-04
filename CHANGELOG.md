@@ -7,18 +7,30 @@ All notable changes to `StreamVerse` will be documented in this file.
 ### 新增
 - **全局悬浮滚动按钮**：页面右下角固定悬浮「回到顶部 / 跳到底部」按钮，批量列表 700+ 条目时快速定位，毛玻璃风格匹配整体 UI
 - **下载限速全路径覆盖**：速度限制现在对直链下载和 DASH 合流下载均生效（此前仅对 yt-dlp 子进程生效）
+- **macOS 原生窗口外观**：切换到 `titleBarStyle: Overlay` + `decorations: true`，使用系统原生交通灯按钮、圆角和窗口阴影，移除所有 CSS hack
+- **macOS 窗口拖动**：通过 Tauri `window.startDragging()` 实现标题栏拖动，双击标题栏最大化，拖动时禁止文本选中
+- **设置面板毛玻璃效果**：Settings 面板使用 `backdrop-filter: blur(40px)` 半透明背景，滑入动画
+- **URL 跨平台校验**：解析前自动检测 URL 所属平台，防止抖音链接粘贴到 B站模块等误操作
 
 ### 修复
 - **深色模式下拉菜单白底白字**：修复 `<select>` 组件的 `<option>` 在深色模式下背景为白色导致文字不可见
 - **4K 视频进度卡在 1%**：当 CDN 不返回 Content-Length 时，进度条改用渐近曲线 $1 - e^{-x/50}$ 代替固定 0/1
 - **已完成任务缺少「定位文件」按钮**：yt-dlp 回退路径的 ArtifactSummary 现在正确设置 `output_path`
-- **全局滚动按钮失效与卡顿**：统一改为滚动实际页面容器，修复“跳到底部”误回顶部，并降低长队列滚动时的抖动
+- **全局滚动按钮失效与卡顿**：统一改为滚动实际页面容器，修复"跳到底部"误回顶部，并降低长队列滚动时的抖动
 - **浅色模式多处组件样式缺失**：补全 `.text-button.danger`、`.chip.accent`、`.settings-guide-card`、`.cookie-method-summary`、`.cookie-method-details` 的浅色样式
 - **CSS 变量引用错误**：`.cookie-method-summary:hover` 引用了未定义的 `var(--foreground)`，修正为 `var(--text)`
+- **macOS 窗口白边**：移除 `decorations: false` + `transparent: true` 导致的 WebView 白边，改用原生窗口装饰
+- **macOS 解析弹窗卡死**：`withAnalysisProgress` 的 `onResult` 回调异常时未关闭弹窗，增加 try-catch 确保弹窗清理
+- **YouTube Cookie 回归**：恢复 0.1.2 逻辑，始终直接传递 Cookie 避免 bot 检测
+- **抖音「读取主页视频」按钮灰色**：修复 Cookie 来源判断，同时支持 `cookieBrowser` 和 `cookieFile`
+- **抖音主页解析准确度**：修复分页逻辑提前中断（移除 `count=min()` 和内层 `break`），确保遍历至 API 报告 `has_more=false`
+- **抖音主页解析速度**：共享 `httpx.AsyncClient` 复用 TCP/TLS 连接，批量大小从 18 提升到 20，避免每次请求重建 HTTP 客户端
 
 ### 变更
 - 滚动按钮从任务队列面板级别移至全局页面级别
 - 移除任务列表的 `max-height` 限制，恢复自然流动布局
+- macOS 移除 objc2 系列依赖与自定义圆角函数，完全依赖系统窗口管理
+- 抖音 `totalAvailable` 现在反映真实总数（视频 + 跳过的图文笔记）
 
 ---
 

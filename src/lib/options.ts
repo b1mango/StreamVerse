@@ -11,7 +11,8 @@ export const browserOptions = [
   { value: "", label: "未选择" },
   { value: "chrome", label: "Chrome" },
   { value: "edge", label: "Edge" },
-  { value: "firefox", label: "Firefox" }
+  { value: "firefox", label: "Firefox" },
+  { value: "safari", label: "Safari" }
 ];
 
 export const qualityOptions: Array<{ value: QualityPreference; label: string }> = [

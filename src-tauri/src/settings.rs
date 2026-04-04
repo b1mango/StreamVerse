@@ -197,7 +197,7 @@ pub fn normalize_cookie_browser(input: Option<String>) -> Result<Option<String>,
 
     match normalized.as_deref() {
         None => Ok(None),
-        Some("chrome" | "edge" | "firefox") => Ok(normalized),
+        Some("chrome" | "edge" | "firefox" | "safari") => Ok(normalized),
         Some(other) => Err(format!("不支持的浏览器来源：{other}")),
     }
 }
@@ -530,6 +530,7 @@ fn human_browser_name(value: &str) -> &'static str {
     match value {
         "chrome" => "Chrome",
         "edge" => "Edge",
+        "safari" => "Safari",
         _ => "Custom",
     }
 }
@@ -697,7 +698,36 @@ pub fn detect_installed_browsers() -> Vec<String> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn detect_installed_browsers() -> Vec<String> {
-    Vec::new()
+    let mut found = Vec::new();
+    let home = home_dir();
+
+    // Chrome
+    let chrome_cookies = Path::new(&home)
+        .join("Library/Application Support/Google/Chrome/Default/Cookies");
+    if chrome_cookies.exists() {
+        found.push("chrome".to_string());
+    }
+
+    // Safari (macOS native)
+    let safari_cookies = Path::new(&home).join("Library/Cookies/Cookies.binarycookies");
+    if safari_cookies.exists() {
+        found.push("safari".to_string());
+    }
+
+    // Edge
+    let edge_cookies = Path::new(&home)
+        .join("Library/Application Support/Microsoft Edge/Default/Cookies");
+    if edge_cookies.exists() {
+        found.push("edge".to_string());
+    }
+
+    // Firefox
+    let firefox_profiles = Path::new(&home).join("Library/Application Support/Firefox/Profiles");
+    if firefox_profiles.is_dir() {
+        found.push("firefox".to_string());
+    }
+
+    found
 }
 
 #[cfg(test)]
@@ -749,7 +779,11 @@ mod tests {
             normalize_cookie_browser(Some("edge".to_string())).unwrap(),
             Some("edge".to_string())
         );
-        assert!(normalize_cookie_browser(Some("firefox".to_string())).is_err());
+        assert_eq!(
+            normalize_cookie_browser(Some("safari".to_string())).unwrap(),
+            Some("safari".to_string())
+        );
+        assert!(normalize_cookie_browser(Some("opera".to_string())).is_err());
     }
 
     #[test]

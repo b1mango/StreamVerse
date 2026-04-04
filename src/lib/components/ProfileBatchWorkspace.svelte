@@ -31,8 +31,8 @@
   export let placeholder = "粘贴主页分享文案或主页链接";
   export let analyzeLabel = "浏览器读取列表";
   export let analyzeLoadingLabel = "读取主页…";
-  export let enqueueLabel = "将所选作品加入队列";
-  export let enqueuingLabel = "加入队列中…";
+  export let enqueueLabel = "下载所选作品";
+  export let enqueuingLabel = "下载中…";
   export let itemLabel = "作品";
   export let resultEyebrow = "Profile Result";
   export let showPrepareAction = false;

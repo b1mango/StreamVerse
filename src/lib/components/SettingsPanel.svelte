@@ -31,6 +31,8 @@
   export let detectingCookiePlatform: PlatformId | null = null;
   export let browserOptions: Array<{ value: string; label: string }> = [];
   export let qualityOptions: Array<{ value: QualityPreference; label: string }> = [];
+  export let settingsErrorMessage = "";
+  export let settingsSuccessMessage = "";
 
   export let maxConcurrentDownloads = 3;
   export let proxyUrl = "";
@@ -130,6 +132,13 @@
     </div>
 
     <div class="settings-stack">
+      {#if settingsErrorMessage}
+        <div class="notice error notice-stack" style="margin-bottom:12px">{settingsErrorMessage}</div>
+      {/if}
+      {#if settingsSuccessMessage}
+        <div class="notice success" style="margin-bottom:12px">{settingsSuccessMessage}</div>
+      {/if}
+
       <label class="settings-field">
         <span class="settings-label">{$t('settings.downloadPath')}</span>
         <input
@@ -221,7 +230,7 @@
                   <button
                     class="secondary-button"
                     onclick={() => dispatch('detectCookie', { platform })}
-                    disabled={!platformAuthDrafts[platform].cookieBrowser || Boolean(detectingCookiePlatform) || settingsSaving}
+                    disabled={Boolean(detectingCookiePlatform) || settingsSaving}
                   >
                     {detectingCookiePlatform === platform
                       ? $t('settings.detectingCookie')

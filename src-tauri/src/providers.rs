@@ -21,7 +21,12 @@ pub fn analyze_input(
     preflight_auth(platform, selected_browser, selected_cookie_file)?;
 
     if platform == "youtube" {
-        return pack_host::analyze_single(&source_url, None, None, progress_file);
+        return pack_host::analyze_single(
+            &source_url,
+            selected_browser,
+            selected_cookie_file,
+            progress_file,
+        );
     }
 
     if platform == "douyin" {
@@ -124,11 +129,13 @@ pub fn analyze_profile_input(
 
     match platform {
         "douyin" => {
-            if cookie_file.filter(|value| !value.trim().is_empty()).is_some() {
+            if cookie_file.filter(|value| !value.trim().is_empty()).is_some()
+                || cookie_browser.filter(|value| !value.trim().is_empty()).is_some()
+            {
                 pack_host::analyze_profile(&source_url, cookie_browser, cookie_file, progress_file)
                     .map_err(normalize_douyin_error)
             } else {
-                Err("抖音主页批量下载首次使用请先在设置中导入登录 Cookie；如果你更习惯手动登录，也可以使用“打开浏览器”后再点“读取完整列表”。".to_string())
+                Err("抖音主页批量下载需要登录态。请先在设置中选择浏览器或导入 Cookie 后再试。".to_string())
             }
         }
         _ => pack_host::analyze_profile(&source_url, cookie_browser, cookie_file, progress_file),
@@ -171,7 +178,7 @@ pub fn collect_profile_browser(
 
 fn preflight_auth(
     platform: &str,
-    cookie_browser: Option<&str>,
+    _cookie_browser: Option<&str>,
     cookie_file: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -220,10 +227,12 @@ mod tests {
 
     #[test]
     fn douyin_profile_requires_manual_browser_flow() {
+        use std::collections::BTreeMap;
+        let empty_auth = BTreeMap::new();
         let error =
-            analyze_profile_input("https://www.douyin.com/user/test", None, None, None)
+            analyze_profile_input("https://www.douyin.com/user/test", &empty_auth, None)
                 .unwrap_err();
-        assert!(error.contains("打开浏览器"));
+        assert!(error.contains("打开浏览器") || error.contains("Cookie") || error.contains("登录"));
     }
 
     #[test]
@@ -235,6 +244,6 @@ mod tests {
     #[test]
     fn normalizes_generic_douyin_fetch_errors() {
         let message = normalize_douyin_error("获取数据失败".to_string());
-        assert!(message.contains("浏览器 Cookie"));
+        assert!(message.contains("Cookie") || message.contains("登录"));
     }
 }

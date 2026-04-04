@@ -19,9 +19,10 @@
         "height": 980,
         "resizable": true,
         "fullscreen": false,
-        "decorations": false,
-        "transparent": true,
-        "shadow": true
+        "decorations": true,
+        "transparent": false,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay"
       }
     ],
     "security": {

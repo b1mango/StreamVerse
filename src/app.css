@@ -21,7 +21,6 @@
 
 html {
   overflow: hidden;
-  border-radius: 8px;
   height: 100%;
   background: transparent;
 }
@@ -35,15 +34,11 @@ body,
 
 body {
   height: 100%;
-  border-radius: 8px;
   overflow-y: auto;
-  scroll-behavior: smooth;
   background:
     radial-gradient(circle at top, rgba(48, 204, 176, 0.08), transparent 34%),
     linear-gradient(180deg, #090c11 0%, #0b0f15 100%);
   color: var(--text);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
 }
 
 button,
@@ -51,6 +46,32 @@ textarea,
 select,
 input {
   font: inherit;
+}
+
+/* ─── Custom scrollbar — dark mode (default) ─── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .loading-shell,
@@ -88,7 +109,7 @@ input {
   z-index: 1;
   max-width: 1040px;
   margin: 0 auto;
-  padding: 12px 24px 44px;
+  padding: 40px 24px 44px;
 }
 
 .topbar {
@@ -109,6 +130,82 @@ input {
   height: 36px;
   z-index: 100;
   -webkit-app-region: drag;
+  app-region: drag;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.drag-region.macos-drag {
+  /* Leave space for native macOS traffic light buttons on the left */
+  padding-left: 78px;
+}
+
+/* ─── macOS traffic light controls ─── */
+.macos-controls {
+  position: fixed;
+  top: 12px;
+  left: 14px;
+  z-index: 101;
+  display: flex;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.mac-btn {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: opacity 120ms ease, filter 120ms ease;
+  position: relative;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.12);
+}
+
+.mac-btn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 6px 6px;
+}
+
+.mac-close {
+  background: #ff5f57;
+}
+
+.mac-close::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath stroke='%234d0000' stroke-width='1.2' stroke-linecap='round' d='M1.5 1.5l5 5M6.5 1.5l-5 5'/%3E%3C/svg%3E");
+}
+
+.mac-minimize {
+  background: #febc2e;
+}
+
+.mac-minimize::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath stroke='%23995700' stroke-width='1.2' stroke-linecap='round' d='M1 4h6'/%3E%3C/svg%3E");
+}
+
+.mac-maximize {
+  background: #28c840;
+}
+
+.mac-maximize::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath stroke='%23006500' stroke-width='1.1' stroke-linecap='round' d='M1.5 5.5L4 2l2.5 3.5'/%3E%3C/svg%3E");
+}
+
+.macos-controls:hover .mac-btn::after {
+  opacity: 1;
+}
+
+.mac-btn:active {
+  filter: brightness(0.8);
 }
 
 .window-controls {
@@ -119,6 +216,7 @@ input {
   display: flex;
   gap: 0;
   -webkit-app-region: no-drag;
+  app-region: no-drag;
   flex-shrink: 0;
 }
 
@@ -162,9 +260,10 @@ input {
   padding: 11px 16px;
   cursor: pointer;
   transition:
-    border-color 180ms ease,
-    background 180ms ease,
-    transform 180ms ease;
+    border-color 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    background 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .workspace-tab strong,
@@ -185,6 +284,13 @@ input {
   transform: translateY(-1px);
   border-color: rgba(48, 204, 176, 0.24);
   background: rgba(48, 204, 176, 0.08);
+  box-shadow: 0 4px 16px rgba(48, 204, 176, 0.10);
+}
+
+.workspace-tab:active,
+.mode-pill:active {
+  transform: translateY(0) scale(0.97);
+  transition-duration: 80ms;
 }
 
 .mode-switch {
@@ -444,6 +550,7 @@ input {
   background: var(--surface);
   border: 1px solid var(--stroke);
   box-shadow: var(--shadow);
+  transition: border-color 200ms ease, box-shadow 200ms ease;
 }
 
 .composer-panel {
@@ -540,7 +647,11 @@ input {
   border-radius: 999px;
   padding: 12px 16px;
   cursor: pointer;
-  transition: transform 180ms ease, opacity 180ms ease, box-shadow 180ms ease;
+  transition:
+    transform 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 200ms ease,
+    box-shadow 200ms cubic-bezier(0.4, 0, 0.2, 1),
+    background 200ms ease;
 }
 
 .primary-button:hover,
@@ -551,6 +662,13 @@ input {
   transform: translateY(-1px);
 }
 
+.primary-button:active,
+.secondary-button:active,
+.ghost-button:active {
+  transform: translateY(0) scale(0.97);
+  transition-duration: 80ms;
+}
+
 .primary-button {
   color: #07100d;
   background: linear-gradient(180deg, #77f0d7, #bdf7cc);
@@ -559,13 +677,15 @@ input {
 
 .secondary-button {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .ghost-button {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -984,14 +1104,20 @@ input {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
-  transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
+  transition: background 200ms ease, color 200ms ease, border-color 200ms ease, transform 200ms ease, box-shadow 200ms ease;
 }
 
 .fab-scroll:hover {
   background: rgba(48, 204, 176, 0.14);
   border-color: rgba(48, 204, 176, 0.28);
   color: var(--mint);
-  transform: translateY(-1px);
+  transform: translateY(-2px) scale(1.08);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+}
+
+.fab-scroll:active {
+  transform: translateY(0) scale(0.95);
+  transition-duration: 80ms;
 }
 
 /* Suppress all transitions during theme switch */
@@ -1008,6 +1134,25 @@ input {
   inset: 0;
   z-index: 10;
   background: rgba(4, 7, 10, 0.60);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: settingsOverlayIn 280ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes settingsOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes settingsPanelSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(40px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
 }
 
 .settings-panel {
@@ -1019,6 +1164,16 @@ input {
   z-index: 11;
   padding: 24px;
   overflow-y: auto;
+  background: rgba(12, 16, 22, 0.65);
+  backdrop-filter: blur(40px) saturate(1.4);
+  -webkit-backdrop-filter: blur(40px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: var(--radius-xl);
+  box-shadow:
+    0 24px 80px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.04);
+  animation: settingsPanelSlideIn 320ms cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 .settings-stack {
@@ -1036,6 +1191,7 @@ input {
 .settings-label {
   color: var(--muted);
   font-size: 0.84rem;
+  letter-spacing: 0.01em;
 }
 
 .settings-input,
@@ -1045,12 +1201,14 @@ input {
 
 .settings-input {
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(7, 10, 15, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   color: var(--text);
   padding: 14px 16px;
   outline: none;
-  transition: border-color 180ms ease, box-shadow 180ms ease;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
 }
 
 select option {
@@ -1101,6 +1259,7 @@ select option:checked {
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 10px;
   overflow: hidden;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .cookie-method-summary {
@@ -1110,7 +1269,8 @@ select option:checked {
   color: var(--muted);
   cursor: pointer;
   user-select: none;
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(255, 255, 255, 0.03);
+  transition: color 160ms ease, background 160ms ease;
 }
 
 .cookie-method-summary:hover {
@@ -1264,8 +1424,8 @@ select option:checked {
 .inline-count-input {
   width: 84px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(7, 10, 15, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text);
   padding: 9px 12px;
   outline: none;
@@ -1563,8 +1723,61 @@ select option:checked {
 /* ─── Settings divider ─── */
 .settings-divider {
   border: none;
-  border-top: 1px solid var(--stroke);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
   margin: 8px 0;
+}
+
+/* ─── Settings auth block ─── */
+.settings-auth-block {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 2px 8px rgba(0, 0, 0, 0.12);
+  transition: border-color 200ms ease, background 200ms ease;
+}
+
+.settings-auth-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.settings-auth-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-auth-head strong {
+  font-size: 0.92rem;
+}
+
+.settings-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+[data-theme="light"] .settings-auth-card {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(0, 0, 0, 0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 2px 8px rgba(0, 0, 0, 0.04);
 }
 
 /* ─── Light Theme ─── */
@@ -1584,6 +1797,7 @@ select option:checked {
   background:
     radial-gradient(ellipse at top, rgba(13, 155, 122, 0.05), transparent 50%),
     linear-gradient(180deg, #f2f3f6 0%, #fafbfc 100%);
+  border-color: rgba(0, 0, 0, 0.08);
 }
 
 /* Panels & cards */
@@ -1594,9 +1808,13 @@ select option:checked {
 }
 
 [data-theme="light"] .settings-panel {
-  background: rgba(255, 255, 255, 0.98);
-  border-color: rgba(0, 0, 0, 0.08);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.10);
+  background: rgba(245, 247, 250, 0.72);
+  backdrop-filter: blur(40px) saturate(1.6);
+  -webkit-backdrop-filter: blur(40px) saturate(1.6);
+  border-color: rgba(0, 0, 0, 0.06);
+  box-shadow:
+    0 24px 80px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 [data-theme="light"] .settings-overlay {
@@ -1651,9 +1869,11 @@ select option:checked {
 [data-theme="light"] .settings-input,
 [data-theme="light"] .compact-select,
 [data-theme="light"] select {
-  background: rgba(0, 0, 0, 0.03);
-  border-color: rgba(0, 0, 0, 0.10);
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(0, 0, 0, 0.08);
   color: var(--text);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 [data-theme="light"] .settings-input:focus,
@@ -1985,4 +2205,24 @@ select option:checked {
   background: rgba(13, 155, 122, 0.08);
   border-color: rgba(13, 155, 122, 0.28);
   color: var(--mint);
+}
+
+/* Light mode — macOS traffic lights stay the same color */
+[data-theme="light"] .mac-btn {
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.16);
+}
+
+/* Light mode — window controls */
+[data-theme="light"] .win-btn {
+  color: rgba(28, 32, 40, 0.50);
+}
+
+[data-theme="light"] .win-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+}
+
+[data-theme="light"] .win-close:hover {
+  background: #e81123;
+  color: #fff;
 }

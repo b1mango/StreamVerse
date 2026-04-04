@@ -2703,6 +2703,7 @@ fn extract_cookies_via_rookie(browser: &str, platform: &str) -> Result<String, S
         "chrome" => rookie::chrome(Some(domains)),
         "edge" => rookie::edge(Some(domains)),
         "firefox" => rookie::firefox(Some(domains)),
+        "safari" => return Err("rookie 不支持 Safari，跳转 yt-dlp".into()),
         _ => return Err(format!("rookie 不支持的浏览器：{browser}")),
     }
     .map_err(|e| format!("从 {} 读取 Cookie 失败：{e}", browser.to_uppercase()))?;
@@ -2792,7 +2793,11 @@ pub fn extract_browser_cookies(browser: &str, platform: &str) -> Result<String, 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Failed to decrypt") || stderr.contains("DPAPI") {
+        if stderr.contains("Failed to decrypt")
+            || stderr.contains("DPAPI")
+            || stderr.contains("Keychain")
+            || stderr.contains("Could not get key")
+        {
             return Err(format!(
                 "无法自动获取 {} 的 Cookie（浏览器安全限制）。请使用「手动粘贴」方式：在浏览器中按 F12 打开开发者工具，从网络请求头中复制 Cookie 值，粘贴到设置里的 Cookie 文本框中保存即可。",
                 browser.to_uppercase()

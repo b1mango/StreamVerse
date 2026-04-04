@@ -31,7 +31,16 @@ PROGRESS_FILE = os.environ.get("STREAMVERSE_PROGRESS_FILE")
 if str(VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(VENDOR_ROOT))
 
-from crawlers.douyin.web.utils import AwemeIdFetcher, config as utils_config  # noqa: E402
+import httpx  # noqa: E402
+from urllib.parse import urlencode  # noqa: E402
+
+from crawlers.douyin.web.endpoints import DouyinAPIEndpoints  # noqa: E402
+from crawlers.douyin.web.models import UserPost  # noqa: E402
+from crawlers.douyin.web.utils import (  # noqa: E402
+    AwemeIdFetcher,
+    BogusManager,
+    config as utils_config,
+)
 from crawlers.douyin.web.web_crawler import (  # noqa: E402
     DouyinWebCrawler,
     config as crawler_config,
@@ -384,6 +393,24 @@ async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:
     return asset
 
 
+async def _fetch_user_posts_fast(
+    client: httpx.AsyncClient,
+    user_agent: str,
+    sec_user_id: str,
+    max_cursor: int,
+    count: int = 20,
+) -> dict[str, Any]:
+    """Fetch user post videos reusing a shared httpx.AsyncClient."""
+    params = UserPost(sec_user_id=sec_user_id, max_cursor=max_cursor, count=count)
+    params_dict = params.dict()
+    params_dict["msToken"] = ""
+    a_bogus = BogusManager.ab_model_2_endpoint(params_dict, user_agent)
+    endpoint = f"{DouyinAPIEndpoints.USER_POST}?{urlencode(params_dict)}&a_bogus={a_bogus}"
+    response = await client.get(endpoint, follow_redirects=True)
+    response.raise_for_status()
+    return response.json()
+
+
 async def analyze_profile(
     url: str, cookie_file: Path | None, limit: int
 ) -> dict[str, Any]:
@@ -417,39 +444,45 @@ async def analyze_profile(
     max_cursor = 0
     has_more = True
 
-    while has_more and len(items) < normalized_limit:
-        response = await crawler.fetch_user_post_videos(
-            sec_user_id=sec_user_id,
-            max_cursor=max_cursor,
-            count=min(18, normalized_limit - len(items)),
-        )
+    kwargs = await crawler.get_douyin_headers()
+    user_agent = kwargs["headers"]["User-Agent"]
 
-        aweme_list = response.get("aweme_list") or []
-        if not aweme_list:
-            break
-
-        for detail in aweme_list:
-            aweme_id = str(detail.get("aweme_id") or "").strip()
-            if not aweme_id or aweme_id in seen_aweme_ids:
-                continue
-
-            seen_aweme_ids.add(aweme_id)
-            asset = build_asset_from_detail(
-                detail,
-                source_url=build_source_url(detail, url),
-                using_login=using_login,
+    async with httpx.AsyncClient(
+        headers=kwargs["headers"],
+        proxies=kwargs.get("proxies"),
+        timeout=httpx.Timeout(15),
+        limits=httpx.Limits(max_connections=50),
+        transport=httpx.AsyncHTTPTransport(retries=3),
+    ) as client:
+        while has_more and len(items) < normalized_limit:
+            response = await _fetch_user_posts_fast(
+                client, user_agent, sec_user_id, max_cursor, count=20,
             )
-            if asset:
-                items.append(asset)
-                write_progress(len(items), progress_total, f"已解析 {len(items)} 个抖音作品。")
-                if len(items) >= normalized_limit:
-                    break
-            else:
-                skipped_count += 1
 
-        next_cursor = int(response.get("max_cursor") or 0)
-        has_more = bool(response.get("has_more")) and next_cursor != max_cursor
-        max_cursor = next_cursor
+            aweme_list = response.get("aweme_list") or []
+            if not aweme_list:
+                break
+
+            for detail in aweme_list:
+                aweme_id = str(detail.get("aweme_id") or "").strip()
+                if not aweme_id or aweme_id in seen_aweme_ids:
+                    continue
+
+                seen_aweme_ids.add(aweme_id)
+                asset = build_asset_from_detail(
+                    detail,
+                    source_url=build_source_url(detail, url),
+                    using_login=using_login,
+                )
+                if asset:
+                    items.append(asset)
+                    write_progress(len(items), progress_total, f"已解析 {len(items)} 个抖音作品。")
+                else:
+                    skipped_count += 1
+
+            next_cursor = int(response.get("max_cursor") or 0)
+            has_more = bool(response.get("has_more")) and next_cursor != max_cursor
+            max_cursor = next_cursor
 
     if not items:
         raise RuntimeError("当前主页暂时没有可批量下载的视频作品，或需要更新登录状态后重试。")
@@ -460,7 +493,7 @@ async def analyze_profile(
         "profileTitle": str(profile_title),
         "sourceUrl": url,
         "secUserId": sec_user_id,
-        "totalAvailable": total_available or len(items),
+        "totalAvailable": max(total_available, len(items) + skipped_count),
         "fetchedCount": len(items),
         "skippedCount": skipped_count,
         "sessionCookieFile": str(cookie_file) if cookie_file else None,

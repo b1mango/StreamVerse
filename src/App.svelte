@@ -206,6 +206,11 @@
     return authProfileFor(platform).cookieFile;
   }
 
+  function hasCookieFor(platform: PlatformId) {
+    const profile = authProfileFor(platform);
+    return Boolean(profile.cookieFile || profile.cookieBrowser);
+  }
+
   function getPageScrollElement(): HTMLElement {
     const body = document.body;
     const html = document.documentElement;
@@ -227,18 +232,45 @@
     return body;
   }
 
+  let _scrollRafId = 0;
+
   function scrollPageTo(top: number) {
     if (typeof window === "undefined") return;
 
     const scrollElement = getPageScrollElement();
     const maxTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
     const targetTop = Math.max(0, Math.min(top, maxTop));
+    const startTop = scrollElement.scrollTop;
+    const distance = targetTop - startTop;
 
-    if (typeof scrollElement.scrollTo === "function") {
-      scrollElement.scrollTo({ top: targetTop, behavior: "smooth" });
-    } else {
-      scrollElement.scrollTop = targetTop;
+    if (Math.abs(distance) < 1) return;
+
+    // Cancel any in-progress animation
+    if (_scrollRafId) cancelAnimationFrame(_scrollRafId);
+
+    // Longer duration for larger distances, with a nice curve feel
+    const duration = Math.min(720, Math.max(260, Math.abs(distance) * 0.35 + 200));
+    const startTime = performance.now();
+
+    // ease-in-out quart: accelerates then decelerates smoothly
+    function easeInOutQuart(t: number): number {
+      return t < 0.5
+        ? 8 * t * t * t * t
+        : 1 - Math.pow(-2 * t + 2, 4) / 2;
     }
+
+    function step(now: number) {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      scrollElement.scrollTop = startTop + distance * easeInOutQuart(progress);
+      if (progress < 1) {
+        _scrollRafId = requestAnimationFrame(step);
+      } else {
+        _scrollRafId = 0;
+      }
+    }
+
+    _scrollRafId = requestAnimationFrame(step);
   }
 
   function scrollToTop() {
@@ -469,6 +501,25 @@
     return preview;
   }
 
+  function detectUrlPlatform(rawInput: string): PlatformId | null {
+    const lower = rawInput.toLowerCase();
+    if (lower.includes("douyin.com") || lower.includes("iesdouyin.com")) return "douyin";
+    if (lower.includes("bilibili.com") || lower.includes("b23.tv")) return "bilibili";
+    if (lower.includes("youtube.com") || lower.includes("youtu.be")) return "youtube";
+    return null;
+  }
+
+  function validateProfileUrl(rawInput: string, expectedPlatform: PlatformId): void {
+    const detected = detectUrlPlatform(rawInput);
+    if (detected && detected !== expectedPlatform) {
+      const detectedLabel = platformMeta[detected].label;
+      const expectedLabel = platformMeta[expectedPlatform].label;
+      throw new Error(
+        `当前链接属于 ${detectedLabel}，请切换到「${detectedLabel} 主页批量下载」模块解析，或在此处粘贴 ${expectedLabel} 的主页链接。`
+      );
+    }
+  }
+
   function createAnalysisSessionId() {
     return `analysis-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
@@ -547,9 +598,19 @@
     }
 
     if (onResult) {
-      await new Promise((r) => setTimeout(r, 200));
-      await onResult(result);
-      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60)));
+      try {
+        await new Promise((r) => setTimeout(r, 200));
+        await onResult(result);
+        await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60)));
+      } catch (resultError) {
+        // Ensure modal is closed when onResult throws
+        if (modalLabel) {
+          analysisModalOpen = false;
+          analysisModalProgress = null;
+          analysisModalDone = false;
+        }
+        throw resultError;
+      }
     }
 
     if (modalLabel && analysisModalDone) {
@@ -640,23 +701,17 @@
       douyinSelectedProfileIds = [];
       douyinSelectedProfileFormatIds = {};
 
+      validateProfileUrl(douyinProfileInput, "douyin");
+
+      if (!hasCookieFor("douyin")) {
+        throw new Error("请先在设置中导入抖音 Cookie 后再读取主页视频。");
+      }
+
       await withAnalysisProgress(
         (progress) => (douyinProfileAnalysisProgress = progress),
         (sessionId) => {
-          if (cookieFileFor("douyin")) {
-            return analyzeProfileInput({
-              rawInput: douyinProfileInput,
-              sessionId
-            });
-          }
-
-          if (!douyinProfileBrowserSession) {
-            throw new Error("首次使用请先在设置里导入登录 Cookie；如果还没导入，也可以先打开浏览器登录后再点“读取完整列表”。");
-          }
-
-          return collectProfileBrowser({
+          return analyzeProfileInput({
             rawInput: douyinProfileInput,
-            port: douyinProfileBrowserSession.port,
             sessionId
           });
         },
@@ -710,6 +765,9 @@
       bilibiliProfilePreview = null;
       bilibiliSelectedProfileIds = [];
       bilibiliSelectedProfileFormatIds = {};
+
+      validateProfileUrl(bilibiliProfileInput, "bilibili");
+
       await withAnalysisProgress(
         (progress) => (bilibiliProfileAnalysisProgress = progress),
         (sessionId) =>
@@ -719,10 +777,6 @@
           }),
         "正在读取 Bilibili 主页视频…",
         async (r) => {
-          if (r.items.some((item) => item.platform !== "bilibili")) {
-            throw new Error("请使用 Bilibili UP 主空间页链接。");
-          }
-
           bilibiliProfilePreview = r;
           bilibiliSelectedProfileIds = r.items.map((item) => item.assetId);
           bilibiliSelectedProfileFormatIds = buildBatchFormatSelections(r.items);
@@ -1070,13 +1124,22 @@
   }
 
   async function handleDetectCookie(platform: PlatformId) {
-    const browser = platformAuthDrafts[platform].cookieBrowser;
+    let browser = platformAuthDrafts[platform].cookieBrowser;
     if (!browser) {
-      errorMessage = "请先选择浏览器来源后再获取 Cookie。";
-      return;
+      // Auto-select a default browser based on platform
+      const isMac = !isWindowsPlatform;
+      browser = isMac ? "chrome" : "edge";
+      platformAuthDrafts = {
+        ...platformAuthDrafts,
+        [platform]: {
+          ...platformAuthDrafts[platform],
+          cookieBrowser: browser
+        }
+      };
     }
     detectingCookiePlatform = platform;
     errorMessage = "";
+    successMessage = "";
 
     try {
       const cookieFile = await detectBrowserCookies(platform, browser);
@@ -1088,6 +1151,7 @@
             cookieFile: cookieFile
           }
         };
+        successMessage = `已成功获取 ${platform} 的 Cookie（来自 ${browser}）。请点击「保存设置」生效。`;
       }
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
@@ -1285,16 +1349,35 @@
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     getCurrentWindow().close();
   }
+
+  async function startDrag(event: MouseEvent) {
+    // Tauri 2 WKWebView on macOS ignores -webkit-app-region:drag;
+    // call the native startDragging API instead.
+    if (event.button !== 0) return;
+    // Prevent text selection during drag
+    event.preventDefault();
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    getCurrentWindow().startDragging();
+  }
+
+  function handleDragRegionDblClick() {
+    // macOS: double-click title bar = zoom (maximize/restore)
+    // Windows: double-click title bar = maximize/restore
+    windowToggleMaximize();
+  }
 </script>
 
 {#if loading}
   <main class="loading-shell">
-    <div class="drag-region"></div>
-    <div class="window-controls">
-      <button class="win-btn" onclick={windowMinimize} title="最小化">&#x2013;</button>
-      <button class="win-btn" onclick={windowToggleMaximize} title="最大化">&#x25A1;</button>
-      <button class="win-btn win-close" onclick={windowClose} title="关闭">&#x2715;</button>
-    </div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="drag-region" class:macos-drag={!isWindowsPlatform} onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
+    {#if isWindowsPlatform}
+      <div class="window-controls">
+        <button class="win-btn" onclick={windowMinimize} title="最小化">&#x2013;</button>
+        <button class="win-btn" onclick={windowToggleMaximize} title="最大化">&#x25A1;</button>
+        <button class="win-btn win-close" onclick={windowClose} title="关闭">&#x2715;</button>
+      </div>
+    {/if}
     <div class="pulse-card">
       <span class="pulse-dot"></span>
       {$t("app.loading")}
@@ -1302,12 +1385,15 @@
   </main>
 {:else if bootstrap}
   <main class="app-shell">
-    <div class="drag-region"></div>
-    <div class="window-controls">
-      <button class="win-btn" onclick={windowMinimize} title="最小化">&#x2013;</button>
-      <button class="win-btn" onclick={windowToggleMaximize} title="最大化">&#x25A1;</button>
-      <button class="win-btn win-close" onclick={windowClose} title="关闭">&#x2715;</button>
-    </div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="drag-region" class:macos-drag={!isWindowsPlatform} onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
+    {#if isWindowsPlatform}
+      <div class="window-controls">
+        <button class="win-btn" onclick={windowMinimize} title="最小化">&#x2013;</button>
+        <button class="win-btn" onclick={windowToggleMaximize} title="最大化">&#x25A1;</button>
+        <button class="win-btn win-close" onclick={windowClose} title="关闭">&#x2715;</button>
+      </div>
+    {/if}
     <section class="workspace">
       <header class="topbar">
         <div class="brand">
@@ -1422,22 +1508,20 @@
             heading={$t("douyin.profileHeading")}
             heroEyebrow="Profile Batch"
             itemLabel={$t("douyin.itemLabel")}
-            preparing={openingDouyinProfileBrowser}
-            prepareLabel={$t("douyin.openBrowser")}
-            prepareLoadingLabel={$t("douyin.openingBrowser")}
             placeholder={$t("douyin.profilePlaceholder")}
             analyzing={analyzingDouyinProfile}
             analysisProgress={douyinProfileAnalysisProgress}
-            analyzeDisabled={!cookieFileFor("douyin") && !douyinProfileBrowserSession}
+            analyzeDisabled={!hasCookieFor("douyin")}
             enqueuing={enqueuingDouyinProfile}
+            enqueueLabel="下载所选作品"
+            enqueuingLabel="下载中…"
             pasting={pastingDouyinProfile}
             preview={douyinProfilePreview}
             selectedIds={douyinSelectedProfileIds}
             selectedFormatIdsByAssetId={douyinSelectedProfileFormatIds}
-            showPrepareAction={true}
-            analyzeLabel={$t("douyin.analyzeLabel")}
+            showPrepareAction={false}
+            analyzeLabel="读取主页视频"
             analyzeLoadingLabel={$t("douyin.analyzeLoading")}
-            on:prepare={handleOpenDouyinProfileBrowser}
             on:analyze={handleAnalyzeDouyinProfile}
             on:clearSelection={clearProfileSelection}
             on:close={closeProfileSelection}
@@ -1584,6 +1668,8 @@
         platformAuthProfiles={bootstrap.platformAuth}
         qualityOptions={qualityOptions}
         settingsSaving={settingsSaving}
+        settingsErrorMessage={errorMessage}
+        settingsSuccessMessage={successMessage}
         on:close={() => { if (bootstrap) syncSettings(bootstrap); settingsOpen = false; }}
         on:pickCookieFile={(event) => handlePickCookieFile(event.detail.platform)}
         on:detectCookie={(event) => handleDetectCookie(event.detail.platform)}
