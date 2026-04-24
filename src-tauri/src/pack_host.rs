@@ -1,8 +1,32 @@
-use crate::{pack_manager, pack_registry, platforms, BrowserLaunchResult, ProfileBatch, VideoAsset};
+use crate::{
+    pack_manager, pack_registry, platforms, BrowserLaunchResult, ProfileBatch, VideoAsset,
+};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// Authoritative resource root captured from Tauri's `app.path().resource_dir()` during setup.
+/// This avoids relying on brittle `current_exe` heuristics or the compile-time
+/// `CARGO_MANIFEST_DIR` (which leaks the dev machine's path into release builds).
+static RESOURCE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Called once from `main.rs::setup()` with Tauri's authoritative resource directory.
+pub fn set_resource_root(path: PathBuf) {
+    // Broadcast to every sibling crate module and any spawned subprocess via env var.
+    env::set_var("STREAMVERSE_RESOURCE_ROOT", &path);
+    let _ = RESOURCE_ROOT.set(path);
+}
+
+pub fn resource_root() -> Option<PathBuf> {
+    if let Some(path) = RESOURCE_ROOT.get() {
+        return Some(path.clone());
+    }
+    env::var_os("STREAMVERSE_RESOURCE_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| path.as_os_str().len() > 0)
+}
 
 fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
@@ -266,9 +290,18 @@ fn run_pack(
     if let Some(path) = progress_file {
         command.env("STREAMVERSE_PROGRESS_FILE", path);
     }
+    let network_settings = crate::settings::load_settings();
+    command.env(
+        "STREAMVERSE_PROXY_URL",
+        network_settings.proxy_url.unwrap_or_default(),
+    );
     command
         .env("STREAMVERSE_LOG_DIR", writable_log_dir())
         .current_dir(writable_pack_work_dir());
+
+    if let Some(root) = resource_root() {
+        command.env("STREAMVERSE_RESOURCE_ROOT", root);
+    }
 
     command
         .output()
@@ -302,9 +335,16 @@ fn resolve_pack_binary(binary_name: &str) -> Option<PathBuf> {
     let binary_file = binary_filename(binary_name);
     let mut candidates = Vec::new();
 
+    // Highest priority: Tauri's authoritative resource_dir (set in main.rs setup()).
+    if let Some(root) = resource_root() {
+        candidates.push(root.join("pack-binaries").join(&binary_file));
+        candidates.push(root.join(&binary_file));
+    }
+
     if let Ok(current_exe) = env::current_exe() {
         if let Some(parent) = current_exe.parent() {
             candidates.push(parent.join(&binary_file));
+            candidates.push(parent.join("pack-binaries").join(&binary_file));
             candidates.push(parent.join("binaries").join(&binary_file));
 
             if let Some(contents_dir) = parent.parent() {
@@ -324,27 +364,32 @@ fn resolve_pack_binary(binary_name: &str) -> Option<PathBuf> {
         }
     }
 
-    let workspace_root = workspace_root();
-    candidates.push(
-        workspace_root
-            .join("src-tauri")
-            .join("target")
-            .join("debug")
-            .join(&binary_file),
-    );
-    candidates.push(
-        workspace_root
-            .join("src-tauri")
-            .join("target")
-            .join("release")
-            .join(&binary_file),
-    );
-    candidates.push(
-        workspace_root
-            .join("src-tauri")
-            .join("binaries")
-            .join(&binary_file),
-    );
+    // Dev-time fallbacks: search target/debug, target/release, and src-tauri/binaries
+    // via the workspace root. In release builds this still references the dev machine's
+    // CARGO_MANIFEST_DIR, but since it's only a .is_file() probe the path simply won't
+    // match on end-user machines — no user-visible error path is emitted.
+    if let Some(workspace_root) = dev_workspace_root() {
+        candidates.push(
+            workspace_root
+                .join("src-tauri")
+                .join("target")
+                .join("debug")
+                .join(&binary_file),
+        );
+        candidates.push(
+            workspace_root
+                .join("src-tauri")
+                .join("target")
+                .join("release")
+                .join(&binary_file),
+        );
+        candidates.push(
+            workspace_root
+                .join("src-tauri")
+                .join("binaries")
+                .join(&binary_file),
+        );
+    }
 
     if let Some(installed) = pack_manager::resolve_installed_binary(binary_name) {
         candidates.push(installed);
@@ -365,11 +410,20 @@ fn binary_filename(binary_name: &str) -> String {
     }
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
-        .to_path_buf()
+/// Returns the workspace root only if the compile-time `CARGO_MANIFEST_DIR` still
+/// exists on disk. This prevents the dev machine's path from leaking into user-
+/// facing errors on end-user installs while keeping the dev workflow intact.
+fn dev_workspace_root() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if !manifest_dir.exists() {
+        return None;
+    }
+    Some(
+        manifest_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(manifest_dir),
+    )
 }
 
 fn read_pack_error(stderr: &[u8], fallback: &str) -> String {

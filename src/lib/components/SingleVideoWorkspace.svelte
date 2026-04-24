@@ -55,6 +55,8 @@
 
   let proxiedCoverUrl: string | null = null;
   let lastCoverUrl: string | null = null;
+  $: displayCoverUrl = proxiedCoverUrl ?? preview?.coverUrl ?? null;
+  $: isLongCaption = (preview?.caption?.trim().length ?? 0) > 220;
 
   $: if (preview?.coverUrl && preview.coverUrl !== lastCoverUrl) {
     lastCoverUrl = preview.coverUrl;
@@ -184,15 +186,22 @@
     <section class="analysis-grid">
       <article class="panel preview-panel">
         <p class="eyebrow">Preview</p>
-        {#if proxiedCoverUrl}
+        {#if displayCoverUrl}
           <img
-            src={proxiedCoverUrl}
+            src={displayCoverUrl}
             alt={preview.title}
             class="preview-thumbnail"
+            loading="lazy"
           />
         {/if}
         <h3>{preview.title}</h3>
-        <p class="preview-caption">{preview.caption}</p>
+        <p
+          class="preview-caption"
+          class:preview-caption-expandable={isLongCaption}
+          title={isLongCaption ? preview.caption : undefined}
+        >
+          {preview.caption}
+        </p>
 
         <div class="facts">
           <div>

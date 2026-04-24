@@ -142,7 +142,8 @@
   let errorMessage = "";
   let successMessage = "";
   let platformAuthDrafts: Record<PlatformId, PlatformAuthDraft> = createEmptyPlatformAuthDrafts();
-  let isWindowsPlatform = false;
+  let isWindowsPlatform =
+    typeof navigator !== "undefined" && navigator.userAgent.toLowerCase().includes("windows");
   let saveDirectoryDraft = "";
   let targetDirectory = "";
   let downloadMode: DownloadMode = "manual";
@@ -1337,17 +1338,9 @@
     return activeModule ? tRaw("module." + activeModule + ".label") : "StreamVerse";
   }
 
-  async function windowMinimize() {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    getCurrentWindow().minimize();
-  }
   async function windowToggleMaximize() {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     getCurrentWindow().toggleMaximize();
-  }
-  async function windowClose() {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    getCurrentWindow().close();
   }
 
   async function startDrag(event: MouseEvent) {
@@ -1369,14 +1362,9 @@
 
 {#if loading}
   <main class="loading-shell">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="drag-region" class:macos-drag={!isWindowsPlatform} onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
-    {#if isWindowsPlatform}
-      <div class="window-controls">
-        <button class="win-btn" onclick={windowMinimize} title="最小化">&#x2013;</button>
-        <button class="win-btn" onclick={windowToggleMaximize} title="最大化">&#x25A1;</button>
-        <button class="win-btn win-close" onclick={windowClose} title="关闭">&#x2715;</button>
-      </div>
+    {#if !isWindowsPlatform}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="drag-region macos-drag" onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
     {/if}
     <div class="pulse-card">
       <span class="pulse-dot"></span>
@@ -1385,14 +1373,9 @@
   </main>
 {:else if bootstrap}
   <main class="app-shell">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="drag-region" class:macos-drag={!isWindowsPlatform} onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
-    {#if isWindowsPlatform}
-      <div class="window-controls">
-        <button class="win-btn" onclick={windowMinimize} title="最小化">&#x2013;</button>
-        <button class="win-btn" onclick={windowToggleMaximize} title="最大化">&#x25A1;</button>
-        <button class="win-btn win-close" onclick={windowClose} title="关闭">&#x2715;</button>
-      </div>
+    {#if !isWindowsPlatform}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="drag-region macos-drag" onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
     {/if}
     <section class="workspace">
       <header class="topbar">

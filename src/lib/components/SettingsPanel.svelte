@@ -45,16 +45,29 @@
   // Parse speedLimit into value + unit for the UI
   let speedLimitValue = "";
   let speedLimitUnit: "K" | "M" = "M";
-  {
-    const match = (speedLimit || "").match(/^(\d+(?:\.\d+)?)\s*([KkMm])?/);
-    if (match) {
-      speedLimitValue = match[1];
-      speedLimitUnit = (match[2] || "M").toUpperCase() as "K" | "M";
+  let lastParsedSpeedLimit = "";
+  $: {
+    const normalizedSpeedLimit = (speedLimit || "").trim();
+    if (normalizedSpeedLimit !== lastParsedSpeedLimit) {
+      const match = normalizedSpeedLimit.match(/^(\d+(?:\.\d+)?)\s*([KkMm])?/);
+      if (match) {
+        speedLimitValue = match[1];
+        speedLimitUnit = (match[2] || "M").toUpperCase() as "K" | "M";
+      } else {
+        speedLimitValue = "";
+        speedLimitUnit = "M";
+      }
+      lastParsedSpeedLimit = normalizedSpeedLimit;
     }
   }
 
   function updateSpeedLimit() {
-    speedLimit = speedLimitValue ? `${speedLimitValue}${speedLimitUnit}` : "";
+    const rawValue = `${speedLimitValue ?? ""}`.trim();
+    const numericValue = Number(rawValue);
+    speedLimit =
+      rawValue && Number.isFinite(numericValue) && numericValue > 0
+        ? `${rawValue}${speedLimitUnit}`
+        : "";
   }
 
   const themeOptions: Array<{ value: ThemeMode; label: string }> = [
@@ -285,6 +298,7 @@
             placeholder={$t('settings.speedLimitPlaceholder')}
             type="number"
             min="0"
+            step="0.1"
             oninput={() => updateSpeedLimit()}
           />
           <select

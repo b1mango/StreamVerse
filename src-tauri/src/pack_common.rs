@@ -32,7 +32,7 @@ const MIN_HELPER_PYTHON_MAJOR: u32 = 3;
 const MIN_HELPER_PYTHON_MINOR: u32 = 10;
 const YTDLP_PYPI_SPEC: &str = "yt-dlp[default]==2026.03.17";
 const SINGLE_ANALYSIS_STAGES: u32 = 4;
-const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default,-ios,-android;player_skip=configs";
+const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=android_vr;player_skip=configs";
 
 static PREFERRED_EXTERNAL_YTDLP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 static PREFERRED_JS_RUNTIME: OnceLock<Option<String>> = OnceLock::new();
@@ -89,12 +89,17 @@ pub fn analyze_generic_url(
         "--dump-single-json",
         "--no-playlist",
         "--socket-timeout",
-        "20",
+        "30",
+        "--retries",
+        "5",
     ]);
     append_platform_ytdlp_args(&mut command, platform);
     append_auth_args(&mut command, cookie_browser, cookie_file);
 
-    if platform != "youtube" {
+    if platform == "youtube" {
+        let proxy_url = current_proxy_for_platform(platform);
+        append_network_args(&mut command, proxy_url.as_deref(), None);
+    } else {
         command.arg("--proxy").arg("");
     }
 
@@ -136,13 +141,16 @@ pub fn analyze_generic_url(
         caption: raw.description.unwrap_or_default(),
         category_label: None,
         group_title: None,
-        cover_url: raw.thumbnail.filter(|value| !value.trim().is_empty()).map(|url| {
-            if url.starts_with("//") {
-                format!("https:{url}")
-            } else {
-                url
-            }
-        }),
+        cover_url: raw
+            .thumbnail
+            .filter(|value| !value.trim().is_empty())
+            .map(|url| {
+                if url.starts_with("//") {
+                    format!("https:{url}")
+                } else {
+                    url
+                }
+            }),
         cover_gradient: DEFAULT_GRADIENT.to_string(),
         formats,
     })
@@ -280,11 +288,7 @@ pub fn export_browser_cookies_for_url(browser: &str, url: &str) -> Result<PathBu
     }
 }
 
-pub fn cookie_file_contains_login_cookie(
-    path: &Path,
-    domains: &[&str],
-    names: &[&str],
-) -> bool {
+pub fn cookie_file_contains_login_cookie(path: &Path, domains: &[&str], names: &[&str]) -> bool {
     let Ok(content) = fs::read_to_string(path) else {
         return false;
     };
@@ -324,6 +328,32 @@ fn append_platform_ytdlp_args(command: &mut Command, platform: &str) {
         .arg(YOUTUBE_EXTRACTOR_ARGS)
         .arg("--concurrent-fragments")
         .arg("4");
+}
+
+fn current_proxy_for_platform(platform: &str) -> Option<String> {
+    if platform != "youtube" {
+        return None;
+    }
+
+    env::var("STREAMVERSE_PROXY_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn append_network_args(command: &mut Command, proxy_url: Option<&str>, speed_limit: Option<&str>) {
+    match proxy_url.filter(|value| !value.trim().is_empty()) {
+        Some(proxy) => {
+            command.arg("--proxy").arg(proxy);
+        }
+        None => {
+            command.arg("--proxy").arg("");
+        }
+    }
+
+    if let Some(limit) = speed_limit.filter(|value| !value.trim().is_empty()) {
+        command.arg("--limit-rate").arg(limit);
+    }
 }
 
 fn fallback_streaming_format(id: &str, label: &str) -> VideoFormat {
@@ -438,20 +468,56 @@ fn preferred_external_ytdlp_path() -> Option<PathBuf> {
         .clone()
 }
 
-pub fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
-        .to_path_buf()
+/// Returns the workspace root only if the compile-time `CARGO_MANIFEST_DIR`
+/// still exists on disk (i.e. running on the dev machine). On end-user
+/// installs this returns `None` so callers can fall back to a user-meaningful
+/// path instead of leaking the developer's absolute path.
+pub fn workspace_root() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if !manifest_dir.exists() {
+        return None;
+    }
+    Some(
+        manifest_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(manifest_dir),
+    )
+}
+
+/// Authoritative resource root propagated from the Tauri main app via the
+/// `STREAMVERSE_RESOURCE_ROOT` env var (see `pack_host::set_resource_root`).
+fn env_resource_root() -> Option<PathBuf> {
+    env::var_os("STREAMVERSE_RESOURCE_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
 }
 
 pub fn resource_root() -> PathBuf {
     installed_pack_root()
         .or_else(bundled_pack_resource_root)
-        .unwrap_or_else(workspace_root)
+        .or_else(|| env_resource_root().and_then(|root| current_pack_resource_dir(&root)))
+        .or_else(workspace_root)
+        .unwrap_or_else(|| {
+            env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| PathBuf::from("."))
+        })
+}
+
+fn current_pack_resource_dir(root: &Path) -> Option<PathBuf> {
+    let pack_id = current_pack_id()?;
+    let candidate = root.join("pack-resources").join(pack_id);
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 pub fn shared_pack_root(pack_id: &str) -> Option<PathBuf> {
+    // 1. Dynamically-installed pack running from %APPDATA%\StreamVerse\packs\{id}\bin\…
     if let Some(pack_root) = installed_pack_root() {
         let packs_root = pack_root.parent()?;
         let shared_root = packs_root.join(pack_id);
@@ -460,9 +526,30 @@ pub fn shared_pack_root(pack_id: &str) -> Option<PathBuf> {
         }
     }
 
-    bundled_resources_root()
+    // 2. Authoritative resource root from Tauri (propagated via env var by main app).
+    if let Some(root) = env_resource_root() {
+        let candidate = root.join("pack-resources").join(pack_id);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    // 3. Best-effort heuristic based on the subprocess's own location.
+    if let Some(candidate) = bundled_resources_root()
         .map(|root| root.join("pack-resources").join(pack_id))
         .filter(|path| path.exists())
+    {
+        return Some(candidate);
+    }
+
+    // 4. Locally-synced copy under the user's app-data directory (written by
+    //    `pack_manager::sync_local_pack_resources`).
+    let user_synced = app_data_root().join("packs").join(pack_id);
+    if user_synced.exists() {
+        return Some(user_synced);
+    }
+
+    None
 }
 
 pub fn browser_bridge_resource_root() -> PathBuf {
@@ -521,20 +608,28 @@ fn bundled_resources_root() -> Option<PathBuf> {
     let current_exe = env::current_exe().ok()?;
     let parent = current_exe.parent()?;
 
+    // Subprocess layout: {root}/pack-binaries/streamverse-pack-*.exe
     if parent.file_name()?.to_str()? == "pack-binaries" {
         return parent.parent().map(Path::to_path_buf);
     }
 
-    let resources = parent.join("resources");
-    if resources.is_dir() {
-        return Some(resources);
+    // Main app layout with `resources/` wrapper
+    let nested = parent.join("resources");
+    if nested.is_dir() {
+        return Some(nested);
     }
 
+    // macOS .app bundle: Contents/Resources
     if let Some(contents_dir) = parent.parent() {
         let resources = contents_dir.join("Resources");
         if resources.is_dir() {
             return Some(resources);
         }
+    }
+
+    // Flat Windows NSIS layout: resources live directly alongside the exe
+    if parent.join("pack-binaries").is_dir() || parent.join("pack-resources").is_dir() {
+        return Some(parent.to_path_buf());
     }
 
     None
@@ -1052,7 +1147,9 @@ fn ensure_chrome_cookie_unlock_plugin() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let Ok(appdata) = env::var("APPDATA") else { return };
+        let Ok(appdata) = env::var("APPDATA") else {
+            return;
+        };
         let dir = PathBuf::from(&appdata)
             .join("yt-dlp")
             .join("plugins")

@@ -15,8 +15,14 @@ pub fn analyze_input(
     )?;
     let platform = platforms::detect_platform(&source_url);
     let auth = settings::platform_auth_for(platform_auth, platform);
-    let selected_browser = auth.cookie_browser.as_deref().filter(|value| !value.trim().is_empty());
-    let selected_cookie_file = auth.cookie_file.as_deref().filter(|value| !value.trim().is_empty());
+    let selected_browser = auth
+        .cookie_browser
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let selected_cookie_file = auth
+        .cookie_file
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
 
     preflight_auth(platform, selected_browser, selected_cookie_file)?;
 
@@ -43,7 +49,7 @@ pub fn analyze_input(
             selected_cookie_file,
             progress_file,
         )
-            .map_err(normalize_douyin_error);
+        .map_err(normalize_douyin_error);
     }
 
     match pack_host::analyze_single(&source_url, None, None, progress_file) {
@@ -55,7 +61,7 @@ pub fn analyze_input(
                 selected_cookie_file,
                 progress_file,
             )
-                .or(Err(error))
+            .or(Err(error))
         }
         Err(error) => Err(error),
     }
@@ -122,20 +128,33 @@ pub fn analyze_profile_input(
 
     let platform = platforms::detect_platform(&source_url);
     let auth = settings::platform_auth_for(platform_auth, platform);
-    let cookie_browser = auth.cookie_browser.as_deref().filter(|value| !value.trim().is_empty());
-    let cookie_file = auth.cookie_file.as_deref().filter(|value| !value.trim().is_empty());
+    let cookie_browser = auth
+        .cookie_browser
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let cookie_file = auth
+        .cookie_file
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
 
     preflight_auth(platform, cookie_browser, cookie_file)?;
 
     match platform {
         "douyin" => {
-            if cookie_file.filter(|value| !value.trim().is_empty()).is_some()
-                || cookie_browser.filter(|value| !value.trim().is_empty()).is_some()
+            if cookie_file
+                .filter(|value| !value.trim().is_empty())
+                .is_some()
+                || cookie_browser
+                    .filter(|value| !value.trim().is_empty())
+                    .is_some()
             {
                 pack_host::analyze_profile(&source_url, cookie_browser, cookie_file, progress_file)
                     .map_err(normalize_douyin_error)
             } else {
-                Err("抖音主页批量下载需要登录态。请先在设置中选择浏览器或导入 Cookie 后再试。".to_string())
+                Err(
+                    "抖音主页批量下载需要登录态。请先在设置中选择浏览器或导入 Cookie 后再试。"
+                        .to_string(),
+                )
             }
         }
         _ => pack_host::analyze_profile(&source_url, cookie_browser, cookie_file, progress_file),
@@ -178,7 +197,7 @@ pub fn collect_profile_browser(
 
 fn preflight_auth(
     platform: &str,
-    _cookie_browser: Option<&str>,
+    cookie_browser: Option<&str>,
     cookie_file: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -229,9 +248,8 @@ mod tests {
     fn douyin_profile_requires_manual_browser_flow() {
         use std::collections::BTreeMap;
         let empty_auth = BTreeMap::new();
-        let error =
-            analyze_profile_input("https://www.douyin.com/user/test", &empty_auth, None)
-                .unwrap_err();
+        let error = analyze_profile_input("https://www.douyin.com/user/test", &empty_auth, None)
+            .unwrap_err();
         assert!(error.contains("打开浏览器") || error.contains("Cookie") || error.contains("登录"));
     }
 

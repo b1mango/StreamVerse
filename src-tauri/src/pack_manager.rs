@@ -880,14 +880,16 @@ fn locate_pack_source_binary(binary_name: &str) -> Option<PathBuf> {
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    candidates.push(manifest_dir.join("target").join("debug").join(&binary_file));
-    candidates.push(
-        manifest_dir
-            .join("target")
-            .join("release")
-            .join(&binary_file),
-    );
-    candidates.push(manifest_dir.join("binaries").join(&binary_file));
+    if manifest_dir.exists() {
+        candidates.push(manifest_dir.join("target").join("debug").join(&binary_file));
+        candidates.push(
+            manifest_dir
+                .join("target")
+                .join("release")
+                .join(&binary_file),
+        );
+        candidates.push(manifest_dir.join("binaries").join(&binary_file));
+    }
 
     candidates.into_iter().find(|path| path.is_file())
 }
@@ -954,16 +956,36 @@ fn registry_path() -> PathBuf {
 }
 
 fn packaged_resources_root() -> Option<PathBuf> {
+    // Highest priority: the authoritative resource_dir captured from Tauri at startup.
+    if let Some(root) = crate::pack_host::resource_root() {
+        if root.is_dir() {
+            return Some(root);
+        }
+    }
+
     let current_exe = env::current_exe().ok()?;
     let parent = current_exe.parent()?;
+
+    // macOS .app: Contents/Resources
     if let Some(contents_dir) = parent.parent() {
         let resources = contents_dir.join("Resources");
         if resources.is_dir() {
             return Some(resources);
         }
     }
-    let resources = parent.join("resources");
-    resources.is_dir().then_some(resources)
+
+    // Windows / Linux when resources sit in a sibling `resources/` folder
+    let nested = parent.join("resources");
+    if nested.is_dir() {
+        return Some(nested);
+    }
+
+    // Windows NSIS / flat layout where resources live directly alongside the exe
+    if parent.join("pack-binaries").is_dir() || parent.join("pack-resources").is_dir() {
+        return Some(parent.to_path_buf());
+    }
+
+    None
 }
 
 fn packaged_registry_path() -> Option<PathBuf> {
@@ -990,11 +1012,23 @@ fn packaged_registry_path() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+/// Returns the dev-time workspace root if running on the machine that compiled
+/// the binary. On end-user installs returns the exe's directory as a harmless
+/// placeholder so subsequent `.is_file()` probes simply miss instead of
+/// surfacing the developer's absolute path in user-facing errors.
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
-        .to_path_buf()
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if manifest_dir.exists() {
+        return manifest_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(manifest_dir);
+    }
+
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn packaged_pack_resource_root(pack_id: &str) -> Option<PathBuf> {
@@ -1142,9 +1176,10 @@ fn binary_filename(binary_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_filename, ensure_download_engine_installed, ensure_media_engine_installed,
-        estimated_ytdlp_size, install_pack_for_module, installed_binary_path, load_registry_pack,
-        module_runtime_info, verify_sha256, PACKS_DIR_ENV, REGISTRY_PATH_ENV, REGISTRY_URL_ENV,
+        binary_filename, current_target, ensure_download_engine_installed,
+        ensure_media_engine_installed, estimated_ytdlp_size, install_pack_for_module,
+        installed_binary_path, load_registry_pack, module_runtime_info, verify_sha256,
+        PACKS_DIR_ENV, REGISTRY_PATH_ENV, REGISTRY_URL_ENV,
     };
     use crate::settings;
     use sha2::{Digest, Sha256};
@@ -1167,6 +1202,13 @@ mod tests {
         ))
     }
 
+    fn json_file_url(path: &Path) -> String {
+        format!(
+            "file://{}",
+            path.display().to_string().replace('\\', "\\\\")
+        )
+    }
+
     #[test]
     fn builds_installed_binary_path() {
         let path = installed_binary_path("douyin-pack", "streamverse-pack-douyin");
@@ -1185,6 +1227,7 @@ mod tests {
         let registry_path = fixture_dir.join("plugins.json");
         let source_binary = fixture_dir.join("streamverse-pack-youtube");
         let ytdlp_binary = fixture_dir.join("yt-dlp");
+        let target = current_target();
         let sha = "da9108707b1f98086aa3c4133b046c400ddaf130961e4c7a60f07b26663cc6bd";
 
         let _ = fs::remove_dir_all(&fixture_dir);
@@ -1200,27 +1243,27 @@ mod tests {
       "id": "download-engine",
       "binaryName": "yt-dlp",
       "version": "latest",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "source": {{
         "kind": "url",
-        "url": "file://{}"
+        "url": "{}"
       }}
     }},
     {{
       "id": "youtube-pack",
       "binaryName": "streamverse-pack-youtube",
       "version": "0.2.0",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "sha256": "{sha}",
       "source": {{
         "kind": "url",
-        "url": "file://{}"
+        "url": "{}"
       }}
     }}
   ]
 }}"#,
-                ytdlp_binary.display(),
-                source_binary.display()
+                json_file_url(&ytdlp_binary),
+                json_file_url(&source_binary)
             ),
         )
         .unwrap();
@@ -1234,7 +1277,7 @@ mod tests {
         let installed = packs_dir
             .join("youtube-pack")
             .join("bin")
-            .join("streamverse-pack-youtube");
+            .join(binary_filename("streamverse-pack-youtube"));
         let manifest = packs_dir.join("youtube-pack").join("manifest.json");
         assert!(installed.is_file());
         assert!(manifest.is_file());
@@ -1257,6 +1300,7 @@ mod tests {
         let registry_path = fixture_dir.join("plugins.json");
         let source_binary = fixture_dir.join("streamverse-pack-douyin");
         let ytdlp_binary = fixture_dir.join("yt-dlp");
+        let target = current_target();
         let _ = fs::remove_dir_all(&fixture_dir);
         fs::create_dir_all(&fixture_dir).unwrap();
         fs::write(&source_binary, b"douyin-pack-binary").unwrap();
@@ -1271,10 +1315,10 @@ mod tests {
       "id": "download-engine",
       "binaryName": "yt-dlp",
       "version": "latest",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "source": {{
         "kind": "url",
-        "url": "file://{}"
+        "url": "{}"
       }}
     }},
     {{
@@ -1282,7 +1326,7 @@ mod tests {
       "binaryName": "browser-bridge",
       "version": "0.1.0",
       "resourceOnly": true,
-      "target": "macos-aarch64",
+      "target": "{target}",
       "source": {{
         "kind": "localBuild"
       }}
@@ -1291,17 +1335,17 @@ mod tests {
       "id": "douyin-pack",
       "binaryName": "streamverse-pack-douyin",
       "version": "0.1.0",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "sha256": "{sha}",
       "source": {{
         "kind": "url",
-        "url": "file://{}"
+        "url": "{}"
       }}
     }}
   ]
 }}"#,
-                ytdlp_binary.display(),
-                source_binary.display()
+                json_file_url(&ytdlp_binary),
+                json_file_url(&source_binary)
             ),
         )
         .unwrap();
@@ -1391,6 +1435,7 @@ mod tests {
         let registry_path = fixture_dir.join("plugins.json");
         let zip_path = fixture_dir.join("youtube-pack.zip");
         let ytdlp_binary = fixture_dir.join("yt-dlp");
+        let target = current_target();
         let _ = fs::remove_dir_all(&fixture_dir);
         fs::create_dir_all(&fixture_dir).unwrap();
         fs::write(&ytdlp_binary, b"yt-dlp-binary").unwrap();
@@ -1399,7 +1444,10 @@ mod tests {
             let mut archive = ZipWriter::new(file);
             let options = SimpleFileOptions::default();
             archive
-                .start_file("bin/streamverse-pack-youtube", options)
+                .start_file(
+                    format!("bin/{}", binary_filename("streamverse-pack-youtube")),
+                    options,
+                )
                 .unwrap();
             archive.write_all(b"youtube-pack-binary").unwrap();
             archive.finish().unwrap();
@@ -1414,27 +1462,27 @@ mod tests {
       "id": "download-engine",
       "binaryName": "yt-dlp",
       "version": "latest",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "source": {{
         "kind": "url",
-        "url": "file://{}"
+        "url": "{}"
       }}
     }},
     {{
       "id": "youtube-pack",
       "binaryName": "streamverse-pack-youtube",
       "version": "0.3.0",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "sha256": "{sha}",
       "source": {{
         "kind": "url",
-        "url": "file://{}"
+        "url": "{}"
       }}
     }}
   ]
 }}"#,
-                ytdlp_binary.display(),
-                zip_path.display()
+                json_file_url(&ytdlp_binary),
+                json_file_url(&zip_path)
             ),
         )
         .unwrap();
@@ -1448,7 +1496,7 @@ mod tests {
         let installed = packs_dir
             .join("youtube-pack")
             .join("bin")
-            .join("streamverse-pack-youtube");
+            .join(binary_filename("streamverse-pack-youtube"));
         assert!(installed.is_file());
         assert_eq!(fs::read(&installed).unwrap(), b"youtube-pack-binary");
 
@@ -1462,22 +1510,25 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let fixture_dir = temp_fixture_dir("registry");
         let registry_path = fixture_dir.join("plugins.json");
+        let target = current_target();
 
         let _ = fs::remove_dir_all(&fixture_dir);
         fs::create_dir_all(&fixture_dir).unwrap();
         fs::write(
             &registry_path,
-            r#"{
+            format!(
+                r#"{{
   "packs": [
-    {
+    {{
       "id": "douyin-pack",
       "binaryName": "streamverse-pack-douyin",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "sizeBytes": 1024,
-      "source": { "kind": "localBuild" }
-    }
+      "source": {{ "kind": "localBuild" }}
+    }}
   ]
-}"#,
+}}"#,
+            ),
         )
         .unwrap();
 
@@ -1493,21 +1544,24 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         let fixture_dir = temp_fixture_dir("registry-url");
         let registry_path = fixture_dir.join("plugins.json");
+        let target = current_target();
 
         let _ = fs::remove_dir_all(&fixture_dir);
         fs::create_dir_all(&fixture_dir).unwrap();
         fs::write(
             &registry_path,
-            r#"{
+            format!(
+                r#"{{
   "packs": [
-    {
+    {{
       "id": "youtube-pack",
       "binaryName": "streamverse-pack-youtube",
-      "target": "macos-aarch64",
-      "source": { "kind": "localBuild" }
-    }
+      "target": "{target}",
+      "source": {{ "kind": "localBuild" }}
+    }}
   ]
-}"#,
+}}"#,
+            ),
         )
         .unwrap();
 
@@ -1528,8 +1582,11 @@ mod tests {
         let packs_dir = fixture_dir.join("packs");
         let registry_path = fixture_dir.join("plugins.json");
         let installed_dir = packs_dir.join("youtube-pack");
-        let installed_bin = installed_dir.join("bin").join("streamverse-pack-youtube");
+        let installed_bin = installed_dir
+            .join("bin")
+            .join(binary_filename("streamverse-pack-youtube"));
         let manifest = installed_dir.join("manifest.json");
+        let target = current_target();
 
         let _ = fs::remove_dir_all(&fixture_dir);
         fs::create_dir_all(installed_bin.parent().unwrap()).unwrap();
@@ -1547,20 +1604,22 @@ mod tests {
         .unwrap();
         fs::write(
             &registry_path,
-            r#"{
+            format!(
+                r#"{{
   "packs": [
-    {
+    {{
       "id": "youtube-pack",
       "binaryName": "streamverse-pack-youtube",
       "version": "0.2.0",
-      "target": "macos-aarch64",
+      "target": "{target}",
       "sizeBytes": 2048,
-      "source": {
+      "source": {{
         "kind": "localBuild"
-      }
-    }
+      }}
+    }}
   ]
-}"#,
+}}"#,
+            ),
         )
         .unwrap();
 

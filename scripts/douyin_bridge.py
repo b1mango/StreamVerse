@@ -26,6 +26,7 @@ DESKTOP_UA = (
 )
 DOUYIN_REFERER = "https://www.douyin.com/"
 IMAGE_AWEME_TYPES = {2, 68}
+SINGLE_ANALYZE_MAX_RETRIES = 3
 PROGRESS_FILE = os.environ.get("STREAMVERSE_PROGRESS_FILE")
 
 if str(VENDOR_ROOT) not in sys.path:
@@ -376,7 +377,26 @@ async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:
 
     aweme_id = await AwemeIdFetcher.get_aweme_id(url)
     crawler = DouyinWebCrawler()
-    response = await crawler.fetch_one_video(aweme_id)
+    response: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for attempt in range(1, SINGLE_ANALYZE_MAX_RETRIES + 1):
+        try:
+            response = await crawler.fetch_one_video(aweme_id)
+            break
+        except Exception as error:
+            last_error = error
+            if attempt >= SINGLE_ANALYZE_MAX_RETRIES:
+                break
+            write_progress(
+                1,
+                4,
+                f"抖音作品信息读取超时，正在进行第 {attempt + 1} 次重试…",
+            )
+            await asyncio.sleep(attempt)
+
+    if response is None:
+        raise RuntimeError(f"读取抖音作品信息失败：{last_error}")
+
     detail = response.get("aweme_detail") or {}
     write_progress(2, 4, "正在整理抖音可用清晰度…")
 

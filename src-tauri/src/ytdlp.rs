@@ -5,8 +5,8 @@ use crate::{
     DownloadContentSelection, DownloadTask, TaskReplayRequest,
 };
 use reqwest::blocking::Client;
-use reqwest::Proxy;
 use reqwest::header::{CONTENT_TYPE, REFERER, USER_AGENT};
+use reqwest::Proxy;
 #[cfg(test)]
 use serde::Deserialize;
 use serde::Serialize;
@@ -35,7 +35,7 @@ fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
-const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default,-ios,-android;player_skip=configs";
+const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=android_vr;player_skip=configs";
 
 static PREFERRED_EXTERNAL_YTDLP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 static PREFERRED_JS_RUNTIME: OnceLock<Option<String>> = OnceLock::new();
@@ -284,9 +284,7 @@ pub fn set_max_concurrent_downloads(max: u32) {
     MAX_CONCURRENT
         .get_or_init(|| AtomicU64::new(max))
         .store(max, Ordering::Relaxed);
-    let _ = DOWNLOAD_SEMAPHORE.get_or_init(|| {
-        Arc::new((Mutex::new(0), std::sync::Condvar::new()))
-    });
+    let _ = DOWNLOAD_SEMAPHORE.get_or_init(|| Arc::new((Mutex::new(0), std::sync::Condvar::new())));
 }
 
 pub fn set_network_settings(proxy: Option<String>, speed_limit: Option<String>) {
@@ -335,11 +333,15 @@ fn parse_speed_limit_bytes(limit: Option<&str>) -> Option<u64> {
     } else {
         (limit, 1u64) // raw bytes
     };
-    let value: u64 = num_part.parse().ok()?;
-    if value == 0 {
+    let value: f64 = num_part.parse().ok()?;
+    if !value.is_finite() || value <= 0.0 {
         return None;
     }
-    Some(value * unit)
+    let bytes = (value * unit as f64).round();
+    if bytes <= 0.0 {
+        return None;
+    }
+    Some(bytes as u64)
 }
 
 /// Sleep to enforce speed limit. Returns the updated window state.
@@ -448,9 +450,7 @@ pub fn download_video(
     }
 
     if download_options.download_audio && !ffmpeg_available(ffmpeg_path) {
-        return Err(
-            "提取 MP3 音频需要 FFmpeg。请先在设置中安装媒体引擎组件。".to_string(),
-        );
+        return Err("提取 MP3 音频需要 FFmpeg。请先在设置中安装媒体引擎组件。".to_string());
     }
 
     let controller = Arc::new(TaskController::new(supports_pause, supports_cancel));
@@ -877,11 +877,7 @@ pub fn download_video(
                 }
             }
 
-            download_history::record_download(
-                &task_platform,
-                &artifacts.asset_id,
-                &title,
-            );
+            download_history::record_download(&task_platform, &artifacts.asset_id, &title);
         } else {
             let reason = stderr_lines
                 .lock()
@@ -939,8 +935,14 @@ fn metadata_only_worker(
         return;
     }
 
-    let summary =
-        persist_download_artifacts(&output_layout, None, &artifacts, None, &download_options, ffmpeg_path.as_deref());
+    let summary = persist_download_artifacts(
+        &output_layout,
+        None,
+        &artifacts,
+        None,
+        &download_options,
+        ffmpeg_path.as_deref(),
+    );
 
     if controller.is_cancel_requested() {
         unregister_controller(&controller_store, &task_id);
@@ -1990,20 +1992,23 @@ fn ffmpeg_candidates<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {
         candidates.push(resource_dir.join(ffmpeg_binary_name()));
     }
 
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    candidates.push(
-        workspace_root
-            .join("node_modules")
-            .join("ffmpeg-static")
-            .join(ffmpeg_binary_name()),
-    );
-    candidates.push(
-        workspace_root
-            .join("src-tauri")
-            .join("resources")
-            .join("bin")
-            .join(ffmpeg_binary_name()),
-    );
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if manifest_dir.exists() {
+        let workspace_root = manifest_dir.join("..");
+        candidates.push(
+            workspace_root
+                .join("node_modules")
+                .join("ffmpeg-static")
+                .join(ffmpeg_binary_name()),
+        );
+        candidates.push(
+            workspace_root
+                .join("src-tauri")
+                .join("resources")
+                .join("bin")
+                .join(ffmpeg_binary_name()),
+        );
+    }
 
     candidates
 }
@@ -2105,8 +2110,7 @@ fn persist_download_artifacts(
                 Ok(output) if output.status.success() => {
                     summary.audio_written = true;
                     if summary.output_path.is_none() {
-                        summary.output_path =
-                            Some(audio_output.to_string_lossy().to_string());
+                        summary.output_path = Some(audio_output.to_string_lossy().to_string());
                     }
                 }
                 Ok(output) => {
@@ -2304,8 +2308,8 @@ fn build_http_client(platform: &str) -> Result<Client, String> {
 
     match current_proxy_for_platform(platform).filter(|value| !value.trim().is_empty()) {
         Some(proxy) => {
-            let parsed_proxy = Proxy::all(&proxy)
-                .map_err(|error| format!("代理地址无效：{error}"))?;
+            let parsed_proxy =
+                Proxy::all(&proxy).map_err(|error| format!("代理地址无效：{error}"))?;
             builder = builder.proxy(parsed_proxy);
         }
         None => {
@@ -2541,7 +2545,9 @@ fn dash_combined_progress(downloaded_bytes: u64, total_bytes: u64) -> u32 {
             return 0;
         }
         let mb = downloaded_bytes as f64 / (1024.0 * 1024.0);
-        return (90.0 * (1.0 - (-mb / 100.0).exp())).round().clamp(1.0, 90.0) as u32;
+        return (90.0 * (1.0 - (-mb / 100.0).exp()))
+            .round()
+            .clamp(1.0, 90.0) as u32;
     }
 
     ((downloaded_bytes as f64 / total_bytes as f64) * 96.0)
@@ -2561,7 +2567,9 @@ fn dash_phase_progress(downloaded_bytes: u64, total_bytes: u64, start: u32, end:
         // Unknown total: asymptotic progress within [start, end)
         let span = (end - start) as f64;
         let mb = downloaded_bytes as f64 / (1024.0 * 1024.0);
-        let offset = (span * (1.0 - (-mb / 50.0).exp())).round().clamp(0.0, span - 1.0) as u32;
+        let offset = (span * (1.0 - (-mb / 50.0).exp()))
+            .round()
+            .clamp(0.0, span - 1.0) as u32;
         return (start + offset).clamp(start, end - 1);
     }
 
@@ -2721,7 +2729,11 @@ fn extract_cookies_via_rookie(browser: &str, platform: &str) -> Result<String, S
     for c in &cookies {
         let http_only_prefix = if c.http_only { "#HttpOnly_" } else { "" };
         let domain = &c.domain;
-        let flag = if domain.starts_with('.') { "TRUE" } else { "FALSE" };
+        let flag = if domain.starts_with('.') {
+            "TRUE"
+        } else {
+            "FALSE"
+        };
         let secure = if c.secure { "TRUE" } else { "FALSE" };
         let expires = c.expires.unwrap_or(0);
         lines.push(format!(
@@ -2739,8 +2751,7 @@ fn extract_cookies_via_rookie(browser: &str, platform: &str) -> Result<String, S
         return Err(format!("创建 Cookie 目录失败：{e}"));
     }
     let cookie_output = cookie_dir.join(format!("saved-{platform}-cookies.txt"));
-    fs::write(&cookie_output, content)
-        .map_err(|e| format!("写入 Cookie 文件失败：{e}"))?;
+    fs::write(&cookie_output, content).map_err(|e| format!("写入 Cookie 文件失败：{e}"))?;
 
     Ok(cookie_output.to_string_lossy().to_string())
 }
@@ -2787,9 +2798,7 @@ pub fn extract_browser_cookies(browser: &str, platform: &str) -> Result<String, 
 
     extend_runtime_path(&mut cmd);
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("启动 yt-dlp 失败：{e}"))?;
+    let output = cmd.output().map_err(|e| format!("启动 yt-dlp 失败：{e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2803,11 +2812,19 @@ pub fn extract_browser_cookies(browser: &str, platform: &str) -> Result<String, 
                 browser.to_uppercase()
             ));
         }
-        return Err(format!("从 {} 提取 Cookie 失败：{}", browser, stderr.trim()));
+        return Err(format!(
+            "从 {} 提取 Cookie 失败：{}",
+            browser,
+            stderr.trim()
+        ));
     }
 
     if !cookie_output.exists() || fs::metadata(&cookie_output).map(|m| m.len()).unwrap_or(0) == 0 {
-        return Err(format!("Cookie 文件为空，请先在 {} 中登录 {} 后再试。", browser.to_uppercase(), platform));
+        return Err(format!(
+            "Cookie 文件为空，请先在 {} 中登录 {} 后再试。",
+            browser.to_uppercase(),
+            platform
+        ));
     }
 
     Ok(cookie_output.to_string_lossy().to_string())
@@ -2848,7 +2865,9 @@ fn ensure_chrome_cookie_unlock_plugin() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let Ok(appdata) = env::var("APPDATA") else { return };
+        let Ok(appdata) = env::var("APPDATA") else {
+            return;
+        };
         let dir = PathBuf::from(&appdata)
             .join("yt-dlp")
             .join("plugins")
@@ -3023,8 +3042,12 @@ pub fn open_in_file_manager(path: &str, reveal_parent: bool) -> Result<(), Strin
 fn open_in_file_manager_windows(target: &Path, reveal_parent: bool) -> Result<(), String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-    use windows_sys::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems, ShellExecuteW};
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems, ShellExecuteW,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
 
     fn to_wide(value: &OsStr) -> Vec<u16> {
@@ -3412,7 +3435,9 @@ struct ProgressLine {
 }
 
 fn parse_progress_line(line: &str) -> Option<ProgressLine> {
-    let payload = line.strip_prefix("progress:")?;
+    let payload = line
+        .strip_prefix("download:progress:")
+        .or_else(|| line.strip_prefix("progress:"))?;
     let mut parts = payload.split('|');
     let percent_text = parts.next()?.replace('%', "").trim().to_string();
     let speed_text = parts.next()?.trim().to_string();
@@ -3438,8 +3463,9 @@ fn parse_progress_line(line: &str) -> Option<ProgressLine> {
 mod tests {
     use super::{
         compute_percent, dash_download_worker, direct_download_worker, ffmpeg_available,
-        first_existing_path, map_formats, new_task_controller_store, persist_download_artifacts,
-        prepare_output_layout, DownloadArtifacts, RawFormat, RawHeaders, TaskController,
+        first_existing_path, map_formats, new_task_controller_store, parse_progress_line,
+        parse_speed_limit_bytes, persist_download_artifacts, prepare_output_layout,
+        DownloadArtifacts, RawFormat, RawHeaders, TaskController,
     };
     use crate::{pack_manager, task_store, DownloadContentSelection};
     use std::fs;
@@ -3459,6 +3485,26 @@ mod tests {
         assert_eq!(compute_percent(50, 100), 50);
         assert_eq!(compute_percent(0, 0), 0);
         assert_eq!(compute_percent(101, 100), 100);
+    }
+
+    #[test]
+    fn parses_decimal_speed_limits() {
+        assert_eq!(parse_speed_limit_bytes(Some("1.5M")), Some(1_572_864));
+        assert_eq!(parse_speed_limit_bytes(Some("256K")), Some(262_144));
+    }
+
+    #[test]
+    fn ignores_invalid_speed_limits() {
+        assert_eq!(parse_speed_limit_bytes(Some("0")), None);
+        assert_eq!(parse_speed_limit_bytes(Some("abc")), None);
+    }
+
+    #[test]
+    fn parses_download_prefixed_progress_lines() {
+        let line = parse_progress_line("download:progress:42.5%|3.1MiB/s|00:19").unwrap();
+        assert_eq!(line.percent, 43);
+        assert_eq!(line.speed_text, "3.1MiB/s");
+        assert_eq!(line.eta_text, "00:19");
     }
 
     #[test]

@@ -590,6 +590,26 @@ input {
   line-height: 1.7;
 }
 
+.preview-caption {
+  white-space: pre-line;
+}
+
+.preview-caption-expandable {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  overflow: hidden;
+  max-height: calc(1.7em * 8);
+  cursor: help;
+}
+
+.preview-caption-expandable:hover {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+  max-height: none;
+}
+
 .preview-thumbnail {
   width: 100%;
   max-height: 240px;

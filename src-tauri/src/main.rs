@@ -357,24 +357,34 @@ fn get_bootstrap_state(
 }
 
 #[tauri::command]
-fn analyze_input(
+async fn analyze_input(
     raw_input: String,
     session_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<VideoAsset, String> {
     let settings = state.settings.lock().unwrap().clone();
-    let progress_file = session_id.as_deref().map(analysis_progress_path);
-    let _ = write_analysis_progress(session_id.as_deref(), 0, 1, "正在解析作品链接…");
-    let result = providers::analyze_input(&raw_input, &settings.platform_auth, progress_file.as_deref());
-    match &result {
-        Ok(_) => {
-            let _ = write_analysis_progress(session_id.as_deref(), 1, 1, "作品解析完成。");
+    let sid = session_id.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress_file = sid.as_deref().map(analysis_progress_path);
+        let _ = write_analysis_progress(sid.as_deref(), 0, 1, "正在解析作品链接…");
+        let result = providers::analyze_input(
+            &raw_input,
+            &settings.platform_auth,
+            progress_file.as_deref(),
+        );
+        match &result {
+            Ok(_) => {
+                let _ = write_analysis_progress(sid.as_deref(), 1, 1, "作品解析完成。");
+            }
+            Err(error) => {
+                let _ = write_analysis_progress(sid.as_deref(), 0, 1, error);
+            }
         }
-        Err(error) => {
-            let _ = write_analysis_progress(session_id.as_deref(), 0, 1, error);
-        }
-    }
-    result
+        result
+    })
+    .await
+    .map_err(|_| "解析线程异常退出".to_string())?
 }
 
 #[tauri::command]
@@ -1272,8 +1282,21 @@ fn build_platform_auth_profiles(
 
 #[tauri::command]
 async fn fetch_thumbnail(url: String) -> Result<String, String> {
-    let response = reqwest::Client::builder()
-        .no_proxy()
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(proxy_url) = settings::load_settings()
+        .proxy_url
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
+            client_builder = client_builder.proxy(proxy);
+        } else {
+            client_builder = client_builder.no_proxy();
+        }
+    } else {
+        client_builder = client_builder.no_proxy();
+    }
+
+    let response = client_builder
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?
         .get(&url)
@@ -1301,8 +1324,7 @@ async fn fetch_thumbnail(url: String) -> Result<String, String> {
     encoded.push_str(&content_type);
     encoded.push_str(";base64,");
 
-    const CHARS: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut buf = Vec::with_capacity(bytes.len() * 4 / 3 + 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -1353,6 +1375,13 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .manage(app_state)
         .setup(|app| {
+            // Capture Tauri's authoritative resource directory as early as possible so
+            // every downstream path lookup (including pack subprocesses) can rely on it
+            // instead of brittle `current_exe` heuristics or compile-time paths.
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                pack_host::set_resource_root(resource_dir);
+            }
+
             let ffmpeg_path = ytdlp::resolve_ffmpeg_path(app.handle())
                 .map(|path| path.to_string_lossy().to_string());
             app.manage(ToolingState { ffmpeg_path });
