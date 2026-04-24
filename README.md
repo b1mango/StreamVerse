@@ -1,145 +1,142 @@
 # StreamVerse
 
 <p align="center">
-  <img src="src-tauri/icons/icon.png" alt="StreamVerse Logo" width="128" height="128" />
+  <img src="src-tauri/icons/icon.png" alt="StreamVerse logo" width="128" height="128" />
 </p>
 
 <p align="center">
-  <strong>多平台视频聚合下载工具</strong><br/>
-  Tauri 2 · Rust · Svelte 5 · macOS & Windows
+  面向桌面的多平台视频解析与下载工具，基于 Tauri 2、Rust 和 Svelte 5 构建。
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.4-brightgreen" alt="version" /></a>
-  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-blue" alt="platforms" />
-  <img src="https://img.shields.io/badge/license-MIT-yellow" alt="license" />
-  <img src="https://img.shields.io/badge/tauri-v2-orange" alt="tauri" />
+  <a href="https://github.com/b1mango/StreamVerse/releases"><img src="https://img.shields.io/badge/release-0.1.5-2ea043" alt="release 0.1.5" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-1f6feb" alt="platforms" />
+  <img src="https://img.shields.io/badge/Tauri-2.x-8b5cf6" alt="Tauri 2" />
+  <img src="https://img.shields.io/badge/Svelte-5-ff3e00" alt="Svelte 5" />
 </p>
 
----
+## 项目简介
 
-## 简介
+StreamVerse 提供统一的桌面工作台，用于处理抖音、Bilibili 和 YouTube 的视频解析、格式选择与下载任务。项目重点放在本地桌面体验、任务队列管理，以及面向国内网络环境的代理与认证隔离策略。
 
-StreamVerse 是一个面向桌面的多平台视频下载工具。项目基于 **Tauri 2 + Rust + Svelte 5** 构建，支持 **抖音**、**Bilibili**、**YouTube** 三个平台的单视频下载与主页批量下载，通过模块化 pack 架构管理平台能力、浏览器桥接和媒体运行时。
+当前版本聚焦以下能力：
+
+- 抖音单视频下载与主页批量下载
+- Bilibili 单视频下载与 UP 主投稿批量下载
+- YouTube 单视频下载
+- 视频、封面、文案、元数据等多种下载产物
+- 实时任务队列、失败重试、断点后的历史保留
+
+## 功能特性
+
+### 下载工作流
+
+- 单视频与主页批量工作流分离，按平台分别提供独立工作区。
+- 批量任务支持预览、搜索、勾选、清晰度选择后再入队。
+- 下载内容可按需选择视频、封面、文案和元数据。
+- 支持高质量格式合流，打包版本内置 `FFmpeg`，无需额外安装。
+- YouTube 下载启用分片并发，提升 DASH 流的吞吐表现。
+- 下载限速对直链下载和 `yt-dlp` 路径统一生效。
+
+### 认证与网络策略
+
+- 抖音、Bilibili、YouTube 采用分平台认证配置，浏览器来源与 `cookies.txt` 相互独立。
+- 导入 `cookies.txt` 时会进行关键登录字段预检，提前暴露配置问题。
+- 仅 YouTube 使用代理配置；抖音与 Bilibili 保持直连，避免国内 CDN 绕行。
+- Windows 下针对 Chrome 的 Cookie 限制提供明确引导，优先建议手动导出 `cookies.txt`。
+
+### 桌面体验
+
+- Windows 使用原生窗口按钮与标题栏行为，macOS 使用系统原生窗口样式。
+- 批量解析与下载提供实时进度、速度和 ETA。
+- 已完成任务支持一键在文件管理器中定位文件。
+- 任务历史在应用重启后保留，可对失败或取消任务直接重试。
+- 设置面板集中管理下载路径、并发数、代理、限速、通知和平台认证。
+
+### 架构与运行时
+
+- 前端基于 Svelte 5，后端由 Rust 驱动任务调度、网络请求和本地文件操作。
+- 下载链路以 `yt-dlp` 为核心，合流依赖 `FFmpeg`。
+- 平台能力通过 pack 机制组织，便于按模块演进和替换。
+- 抖音主页批量读取依赖内置 Python 辅助脚本和浏览器桥接逻辑。
 
 ## 平台支持
 
 | 平台 | 单视频下载 | 主页批量下载 | 认证方式 |
 | --- | :---: | :---: | --- |
-| 抖音 | ✅ | ✅ | 浏览器 Cookie / cookies.txt |
-| Bilibili | ✅ | ✅ | 浏览器 Cookie / cookies.txt |
-| YouTube | ✅ | — | 浏览器 Cookie / cookies.txt |
-
-## 功能特性
-
-**下载能力**
-- 单视频下载与主页批量下载分模块操作，路径清晰
-- 每个任务可独立选择下载内容：视频 / 封面 / 文案 / 元数据
-- 批量列表支持搜索筛选、全选 / 反选、逐项清晰度选择
-- 多项下载自动创建以标题命名的文件夹归档
-- YouTube 支持 DASH 多线程分片下载（`--concurrent-fragments`）
-- 下载限速对所有下载路径生效（直链 / DASH 合流）
-- URL 跨平台校验：解析前自动检测链接所属平台，防止误操作
-
-**任务队列**
-- 实时显示进度、速度、ETA
-- 支持暂停 / 继续 / 取消 / 重试
-- 任务历史跨重启持久化，中断任务恢复为可重试状态
-- 一键定位已下载文件（Windows 使用原生 Shell API）
-- 全局悬浮滚动按钮：批量列表过长时一键跳到顶部 / 底部
-
-**认证与网络**
-- 分平台独立管理认证：每个平台独立配置浏览器来源和 cookies.txt
-- Cookie 导入预检：自动校验关键登录 Cookie 是否存在
-- 代理策略隔离：仅 YouTube 走代理，国内平台始终直连
-- 浏览器窗口登录态接入受限内容解析
-
-**界面与体验**
-- macOS 原生窗口外观：系统交通灯按钮、圆角、阴影，双击标题栏最大化
-- 设置面板毛玻璃效果（`backdrop-filter: blur`），滑入动画
-- 全局悬浮滚动按钮：批量列表过长时一键跳到顶部 / 底部
-- 深色 / 浅色主题全局适配
-
-**架构设计**
-- 格式列表智能去重，保留用户可感知的清晰度差异
-- 内置 FFmpeg，高质量音视频合流无需额外安装
-- 平台能力通过 pack 分发，支持按需安装与更新
-- 抖音解析连接复用：共享 HTTP 客户端，大幅提升批量解析速度
+| 抖音 | 支持 | 支持 | 浏览器读取 / `cookies.txt` |
+| Bilibili | 支持 | 支持 | 浏览器读取 / `cookies.txt` |
+| YouTube | 支持 | 暂不支持 | 浏览器读取 / `cookies.txt` / 代理 |
 
 ## 界面预览
 
-| 主页 | 抖音工作区 | Bilibili 工作区 |
+| 首页 | 抖音工作区 | Bilibili 工作区 |
 | :---: | :---: | :---: |
-| ![主页](docs/screenshots/home.png) | ![抖音](docs/screenshots/douyin-workspace.png) | ![Bilibili](docs/screenshots/bilibili-workspace.png) |
+| ![Home](docs/screenshots/home.png) | ![Douyin workspace](docs/screenshots/douyin-workspace.png) | ![Bilibili workspace](docs/screenshots/bilibili-workspace.png) |
 
-## 架构
+## 安装
 
-```
-StreamVerse
-├── 主应用 (Tauri + Svelte)
-│   ├── 界面层 — Svelte 5 组件
-│   ├── 调度层 — 任务队列、设置、模块中心
-│   └── 后端层 — Rust 命令、yt-dlp 调用、HTTP 客户端
-│
-├── 平台 Pack
-│   ├── douyin-pack    — 抖音解析与批量读取
-│   ├── bilibili-pack  — B站解析与批量读取
-│   └── youtube-pack   — YouTube 解析
-│
-└── 共享依赖
-    ├── browser-bridge   — 浏览器会话、主页视频提取
-    ├── download-engine  — yt-dlp
-    └── media-engine     — FFmpeg
-```
+预编译安装包可从 [GitHub Releases](https://github.com/b1mango/StreamVerse/releases) 获取。
 
-## 仓库结构
+- Windows：NSIS 安装包（`.exe`）
+- macOS：DMG 安装包
 
-```
-src/                    Svelte 前端界面
-src-tauri/              Rust 后端、任务执行、pack 调度
-  src/bin/              平台 pack 二进制入口
-scripts/                Python 桥接脚本与打包辅助脚本
-vendor/douyin_api/      抖音桥接依赖
-registry/plugins.json   pack 注册表
-docs/                   项目文档与截图
-```
+如果你只需要本地自用，推荐直接使用 Release 构建产物，而不是从源码启动。
 
-## 快速开始
+## 使用说明
+
+1. 在设置面板中确认默认下载路径、并发数、限速和代理策略。
+2. 按平台配置认证方式。抖音和 Bilibili 推荐优先使用新鲜 Cookie；YouTube 在受限网络环境下建议配置代理。
+3. 进入单视频或批量工作区，粘贴链接并解析。
+4. 选择需要的格式和下载产物后入队，下载进度会在任务队列中持续更新。
+
+## 开发环境
 
 ### 环境要求
 
 - Node.js 22+
-- Rust (stable)
+- Rust stable
 - Python 3.10+
-- Chromium 内核浏览器（用于抖音 / Bilibili 主页批量读取）
+- Windows 或 macOS
+- Chromium 内核浏览器
 
-### 开发
-
-```bash
-npm ci                  # 安装前端依赖
-npm run tauri:dev       # 启动开发模式
-```
-
-### 构建
+### 本地开发
 
 ```bash
-npm run tauri:build     # 构建安装包
+npm ci
+npm run tauri:dev
 ```
 
-构建产物：
-- **Windows**：NSIS 安装包（`.exe`）+ MSI
-- **macOS**：DMG
+### 质量检查
 
-## 发布
+```bash
+npm run check
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
-推送 `v*` tag 触发 GitHub Actions 自动构建，生成 GitHub Release 并附带各平台安装包。
+### 构建安装包
+
+```bash
+npm run tauri:build
+```
+
+## 项目结构
+
+```text
+src/                    Svelte 前端界面
+src-tauri/              Rust 后端、任务调度、Tauri 配置
+scripts/                Python 辅助脚本与浏览器桥接逻辑
+vendor/douyin_api/      抖音批量读取依赖
+registry/plugins.json   pack 注册信息
+docs/                   路线图、维护文档与截图
+```
 
 ## 当前限制
 
-- YouTube 暂仅支持单视频下载，频道批量下载在规划中
-- 主页批量读取仅覆盖已发布作品，不含喜欢、收藏、直播等
-- 部分抖音链接需要浏览器 Cookie 才能正常解析
-- Windows Chrome 115+ 启用 App-Bound Encryption 后无法自动读取 Cookie，需手动导出 cookies.txt
+- YouTube 当前仅支持单视频下载，不包含频道或主页批量工作流。
+- 抖音和 Bilibili 的部分链接仍依赖 Cookie 才能稳定解析。
+- Windows Chrome 启用 App-Bound Encryption 后，自动读取 Cookie 可能受限，通常需要手动导出 `cookies.txt`。
+- 主页批量读取聚焦已发布作品，不覆盖收藏、喜欢、直播等其他内容类型。
 
 ## 文档
 
@@ -149,6 +146,15 @@ npm run tauri:build     # 构建安装包
 - [项目规则](docs/project-rules.md)
 - [维护上下文](docs/maintainer-context.md)
 
+## 贡献
+
+欢迎通过 Issue 或 Pull Request 反馈问题与改进建议。提交变更前，建议至少运行一次以下检查：
+
+```bash
+npm run check
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
 ## License
 
-[MIT](LICENSE)
+当前仓库未附带正式的 `LICENSE` 文件。在补充明确授权条款之前，请默认仅将本仓库视为源码公开而非完成授权的发布项目。
