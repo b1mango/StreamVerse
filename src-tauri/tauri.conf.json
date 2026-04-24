@@ -39,7 +39,7 @@
     ],
     "windows": {
       "nsis": {
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/installer-icon.ico"
       }
     },
     "resources": {

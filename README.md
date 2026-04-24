@@ -11,8 +11,13 @@
 <p align="center">
   <a href="https://github.com/b1mango/StreamVerse/releases"><img src="https://img.shields.io/badge/release-0.1.5-2ea043" alt="release 0.1.5" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-1f6feb" alt="platforms" />
+  <img src="https://img.shields.io/badge/license-MIT-f5c542" alt="MIT license" />
   <img src="https://img.shields.io/badge/Tauri-2.x-8b5cf6" alt="Tauri 2" />
   <img src="https://img.shields.io/badge/Svelte-5-ff3e00" alt="Svelte 5" />
+</p>
+
+<p align="center">
+  中文 README · <a href="README.en.md">English</a>
 </p>
 
 ## 项目简介
@@ -59,6 +64,7 @@ StreamVerse 提供统一的桌面工作台，用于处理抖音、Bilibili 和 Y
 - 下载链路以 `yt-dlp` 为核心，合流依赖 `FFmpeg`。
 - 平台能力通过 pack 机制组织，便于按模块演进和替换。
 - 抖音主页批量读取依赖内置 Python 辅助脚本和浏览器桥接逻辑。
+- 当前仍保留 Python 辅助链路，但路线已经收敛为“仅保留批量读取场景，后续逐步迁移到 Rust，本地脚本作为 fallback”。
 
 ## 平台支持
 
@@ -96,7 +102,7 @@ StreamVerse 提供统一的桌面工作台，用于处理抖音、Bilibili 和 Y
 
 - Node.js 22+
 - Rust stable
-- Python 3.10+
+- Python 3.10+（仅开发环境和当前批量桥接链路需要）
 - Windows 或 macOS
 - Chromium 内核浏览器
 
@@ -119,6 +125,10 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```bash
 npm run tauri:build
 ```
+
+说明：
+
+- `npm run tauri:build` 会生成包含内置 `FFmpeg` 的完整安装包
 
 ## 项目结构
 
@@ -157,4 +167,4 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## License
 
-当前仓库未附带正式的 `LICENSE` 文件。在补充明确授权条款之前，请默认仅将本仓库视为源码公开而非完成授权的发布项目。
+[MIT](LICENSE)
