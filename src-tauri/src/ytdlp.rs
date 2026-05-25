@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -427,7 +427,8 @@ pub fn download_video(
     let safe_title = parser::sanitize_filename(title);
     let output_layout =
         prepare_output_layout(&output_dir, &safe_title, asset_id, &download_options)?;
-    let supports_pause = download_options.download_video && direct_url.is_some();
+    let use_direct_download = platform != "youtube" && direct_url.is_some();
+    let supports_pause = download_options.download_video && use_direct_download;
     let supports_cancel = true;
     let format_display = build_task_format_label(format_label, &download_options);
     let task_id = if download_options.download_video {
@@ -552,55 +553,57 @@ pub fn download_video(
         return Ok(task);
     }
 
-    if let Some(direct_url) = direct_url {
-        if let Some(audio_direct_url) = audio_direct_url {
-            thread::spawn(move || {
-                acquire_download_slot();
-                dash_download_worker(
-                    task_store,
-                    controller_store,
-                    task_id,
-                    title,
-                    format_display,
-                    artifacts,
-                    output_layout,
-                    download_options,
-                    direct_url,
-                    audio_direct_url,
-                    auto_reveal_in_file_manager,
-                    referer,
-                    user_agent,
-                    audio_referer,
-                    audio_user_agent,
-                    ffmpeg_path,
-                    controller,
-                );
-                release_download_slot();
-            });
-        } else {
-            thread::spawn(move || {
-                acquire_download_slot();
-                direct_download_worker(
-                    task_store,
-                    controller_store,
-                    task_id,
-                    title,
-                    format_display,
-                    artifacts,
-                    output_layout,
-                    download_options,
-                    direct_url,
-                    auto_reveal_in_file_manager,
-                    referer,
-                    user_agent,
-                    ffmpeg_path,
-                    controller,
-                );
-                release_download_slot();
-            });
-        }
+    if platform_text != "youtube" {
+        if let Some(direct_url) = direct_url {
+            if let Some(audio_direct_url) = audio_direct_url {
+                thread::spawn(move || {
+                    acquire_download_slot();
+                    dash_download_worker(
+                        task_store,
+                        controller_store,
+                        task_id,
+                        title,
+                        format_display,
+                        artifacts,
+                        output_layout,
+                        download_options,
+                        direct_url,
+                        audio_direct_url,
+                        auto_reveal_in_file_manager,
+                        referer,
+                        user_agent,
+                        audio_referer,
+                        audio_user_agent,
+                        ffmpeg_path,
+                        controller,
+                    );
+                    release_download_slot();
+                });
+            } else {
+                thread::spawn(move || {
+                    acquire_download_slot();
+                    direct_download_worker(
+                        task_store,
+                        controller_store,
+                        task_id,
+                        title,
+                        format_display,
+                        artifacts,
+                        output_layout,
+                        download_options,
+                        direct_url,
+                        auto_reveal_in_file_manager,
+                        referer,
+                        user_agent,
+                        ffmpeg_path,
+                        controller,
+                    );
+                    release_download_slot();
+                });
+            }
 
-        return Ok(task);
+            return Ok(task);
+        }
     }
 
     ensure_ytdlp_available()?;
@@ -634,6 +637,7 @@ pub fn download_video(
             .arg("--no-playlist")
             .arg("--socket-timeout")
             .arg("20")
+            .arg("--progress")
             .arg("--newline")
             .arg("--progress-delta")
             .arg("0.5")
@@ -715,7 +719,7 @@ pub fn download_video(
             let format_display = format_display.clone();
             let task_platform = task_platform.clone();
             thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                read_process_output_lines(stdout, |line| {
                     if let Some(progress) = parse_progress_line(&line) {
                         upsert_task(
                             &task_store,
@@ -739,7 +743,7 @@ pub fn download_video(
                         let mut guard = output_path.lock().unwrap();
                         *guard = Some(path.trim().to_string());
                     }
-                }
+                });
             })
         });
 
@@ -752,15 +756,7 @@ pub fn download_video(
             let task_platform = task_platform.clone();
 
             thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    {
-                        let mut guard = stderr_lines.lock().unwrap();
-                        guard.push(line.clone());
-                        if guard.len() > 12 {
-                            let _ = guard.remove(0);
-                        }
-                    }
-
+                read_process_output_lines(stderr, |line| {
                     if let Some(progress) = parse_progress_line(&line) {
                         upsert_task(
                             &task_store,
@@ -780,8 +776,14 @@ pub fn download_video(
                                 can_retry: true,
                             },
                         );
+                    } else {
+                        let mut guard = stderr_lines.lock().unwrap();
+                        guard.push(line.clone());
+                        if guard.len() > 12 {
+                            let _ = guard.remove(0);
+                        }
                     }
-                }
+                });
             })
         });
 
@@ -3428,6 +3430,38 @@ fn readable_error(stderr: &[u8], fallback: &str) -> String {
     }
 }
 
+fn read_process_output_lines<R, F>(mut reader: R, mut on_line: F)
+where
+    R: Read,
+    F: FnMut(String),
+{
+    let mut buffer = [0u8; 8192];
+    let mut pending = Vec::<u8>::new();
+
+    loop {
+        let bytes_read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => bytes_read,
+            Err(_) => break,
+        };
+
+        for byte in &buffer[..bytes_read] {
+            if matches!(*byte, b'\n' | b'\r') {
+                if !pending.is_empty() {
+                    on_line(String::from_utf8_lossy(&pending).to_string());
+                    pending.clear();
+                }
+            } else {
+                pending.push(*byte);
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        on_line(String::from_utf8_lossy(&pending).to_string());
+    }
+}
+
 struct ProgressLine {
     percent: u32,
     speed_text: String,
@@ -3435,9 +3469,14 @@ struct ProgressLine {
 }
 
 fn parse_progress_line(line: &str) -> Option<ProgressLine> {
-    let payload = line
+    let cleaned = strip_ansi_sequences(line);
+    let line = cleaned.trim();
+    let Some(payload) = line
         .strip_prefix("download:progress:")
-        .or_else(|| line.strip_prefix("progress:"))?;
+        .or_else(|| line.strip_prefix("progress:"))
+    else {
+        return parse_standard_ytdlp_progress_line(line);
+    };
     let mut parts = payload.split('|');
     let percent_text = parts.next()?.replace('%', "").trim().to_string();
     let speed_text = parts.next()?.trim().to_string();
@@ -3459,16 +3498,72 @@ fn parse_progress_line(line: &str) -> Option<ProgressLine> {
     })
 }
 
+fn strip_ansi_sequences(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch != '\r' {
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+fn parse_standard_ytdlp_progress_line(line: &str) -> Option<ProgressLine> {
+    if !line.contains("[download]") {
+        return None;
+    }
+
+    let percent_end = line.find('%')?;
+    let percent_start = line[..percent_end]
+        .rfind(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let percent_text = line[percent_start..percent_end].trim();
+    let percent = percent_text.parse::<f32>().ok()?.round() as u32;
+
+    let speed_text = line
+        .split(" at ")
+        .nth(1)
+        .map(|tail| tail.split(" ETA ").next().unwrap_or(tail).trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("-");
+    let eta_text = line
+        .split(" ETA ")
+        .nth(1)
+        .map(|tail| tail.split_whitespace().next().unwrap_or(tail).trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("—");
+
+    Some(ProgressLine {
+        percent: percent.clamp(0, 100),
+        speed_text: speed_text.to_string(),
+        eta_text: eta_text.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         compute_percent, dash_download_worker, direct_download_worker, ffmpeg_available,
         first_existing_path, map_formats, new_task_controller_store, parse_progress_line,
         parse_speed_limit_bytes, persist_download_artifacts, prepare_output_layout,
-        DownloadArtifacts, RawFormat, RawHeaders, TaskController,
+        read_process_output_lines, DownloadArtifacts, RawFormat, RawHeaders, TaskController,
     };
     use crate::{pack_manager, task_store, DownloadContentSelection};
     use std::fs;
+    use std::io::Cursor;
     use std::io::ErrorKind;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -3505,6 +3600,42 @@ mod tests {
         assert_eq!(line.percent, 43);
         assert_eq!(line.speed_text, "3.1MiB/s");
         assert_eq!(line.eta_text, "00:19");
+    }
+
+    #[test]
+    fn parses_standard_ytdlp_progress_lines() {
+        let line =
+            parse_progress_line("[download]  42.5% of   45.00MiB at  3.1MiB/s ETA 00:19").unwrap();
+        assert_eq!(line.percent, 43);
+        assert_eq!(line.speed_text, "3.1MiB/s");
+        assert_eq!(line.eta_text, "00:19");
+    }
+
+    #[test]
+    fn parses_ansi_colored_progress_lines() {
+        let line =
+            parse_progress_line("\u{1b}[0;32mdownload:progress:7.4%|280.5KiB/s|01:12\u{1b}[0m")
+                .unwrap();
+        assert_eq!(line.percent, 7);
+        assert_eq!(line.speed_text, "280.5KiB/s");
+        assert_eq!(line.eta_text, "01:12");
+    }
+
+    #[test]
+    fn splits_process_output_on_carriage_returns() {
+        let mut lines = Vec::<String>::new();
+        read_process_output_lines(
+            Cursor::new(b"download:progress:1.0%|-|--\rdownload:progress:2.0%|1MiB/s|00:10\n"),
+            |line| lines.push(line),
+        );
+
+        assert_eq!(
+            lines,
+            vec![
+                "download:progress:1.0%|-|--".to_string(),
+                "download:progress:2.0%|1MiB/s|00:10".to_string()
+            ]
+        );
     }
 
     #[test]

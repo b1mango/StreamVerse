@@ -33,13 +33,13 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/icon.icns",
-      "icons/icon.ico",
-      "icons/icon.png"
+      "icons/streamverse/icon.icns",
+      "icons/streamverse/icon.ico",
+      "icons/streamverse/source.png"
     ],
     "windows": {
       "nsis": {
-        "installerIcon": "icons/installer-icon.ico"
+        "installerIcon": "icons/streamverse/installer-icon.ico"
       }
     },
     "resources": {
