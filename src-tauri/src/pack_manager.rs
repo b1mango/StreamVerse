@@ -6,8 +6,19 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
+
+fn global_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .http1_only()
+            .build()
+            .expect("failed to build global HTTP client")
+    })
+}
 
 fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
@@ -126,13 +137,19 @@ pub fn install_pack_for_module(
         .unwrap_or_else(|| default_registry_pack(pack.id, pack.binary_name));
     let artifact = resolve_install_artifact(&registry_entry)?;
     let install_dir = installed_pack_dir(pack.id);
+    let expected_sha256 = registry_entry.sha256.as_deref().unwrap_or("");
+    let is_remote = match &registry_entry.source {
+        RegistryPackSource::Url { url } => !url.starts_with("file://"),
+        RegistryPackSource::LocalBuild => false,
+    };
 
     install_artifact(
         &artifact,
         &install_dir,
         pack.id,
         pack.binary_name,
-        registry_entry.sha256.as_deref(),
+        expected_sha256,
+        is_remote,
     )?;
     write_installed_manifest(&registry_entry)?;
     cleanup_artifact(artifact);
@@ -330,10 +347,7 @@ fn load_registry_manifest_from_url(url: &str) -> Result<PackRegistryManifest, St
             .map_err(|error| format!("解析远程注册表失败：{error}"));
     }
 
-    let client = Client::builder()
-        .build()
-        .map_err(|error| format!("初始化注册表客户端失败：{error}"))?;
-    let response = client
+    let response = global_client()
         .get(url)
         .header("User-Agent", "StreamVerse/0.1.0")
         .send()
@@ -374,7 +388,8 @@ fn install_artifact(
     install_dir: &Path,
     pack_id: &str,
     binary_name: &str,
-    expected_sha256: Option<&str>,
+    expected_sha256: &str,
+    is_remote: bool,
 ) -> Result<(), String> {
     let (source_path, kind) = match artifact {
         InstallArtifact::Existing(path, kind) | InstallArtifact::Temporary(path, kind) => {
@@ -382,8 +397,15 @@ fn install_artifact(
         }
     };
 
-    if let Some(expected) = expected_sha256 {
+    // SHA-256 is required for remote downloads; local builds are trusted
+    if is_remote {
+        let expected = expected_sha256.trim();
+        if expected.is_empty() {
+            return Err(format!("pack {pack_id} 缺少 SHA-256 校验和，无法安全安装。"));
+        }
         verify_sha256(source_path, expected)?;
+    } else if !expected_sha256.trim().is_empty() {
+        verify_sha256(source_path, expected_sha256)?;
     }
 
     if install_dir.exists() {
@@ -458,12 +480,18 @@ fn install_shared_pack(pack_id: &str) -> Result<(), String> {
         load_registry_pack(shared.id).unwrap_or_else(|| default_shared_registry_pack(shared.id));
     let artifact = resolve_install_artifact(&registry_entry)?;
     let install_dir = installed_pack_dir(shared.id);
+    let expected_sha256 = registry_entry.sha256.as_deref().unwrap_or("");
+    let is_remote = match &registry_entry.source {
+        RegistryPackSource::Url { url } => !url.starts_with("file://"),
+        RegistryPackSource::LocalBuild => false,
+    };
     install_artifact(
         &artifact,
         &install_dir,
         shared.id,
         &registry_entry.binary_name,
-        registry_entry.sha256.as_deref(),
+        expected_sha256,
+        is_remote,
     )?;
     write_installed_manifest(&registry_entry)?;
     cleanup_artifact(artifact);
@@ -507,10 +535,14 @@ fn make_executable(path: &Path) -> Result<(), String> {
 }
 
 fn extract_zip_bundle(zip_path: &Path, install_dir: &Path) -> Result<(), String> {
+    const MAX_UNCOMPRESSED_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
+
     let file =
         fs::File::open(zip_path).map_err(|error| format!("读取 pack 压缩包失败：{error}"))?;
     let mut archive =
         ZipArchive::new(file).map_err(|error| format!("解析 pack 压缩包失败：{error}"))?;
+
+    let mut total_uncompressed: u64 = 0;
 
     for index in 0..archive.len() {
         let mut entry = archive
@@ -525,6 +557,14 @@ fn extract_zip_bundle(zip_path: &Path, install_dir: &Path) -> Result<(), String>
             fs::create_dir_all(&destination)
                 .map_err(|error| format!("创建 pack 目录失败：{error}"))?;
             continue;
+        }
+
+        total_uncompressed += entry.size();
+        if total_uncompressed > MAX_UNCOMPRESSED_BYTES {
+            return Err(format!(
+                "pack 解压后大小超过 {} MB 上限，拒绝解压。",
+                MAX_UNCOMPRESSED_BYTES / (1024 * 1024)
+            ));
         }
 
         if let Some(parent) = destination.parent() {
@@ -689,11 +729,7 @@ fn download_install_artifact(url: &str, binary_name: &str) -> Result<InstallArti
         }
     }
 
-    let client = Client::builder()
-        .http1_only()
-        .build()
-        .map_err(|error| format!("初始化下载客户端失败：{error}"))?;
-    let response = client
+    let response = global_client()
         .get(url)
         .header("User-Agent", "StreamVerse/0.1.0")
         .header(ACCEPT_ENCODING, "identity")

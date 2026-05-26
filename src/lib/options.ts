@@ -12,7 +12,7 @@ export const browserOptions = [
   { value: "chrome", label: "Chrome" },
   { value: "edge", label: "Edge" },
   { value: "firefox", label: "Firefox" },
-  { value: "safari", label: "Safari" }
+  // Safari removed — unreliable cookie extraction
 ];
 
 export const qualityOptions: Array<{ value: QualityPreference; label: string }> = [

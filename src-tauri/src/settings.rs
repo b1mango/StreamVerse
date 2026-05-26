@@ -197,7 +197,7 @@ pub fn normalize_cookie_browser(input: Option<String>) -> Result<Option<String>,
 
     match normalized.as_deref() {
         None => Ok(None),
-        Some("chrome" | "edge" | "firefox" | "safari") => Ok(normalized),
+        Some("chrome" | "edge" | "firefox") => Ok(normalized),
         Some(other) => Err(format!("不支持的浏览器来源：{other}")),
     }
 }
@@ -230,7 +230,7 @@ pub fn normalize_cookie_text(input: Option<String>) -> Option<String> {
 }
 
 pub fn import_cookie_text(platform: &str, input: &str) -> Result<String, String> {
-    let content = normalize_imported_cookie_content(input)?;
+    let content = normalize_imported_cookie_content(input, platform)?;
     let path = managed_cookie_file_path(platform);
 
     if let Some(parent) = path.parent() {
@@ -530,7 +530,7 @@ fn human_browser_name(value: &str) -> &'static str {
     match value {
         "chrome" => "Chrome",
         "edge" => "Edge",
-        "safari" => "Safari",
+        _ => "Custom",
         _ => "Custom",
     }
 }
@@ -564,7 +564,7 @@ fn chrome_cookie_db_exists() -> bool {
         .exists()
 }
 
-fn normalize_imported_cookie_content(input: &str) -> Result<String, String> {
+fn normalize_imported_cookie_content(input: &str, platform: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("Cookie 内容不能为空。".to_string());
@@ -574,7 +574,7 @@ fn normalize_imported_cookie_content(input: &str) -> Result<String, String> {
         return normalize_netscape_cookie_text(trimmed);
     }
 
-    normalize_cookie_header_text(trimmed)
+    normalize_cookie_header_text(trimmed, platform)
 }
 
 fn looks_like_netscape_cookie_text(input: &str) -> bool {
@@ -622,7 +622,7 @@ fn normalize_netscape_cookie_text(input: &str) -> Result<String, String> {
     Ok(lines.join("\n") + "\n")
 }
 
-fn normalize_cookie_header_text(input: &str) -> Result<String, String> {
+fn normalize_cookie_header_text(input: &str, platform: &str) -> Result<String, String> {
     let raw = input
         .strip_prefix("Cookie:")
         .or_else(|| input.strip_prefix("cookie:"))
@@ -649,15 +649,14 @@ fn normalize_cookie_header_text(input: &str) -> Result<String, String> {
         return Err("未识别到可用的 Cookie 键值，请粘贴浏览器请求头里的完整 Cookie 值。".to_string());
     }
 
+    let domains: &[&str] = match platform {
+        "douyin" => &[".douyin.com", ".iesdouyin.com"],
+        "bilibili" => &[".bilibili.com", ".b23.tv"],
+        "youtube" => &[".youtube.com", ".google.com"],
+        _ => &[".douyin.com", ".iesdouyin.com", ".bilibili.com", ".b23.tv", ".youtube.com", ".google.com"],
+    };
+
     let mut lines = vec!["# Netscape HTTP Cookie File".to_string()];
-    let domains = [
-        ".douyin.com",
-        ".iesdouyin.com",
-        ".bilibili.com",
-        ".b23.tv",
-        ".youtube.com",
-        ".google.com",
-    ];
     for domain in domains {
         for (name, value) in &pairs {
             lines.push(format!("{domain}\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}"));
@@ -706,12 +705,6 @@ pub fn detect_installed_browsers() -> Vec<String> {
         .join("Library/Application Support/Google/Chrome/Default/Cookies");
     if chrome_cookies.exists() {
         found.push("chrome".to_string());
-    }
-
-    // Safari (macOS native)
-    let safari_cookies = Path::new(&home).join("Library/Cookies/Cookies.binarycookies");
-    if safari_cookies.exists() {
-        found.push("safari".to_string());
     }
 
     // Edge
@@ -779,10 +772,7 @@ mod tests {
             normalize_cookie_browser(Some("edge".to_string())).unwrap(),
             Some("edge".to_string())
         );
-        assert_eq!(
-            normalize_cookie_browser(Some("safari".to_string())).unwrap(),
-            Some("safari".to_string())
-        );
+        assert!(normalize_cookie_browser(Some("safari".to_string())).is_err());
         assert!(normalize_cookie_browser(Some("opera".to_string())).is_err());
     }
 

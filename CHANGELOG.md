@@ -2,12 +2,16 @@
 
 All notable changes to `StreamVerse` will be documented in this file.
 
-## [0.1.5] — 2026-04-24
+## [0.1.5] — 2026-05-26
 
 ### 新增
 - **YouTube 封面回退**：预览支持封面回退显示，减少代理链路差异导致的封面缺失。
 - **长简介悬停查看**：简介默认截断，悬停可查看完整内容，标题保持完整显示。
 - **MIT License 与英文 README**：补充正式开源协议，并新增英文项目介绍。
+- **毛玻璃圆形进度环**：抖音 / B 站主页批量解析时，显示居中毛玻璃环形进度指示器，固定尺寸不跳变，替代页面底部内联进度条。
+- **封面图本地缓存**：缩略图以 SHA-256 URL 哈希缓存至 `~/.streamverse/thumbnails/`，重复解析同一视频不再重复下载封面。
+- **SHA-256 强制校验**：远程下载的 pack 必须提供 SHA-256 校验和（`file://` 本地源除外），缺少则拒绝安装，防止供应链篡改。
+- **ZIP 炸弹防护**：pack 解压增加 500MB 上限，超限拒绝解压并报错。
 
 ### 修复
 - **Windows 标题栏按钮重复**：恢复 Windows 原生窗口控制样式，避免右上角按钮显示两组。
@@ -15,11 +19,28 @@ All notable changes to `StreamVerse` will be documented in this file.
 - **YouTube 缩略图代理**：缩略图请求读取代理设置，修复封面缺失。
 - **解析与下载稳定性**：修复限速回填、抖音超时重试与 YouTube 格式解析问题。
 - **安装包图标未刷新**：重新生成应用与 NSIS 安装包图标，确保安装包嵌入新版图标。
+- **Cookie 域名泄露**：粘贴 Cookie Header 文本时，仅写入当前平台对应域名（抖音 → `.douyin.com` / `.iesdouyin.com`；B 站 → `.bilibili.com` / `.b23.tv`；YouTube → `.youtube.com` / `.google.com`），不再全量写入所有平台。
+- **批量下载瞬间并发**：主页批量入队每个任务间隔 800ms，避免同时发起大量请求触发平台反爬。
+- **下载完成提示路径过长**：消息从完整文件路径（含视频标题子目录）改为仅显示用户设置的保存根目录。
+- **重复标签删除**：移除各处冗余 section-label（`single.preview`、`Profile Batch`、`batch.items`、`Profile Result`）及任务面板重复的「最近任务」标题。
 
 ### 变更
-- 版本升级到 `0.1.5`。
-- 重新生成 Windows 安装包与主程序构建产物。
+- **UI 色彩体系重构**：保留原始 StreamVerse 青绿色 `#30ccb0`；平台卡片悬停色统一，不再按抖音 / B 站 / YouTube 区分三色。
+- **圆角收紧**：全局圆角从 `24px / 18px / 14px` 改为 `8px / 6px / 4px`。
+- **字体切换**：Apple 系统字体栈（SF Pro / Segoe UI Variable）→ `Inter, system-ui`，消除 AI 生成模板感。
+- **背景与卡片**：body 去径向渐变改为纯深色 `#0d1117`；卡片从半透明 `rgba(..., 0.88)` 改为不透明 `#161b22`。
+- **加载动画**：脉冲点 `pulse-card` → 简洁旋转 CSS spinner。
+- **分析进度弹窗**：全屏模态弹窗 + SVG 打勾动画 → 居中毛玻璃圆环，精简 ~180 行 CSS。
+- **平滑滚动加速**：自定义 easeInOutQuart 动画从 720ms 缩短至 300ms。
+- **移除 Safari 浏览器支持**：`rookie` 不支持 Safari 且 yt-dlp 回退需 Full Disk Access 权限，体验不可靠，全面移除。
+- **yt-dlp 路径缓存**：首次解析后通过 `OnceLock` 缓存，后续下载不再重复探测候选路径和 `--version` 检查。
+- **任务进度事件节流**：`tasks-changed` 事件增加 300ms 全局节流，减少前端高频渲染。
+- **前端轮询降频**：任务列表 fallback 轮询从 2s 延长至 10s（事件驱动已覆盖正常路径）。
+- **全局 HTTP 客户端复用**：pack 下载与注册表拉取共用 `OnceLock<Client>` 连接池，避免每次新建 TCP/TLS 连接。
+- 重新生成 macOS 安装包与主程序构建产物。
 - README 改为更标准的开源项目介绍结构，并补充 Python 迁移方向说明。
+- Edge on Windows 与 Chrome 同步加入 Cookie 加密拦截提示。
+- 下载完成提示改为只显示保存根目录，不再带视频标题子目录。
 
 ---
 

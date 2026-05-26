@@ -26,7 +26,6 @@
 <article class="panel tasks-panel">
   <div class="section-head">
     <div>
-      <p class="eyebrow">Recent Tasks</p>
       <h3>{$t("task.recentTasks")}</h3>
     </div>
 

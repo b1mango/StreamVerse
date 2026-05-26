@@ -43,6 +43,7 @@ static DOWNLOAD_SEMAPHORE: OnceLock<Arc<(Mutex<u32>, std::sync::Condvar)>> = Onc
 static MAX_CONCURRENT: OnceLock<AtomicU64> = OnceLock::new();
 static NETWORK_PROXY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static NETWORK_SPEED_LIMIT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static CACHED_YTDLP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 #[derive(Clone)]
 struct DownloadArtifacts {
@@ -67,6 +68,7 @@ struct ArtifactSummary {
     cover_written: bool,
     output_path: Option<String>,
     destination_path: String,
+    base_dir: String,
     warnings: Vec<String>,
 }
 
@@ -843,6 +845,7 @@ pub fn download_video(
                 .unwrap_or_else(|| ArtifactSummary {
                     output_path: Some(output_layout.destination_path()),
                     destination_path: output_layout.destination_path(),
+                    base_dir: output_layout.base_dir.to_string_lossy().to_string(),
                     warnings: vec![
                         "已下载视频，但未能确认最终文件路径，未生成封面和文案文件。".to_string()
                     ],
@@ -1947,19 +1950,20 @@ fn ytdlp_binary_name() -> &'static str {
 }
 
 fn resolve_ytdlp_path() -> Result<PathBuf, String> {
-    if let Some(path) = preferred_external_ytdlp_path() {
-        return Ok(path);
+    if let Some(cached) = CACHED_YTDLP_PATH.get() {
+        return cached.clone().ok_or_else(|| "yt-dlp 不可用".to_string());
     }
 
-    if let Some(path) = pack_manager::ensure_download_engine_installed()? {
-        return Ok(path);
-    }
+    let resolved = if let Some(path) = preferred_external_ytdlp_path() {
+        Some(path)
+    } else if let Ok(Some(path)) = pack_manager::ensure_download_engine_installed() {
+        Some(path)
+    } else {
+        find_in_path(ytdlp_binary_name())
+    };
 
-    if let Some(path) = find_in_path(ytdlp_binary_name()) {
-        return Ok(path);
-    }
-
-    Err("未检测到可用的 yt-dlp，请重新安装应用后再试。".to_string())
+    let _ = CACHED_YTDLP_PATH.set(resolved.clone());
+    resolved.ok_or_else(|| "未检测到可用的 yt-dlp，请重新安装应用后再试。".to_string())
 }
 
 fn preferred_external_ytdlp_path() -> Option<PathBuf> {
@@ -2085,6 +2089,7 @@ fn persist_download_artifacts(
             video_path.map(|path| path.to_string_lossy().to_string())
         },
         destination_path: output_layout.destination_path(),
+        base_dir: output_layout.base_dir.to_string_lossy().to_string(),
         warnings: Vec::new(),
         ..ArtifactSummary::default()
     };
@@ -2269,7 +2274,7 @@ fn download_cover_image_to_path(
     Ok(cover_path)
 }
 
-fn build_completion_message(output_dir_text: &str, summary: &ArtifactSummary) -> String {
+fn build_completion_message(_output_dir_text: &str, summary: &ArtifactSummary) -> String {
     let mut items = Vec::new();
     if summary.video_written {
         items.push("视频".to_string());
@@ -2293,7 +2298,8 @@ fn build_completion_message(output_dir_text: &str, summary: &ArtifactSummary) ->
         items.join("、")
     };
 
-    let mut message = format!("下载完成，{}已保存到 {output_dir_text}。", label);
+    let dir = if summary.base_dir.is_empty() { _output_dir_text } else { &summary.base_dir };
+    let mut message = format!("下载完成，{}已保存到 {dir}。", label);
     if !summary.warnings.is_empty() {
         message.push(' ');
         message.push_str(&summary.warnings.join("；"));
@@ -2713,7 +2719,7 @@ fn extract_cookies_via_rookie(browser: &str, platform: &str) -> Result<String, S
         "chrome" => rookie::chrome(Some(domains)),
         "edge" => rookie::edge(Some(domains)),
         "firefox" => rookie::firefox(Some(domains)),
-        "safari" => return Err("rookie 不支持 Safari，跳转 yt-dlp".into()),
+        "safari" => return Err("Safari 浏览器已不再支持，请使用 Chrome、Edge 或 Firefox。".into()),
         _ => return Err(format!("rookie 不支持的浏览器：{browser}")),
     }
     .map_err(|e| format!("从 {} 读取 Cookie 失败：{e}", browser.to_uppercase()))?;
@@ -3420,7 +3426,7 @@ fn readable_error(stderr: &[u8], fallback: &str) -> String {
     let trimmed = message.trim();
 
     if trimmed.contains("Fresh cookies") {
-        return "当前抖音链接需要新鲜浏览器 Cookie。请在应用顶部选择 Chrome、Safari 等浏览器来源后重新解析。".to_string();
+        return "当前抖音链接需要新鲜浏览器 Cookie。请在应用顶部选择 Chrome、Edge、Firefox 等浏览器来源后重新解析。".to_string();
     }
 
     if trimmed.is_empty() {

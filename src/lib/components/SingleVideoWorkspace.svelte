@@ -83,7 +83,6 @@
 <section class="page-shell">
   <article class="panel page-hero">
     <div class="composer-copy">
-      <p class="eyebrow">{heroEyebrow}</p>
       <h2>{heading}</h2>
       {#if description}
         <p class="lede">{description}</p>
@@ -97,7 +96,6 @@
     <div class="selection-block">
       <div class="section-head compact">
         <div>
-          <p class="eyebrow">Download Items</p>
           <h3>{$t("single.downloadContent")}</h3>
         </div>
         <span class="chip subtle">
@@ -152,7 +150,6 @@
       <div class="analysis-progress-card">
         <div class="section-head compact">
           <div>
-            <p class="eyebrow">Analyze Progress</p>
             <h3>{$t("single.analyzeProgress")}</h3>
           </div>
           <span class="chip subtle">
@@ -185,7 +182,6 @@
   {#if preview}
     <section class="analysis-grid">
       <article class="panel preview-panel">
-        <p class="eyebrow">Preview</p>
         {#if displayCoverUrl}
           <img
             src={displayCoverUrl}
@@ -222,7 +218,7 @@
       <article class="panel formats-panel">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Formats</p>
+            <p class="section-label">{$t("single.selectQuality")}</p>
             <h3>{$t("single.selectQuality")}</h3>
           </div>
           <span class="chip subtle">{formatList.length} {$t("single.formatsCount")}</span>

@@ -33,7 +33,6 @@
 
 <section class="platform-home panel">
   <div class="hero-copy">
-    <p class="eyebrow">Built-in Platforms</p>
     <h2>{$t("home.title")}</h2>
   </div>
 
@@ -44,9 +43,11 @@
       <article class={`platform-card ${meta.accent} ${state.installed ? "" : "is-disabled"}`}>
         <div class="platform-card-head">
           <span class="chip subtle">{meta.badge}</span>
-          <span class={`chip ${state.installed ? "accent" : "subtle"}`}>
-            {state.installed ? $t("home.installed") : $t("home.notInstalled")}
-          </span>
+          {#if state.installed}
+            <span class="status-dot active"></span>
+          {:else}
+            <span class="chip subtle">{$t("home.notInstalled")}</span>
+          {/if}
         </div>
 
         <div class="platform-card-copy">
@@ -54,16 +55,11 @@
           <p>{$t("module." + moduleId + ".description")}</p>
         </div>
 
-        <div class="module-tags">
-          {#each meta.dependencyHints as item}
-            <span class="mini-tag">{item}</span>
-          {/each}
-          {#if state.currentVersion}
+        {#if state.currentVersion}
+          <div class="module-tags">
             <span class="mini-tag">{$t("home.version")} {state.currentVersion}</span>
-          {:else if state.latestVersion}
-            <span class="mini-tag">{$t("home.version")} {state.latestVersion}</span>
-          {/if}
-        </div>
+          </div>
+        {/if}
 
         <div class="module-actions">
           <button

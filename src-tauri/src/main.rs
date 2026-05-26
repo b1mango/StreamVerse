@@ -19,6 +19,7 @@ pub(crate) use media_contract::{
 };
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -594,8 +595,13 @@ fn create_profile_download_tasks(
             .as_deref()
             .or(default_cookie_file.as_deref());
         let has_auth = cookie_browser.is_some() || batch_cookie_file.is_some();
+        let mut first_item = true;
 
         for item in items {
+            if !first_item {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+            }
+            first_item = false;
             let fallback_format = if download_options.download_video {
                 fallback_profile_format(&item.asset, item.selected_format_id.as_deref())
             } else {
@@ -1282,6 +1288,19 @@ fn build_platform_auth_profiles(
 
 #[tauri::command]
 async fn fetch_thumbnail(url: String) -> Result<String, String> {
+    // Check local thumbnail cache first
+    let cache_dir = PathBuf::from(settings::home_dir())
+        .join(".streamverse")
+        .join("thumbnails");
+    let url_hash = format!("{:x}", Sha256::digest(url.as_bytes()));
+    let cache_path = cache_dir.join(&url_hash);
+
+    if let Ok(cached) = fs::read_to_string(&cache_path) {
+        if cached.starts_with("data:") {
+            return Ok(cached);
+        }
+    }
+
     let mut client_builder = reqwest::Client::builder();
     if let Some(proxy_url) = settings::load_settings()
         .proxy_url
@@ -1345,6 +1364,10 @@ async fn fetch_thumbnail(url: String) -> Result<String, String> {
         }
     }
     encoded.push_str(&String::from_utf8_lossy(&buf));
+
+    // Save to local cache
+    let _ = fs::create_dir_all(&cache_dir);
+    let _ = fs::write(&cache_path, &encoded);
 
     Ok(encoded)
 }

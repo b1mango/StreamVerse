@@ -1,0 +1,66 @@
+/* ─── StreamVerse Design Tokens ─── */
+:root {
+  color-scheme: dark;
+  font-family: "Inter", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei",
+    "Noto Sans SC", sans-serif;
+
+  /* Surface */
+  --bg: #0d1117;
+  --surface: #161b22;
+  --stroke: rgba(255, 255, 255, 0.08);
+
+  /* Text */
+  --text: #e6edf3;
+  --muted: rgba(230, 237, 243, 0.65);
+
+  /* Accent — original StreamVerse teal */
+  --accent: #30ccb0;
+  --accent-soft: rgba(48, 204, 176, 0.14);
+  --accent-emphasis: #67eed0;
+
+  /* Platform accents */
+  --douyin: #fe2c55;
+  --douyin-soft: rgba(254, 44, 85, 0.12);
+  --bilibili: #fb7299;
+  --bilibili-soft: rgba(251, 114, 153, 0.12);
+  --youtube: #ff0000;
+  --youtube-soft: rgba(255, 0, 0, 0.10);
+
+  /* Success / Error */
+  --success: #3fb950;
+  --success-soft: rgba(63, 185, 80, 0.12);
+  --error: #f85149;
+  --error-soft: rgba(248, 81, 73, 0.12);
+
+  /* Shadows */
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.24), 0 4px 12px rgba(0, 0, 0, 0.16);
+
+  /* Radius */
+  --radius-lg: 8px;
+  --radius-md: 6px;
+  --radius-sm: 4px;
+}
+
+/* ─── Light Theme Tokens ─── */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #f6f8fa;
+  --stroke: rgba(0, 0, 0, 0.08);
+  --text: #1f2328;
+  --muted: rgba(31, 35, 40, 0.55);
+  --accent: #0d9b7a;
+  --accent-soft: rgba(13, 155, 122, 0.10);
+  --accent-emphasis: #0aad84;
+  --douyin: #cf1d42;
+  --douyin-soft: rgba(207, 29, 66, 0.08);
+  --bilibili: #d44c6e;
+  --bilibili-soft: rgba(212, 76, 110, 0.08);
+  --youtube: #cc0000;
+  --youtube-soft: rgba(204, 0, 0, 0.08);
+  --success: #1a7f37;
+  --success-soft: rgba(26, 127, 55, 0.10);
+  --error: #cf222e;
+  --error-soft: rgba(207, 34, 46, 0.10);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.06);
+}

@@ -386,7 +386,6 @@
 <section class="page-shell">
   <article class="panel page-hero">
     <div class="composer-copy">
-      <p class="eyebrow">{heroEyebrow}</p>
       <h2>{heading}</h2>
       {#if description}
         <p class="lede">{description}</p>
@@ -400,7 +399,6 @@
     <div class="selection-block">
       <div class="section-head compact">
         <div>
-          <p class="eyebrow">Batch Items</p>
           <h3>{$t("batch.downloadContent")}</h3>
         </div>
         <span class="chip subtle">
@@ -466,7 +464,6 @@
     <article class="panel profile-panel">
       <div class="section-head">
         <div>
-          <p class="eyebrow">{resultEyebrow}</p>
           <h3>{preview.profileTitle}</h3>
         </div>
 

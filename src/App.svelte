@@ -87,7 +87,10 @@
   let analysisModalOpen = false;
   let analysisModalProgress: AnalysisProgress | null = null;
   let analysisModalLabel = "";
-  let analysisModalDone = false;
+  $: analysisRingPercent = analysisModalProgress
+    ? Math.min(100, Math.round((analysisModalProgress.current / Math.max(analysisModalProgress.total, 1)) * 100))
+    : 0;
+  $: analysisRingOffset = (2 * Math.PI * 42) * (1 - analysisRingPercent / 100);
 
   let douyinSingleInput = "";
   let douyinSinglePreview: VideoAsset | null = null;
@@ -250,7 +253,7 @@
     if (_scrollRafId) cancelAnimationFrame(_scrollRafId);
 
     // Longer duration for larger distances, with a nice curve feel
-    const duration = Math.min(720, Math.max(260, Math.abs(distance) * 0.35 + 200));
+    const duration = Math.min(300, Math.max(150, Math.abs(distance) * 0.2 + 100));
     const startTime = performance.now();
 
     // ease-in-out quart: accelerates then decelerates smoothly
@@ -423,7 +426,7 @@
         } finally {
           pollingTasks = false;
         }
-      }, 2000);
+      }, 10000);
     }
 
     loading = false;
@@ -562,7 +565,7 @@
             if (modalLabel) analysisModalProgress = normalized;
           }
         } catch {}
-      }, 180);
+      }, 300);
     }
 
     let result: T;
@@ -576,7 +579,6 @@
       if (modalLabel) {
         analysisModalOpen = false;
         analysisModalProgress = null;
-        analysisModalDone = false;
       }
       throw error;
     }
@@ -590,32 +592,21 @@
         if (finalProgress) {
           const normalized = normalizeAnalysisProgress(finalProgress);
           setProgress(normalized);
-          if (modalLabel) {
-            analysisModalProgress = normalized;
-            analysisModalDone = true;
-          }
+          if (modalLabel) analysisModalProgress = normalized;
         }
       } catch {}
     }
 
     if (onResult) {
       try {
-        await new Promise((r) => setTimeout(r, 200));
         await onResult(result);
-        await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60)));
       } catch (resultError) {
-        // Ensure modal is closed when onResult throws
         if (modalLabel) {
           analysisModalOpen = false;
           analysisModalProgress = null;
-          analysisModalDone = false;
         }
         throw resultError;
       }
-    }
-
-    if (modalLabel && analysisModalDone) {
-      await new Promise((r) => setTimeout(r, 800));
     }
 
     if (isDesktopRuntime) {
@@ -624,7 +615,6 @@
     if (modalLabel) {
       analysisModalOpen = false;
       analysisModalProgress = null;
-      analysisModalDone = false;
     }
 
     return result;
@@ -1671,39 +1661,20 @@
       </button>
     </div>
 
-    {#if analysisModalOpen}
-      <div class="analysis-modal-overlay">
-        <div class="analysis-modal" class:done={analysisModalDone}>
-          {#if analysisModalDone}
-            <div class="analysis-done-icon">
-              <svg viewBox="0 0 52 52" class="checkmark-svg">
-                <circle class="checkmark-circle" cx="26" cy="26" r="23" fill="none"/>
-                <path class="checkmark-path" fill="none" d="M15 27l7 7 15-15"/>
-              </svg>
-            </div>
-            <p class="analysis-modal-label done-label">解析完成</p>
-            <p class="analysis-modal-message">正在整理数据…</p>
-          {:else if analysisModalProgress}
-            {@const percent = Math.max(0, Math.min(100, Math.round((analysisModalProgress.current / Math.max(analysisModalProgress.total, 1)) * 100)))}
-            <p class="analysis-modal-label">{analysisModalLabel}</p>
-            <div class="analysis-modal-stats">
-              <span class="analysis-modal-counter">{analysisModalProgress.total > 0 ? `${analysisModalProgress.current} / ${analysisModalProgress.total}` : `已解析 ${analysisModalProgress.current}，统计总数中`}</span>
-              <span class="analysis-modal-percent">{percent}%</span>
-            </div>
-            <div class="task-progress analysis-modal-bar">
-              <div
-                class="task-progress-fill"
-                class:indeterminate={percent < 3}
-                style="width: {Math.max(3, percent)}%"
-              ></div>
-            </div>
-            <p class="analysis-modal-message">{analysisModalProgress.message}</p>
-          {:else}
-            <p class="analysis-modal-label">{analysisModalLabel}</p>
-            <div class="task-progress analysis-modal-bar">
-              <div class="task-progress-fill indeterminate" style="width: 100%"></div>
-            </div>
-          {/if}
+    {#if analysisModalOpen && analysisModalProgress}
+      <div class="analysis-overlay">
+        <div class="analysis-ring">
+          <svg class="ring-svg" viewBox="0 0 96 96">
+            <circle class="ring-track" cx="48" cy="48" r="42" />
+            <circle
+              class="ring-fill"
+              cx="48" cy="48" r="42"
+              stroke-dasharray={2 * Math.PI * 42}
+              stroke-dashoffset={analysisRingOffset}
+            />
+          </svg>
+          <span class="ring-percent">{analysisRingPercent}%</span>
+          <span class="ring-message">{analysisModalProgress.message || analysisModalLabel}</span>
         </div>
       </div>
     {/if}

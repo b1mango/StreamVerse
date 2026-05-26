@@ -1,13 +1,15 @@
 use crate::{DownloadTask, TaskReplayRequest};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 const MAX_TASK_HISTORY: usize = 200;
+const PROGRESS_THROTTLE_MS: u64 = 300;
 
 pub type TaskStore = Arc<TaskStoreInner>;
 
@@ -15,6 +17,7 @@ pub struct TaskStoreInner {
     pub entries: Mutex<Vec<StoredTaskEntry>>,
     dirty: AtomicBool,
     app_handle: Mutex<Option<tauri::AppHandle>>,
+    last_emit: Mutex<HashMap<String, Instant>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -35,6 +38,7 @@ pub fn load_task_store() -> TaskStore {
         entries: Mutex::new(load_entries()),
         dirty: AtomicBool::new(false),
         app_handle: Mutex::new(None),
+        last_emit: Mutex::new(HashMap::new()),
     });
 
     let flusher = Arc::clone(&store);
@@ -55,6 +59,7 @@ pub fn new_empty_task_store() -> TaskStore {
         entries: Mutex::new(Vec::new()),
         dirty: AtomicBool::new(false),
         app_handle: Mutex::new(None),
+        last_emit: Mutex::new(HashMap::new()),
     })
 }
 
@@ -215,7 +220,17 @@ fn tasks_path() -> PathBuf {
 }
 
 fn emit_tasks_changed(store: &TaskStore) {
-    if let Some(handle) = store.app_handle.lock().unwrap().as_ref() {
-        let _ = handle.emit("tasks-changed", ());
+    let now = Instant::now();
+    let mut last_map = store.last_emit.lock().unwrap();
+    let should_emit = last_map
+        .get("__global__")
+        .map_or(true, |last| now.duration_since(*last).as_millis() as u64 >= PROGRESS_THROTTLE_MS);
+
+    if should_emit {
+        last_map.insert("__global__".to_string(), now);
+        drop(last_map);
+        if let Some(handle) = store.app_handle.lock().unwrap().as_ref() {
+            let _ = handle.emit("tasks-changed", ());
+        }
     }
 }

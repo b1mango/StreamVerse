@@ -138,7 +138,7 @@
   <aside class="panel settings-panel">
     <div class="section-head">
       <div>
-        <p class="eyebrow">Settings</p>
+        <p class="section-label">{$t('settings.title')}</p>
         <h3>{$t('settings.title')}</h3>
       </div>
       <button class="ghost-button" onclick={() => dispatch("close")}>{$t('settings.close')}</button>
