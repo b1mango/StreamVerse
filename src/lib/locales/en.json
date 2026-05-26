@@ -165,5 +165,10 @@
   "bilibili.enqueueLabel": "Download selected videos",
   "bilibili.enqueuingLabel": "Downloading…",
   "youtube.heading": "YouTube Single Video",
-  "youtube.placeholder": "Paste YouTube video link, share text, or youtu.be short link"
+  "youtube.placeholder": "Paste YouTube video link, share text, or youtu.be short link",
+  "history.title": "Download History",
+  "history.searchPlaceholder": "Search titles…",
+  "history.allPlatforms": "All Platforms",
+  "history.entries": "entries",
+  "history.empty": "No download history yet"
 }

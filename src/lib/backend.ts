@@ -405,6 +405,30 @@ export async function checkDownloadHistory(
   return maybeInvoke<string[]>("check_download_history", { platform, assetIds });
 }
 
+import type { DownloadHistoryEntry } from "./types";
+
+export async function listDownloadHistory(
+  limit?: number,
+  platform?: string
+): Promise<DownloadHistoryEntry[]> {
+  if (!hasTauriRuntime()) {
+    return [];
+  }
+
+  return maybeInvoke<DownloadHistoryEntry[]>("list_download_history", { limit, platform });
+}
+
+export async function searchDownloadHistory(
+  query: string,
+  limit?: number
+): Promise<DownloadHistoryEntry[]> {
+  if (!hasTauriRuntime()) {
+    return [];
+  }
+
+  return maybeInvoke<DownloadHistoryEntry[]>("search_download_history", { query, limit });
+}
+
 export async function getDownloadHistoryCount(): Promise<number> {
   if (!hasTauriRuntime()) {
     return 0;

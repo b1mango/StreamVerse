@@ -266,3 +266,10 @@ export interface BatchDownloadResult {
   skippedCount: number;
   message: string;
 }
+
+export interface DownloadHistoryEntry {
+  assetId: string;
+  platform: string;
+  title: string;
+  downloadedAt: string;
+}

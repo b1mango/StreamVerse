@@ -81,6 +81,44 @@ impl DownloadHistory {
     pub fn total_count(&self) -> usize {
         self.entries.len()
     }
+
+    pub fn list_recent(&self, limit: usize, platform: Option<&str>) -> Vec<DownloadHistoryEntry> {
+        self.entries
+            .iter()
+            .filter(|e| platform.map_or(true, |p| e.platform == p))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Vec<DownloadHistoryEntry> {
+        let q = query.to_lowercase();
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.title.to_lowercase().contains(&q)
+                    || e.platform.to_lowercase().contains(&q)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+}
+
+pub fn list_history(limit: usize, platform: Option<String>) -> Vec<DownloadHistoryEntry> {
+    GLOBAL_HISTORY
+        .get()
+        .and_then(|store| store.lock().ok())
+        .map(|guard| guard.list_recent(limit, platform.as_deref()))
+        .unwrap_or_default()
+}
+
+pub fn search_history(query: String, limit: usize) -> Vec<DownloadHistoryEntry> {
+    GLOBAL_HISTORY
+        .get()
+        .and_then(|store| store.lock().ok())
+        .map(|guard| guard.search(&query, limit))
+        .unwrap_or_default()
 }
 
 pub fn load_history_store() -> DownloadHistoryStore {

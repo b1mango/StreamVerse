@@ -25,6 +25,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Runtime};
 
+pub mod artifact;
+pub mod controller;
+
 fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]

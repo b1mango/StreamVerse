@@ -1156,6 +1156,23 @@ fn check_download_history(
 }
 
 #[tauri::command]
+fn list_download_history(
+    limit: Option<usize>,
+    platform: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Vec<download_history::DownloadHistoryEntry> {
+    download_history::list_history(limit.unwrap_or(100), platform)
+}
+
+#[tauri::command]
+fn search_download_history(
+    query: String,
+    limit: Option<usize>,
+) -> Vec<download_history::DownloadHistoryEntry> {
+    download_history::search_history(query, limit.unwrap_or(50))
+}
+
+#[tauri::command]
 fn get_download_history_count(state: tauri::State<'_, AppState>) -> usize {
     state.history.lock().unwrap().total_count()
 }
@@ -1449,6 +1466,8 @@ fn main() {
             install_download_engine,
             clear_finished_tasks,
             remove_download_task,
+            list_download_history,
+            search_download_history,
             check_download_history,
             get_download_history_count,
             fetch_thumbnail

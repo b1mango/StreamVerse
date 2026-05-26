@@ -165,5 +165,10 @@
   "bilibili.enqueueLabel": "下载所选视频",
   "bilibili.enqueuingLabel": "下载中…",
   "youtube.heading": "YouTube 单视频下载",
-  "youtube.placeholder": "粘贴 YouTube 视频链接、分享文案或 youtu.be 短链"
+  "youtube.placeholder": "粘贴 YouTube 视频链接、分享文案或 youtu.be 短链",
+  "history.title": "下载历史",
+  "history.searchPlaceholder": "搜索标题…",
+  "history.allPlatforms": "全部平台",
+  "history.entries": "条记录",
+  "history.empty": "暂无下载记录"
 }

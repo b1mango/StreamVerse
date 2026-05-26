@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import PlatformHome from "./lib/components/PlatformHome.svelte";
   import ProfileBatchWorkspace from "./lib/components/ProfileBatchWorkspace.svelte";
+  import HistoryPanel from "./lib/components/HistoryPanel.svelte";
   import SettingsPanel from "./lib/components/SettingsPanel.svelte";
   import SharedDirectoryBar from "./lib/components/SharedDirectoryBar.svelte";
   import SingleVideoWorkspace from "./lib/components/SingleVideoWorkspace.svelte";
@@ -68,6 +69,7 @@
   } from "./lib/types";
 
   let loading = true;
+  let historyOpen = false;
   let settingsOpen = false;
   let settingsSaving = false;
   let pickingDirectory = false;
@@ -1370,7 +1372,7 @@
     <section class="workspace">
       <header class="topbar">
         <div class="brand">
-          <p class="eyebrow">StreamVerse</p>
+          <p class="section-label">StreamVerse</p>
           <h1>{activeModuleTitle()}</h1>
           <p class="status-copy">
             {$t("auth." + bootstrap.authState)}
@@ -1381,6 +1383,7 @@
           {#if activeModule}
             <button class="ghost-button" onclick={backToPlatformHome}>{$t("app.backToHome")}</button>
           {/if}
+          <button class="ghost-button" onclick={() => (historyOpen = true)}>历史</button>
           <button class="ghost-button" onclick={handleOpenSettings}>{$t("app.settings")}</button>
         </div>
       </header>
@@ -1648,6 +1651,11 @@
         on:detectCookie={(event) => handleDetectCookie(event.detail.platform)}
         on:pickDirectory={handlePickSaveDirectory}
         on:save={handleSaveSettings}
+      />
+
+      <HistoryPanel
+        open={historyOpen}
+        on:close={() => (historyOpen = false)}
       />
     </section>
 
