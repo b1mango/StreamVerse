@@ -48,7 +48,7 @@ const YOUTUBE_PACK: LocalPack = LocalPack {
     id: "youtube-pack",
     binary_name: "streamverse-pack-youtube",
     supports_single: true,
-    supports_profile: false,
+    supports_profile: true,
     module_ids: &YOUTUBE_MODULES,
 };
 

@@ -1138,6 +1138,14 @@ fn clear_finished_tasks(state: tauri::State<'_, AppState>) -> Vec<DownloadTask> 
 }
 
 #[tauri::command]
+fn remove_download_task(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    task_store::remove_task(&state.tasks, &task_id)
+}
+
+#[tauri::command]
 fn check_download_history(
     platform: String,
     asset_ids: Vec<String>,
@@ -1440,6 +1448,7 @@ fn main() {
             open_in_file_manager,
             install_download_engine,
             clear_finished_tasks,
+            remove_download_task,
             check_download_history,
             get_download_history_count,
             fetch_thumbnail

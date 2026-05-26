@@ -3,7 +3,7 @@
 #[path = "media_contract.rs"]
 mod media_contract;
 
-use media_contract::{VideoAsset, VideoFormat, DEFAULT_GRADIENT};
+use media_contract::{ProfileBatch, VideoAsset, VideoFormat, DEFAULT_GRADIENT};
 use serde::Deserialize;
 use std::cmp::Reverse;
 use std::env;
@@ -1347,4 +1347,95 @@ fn unique_suffix() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+pub fn analyze_generic_profile(
+    platform: &str,
+    source_url: &str,
+    cookie_browser: Option<&str>,
+    cookie_file: Option<&str>,
+) -> Result<ProfileBatch, String> {
+    let mut command = prepare_ytdlp_command()?;
+    command.args([
+        "--flat-playlist",
+        "--dump-single-json",
+        "--no-playlist",
+        "--socket-timeout",
+        "30",
+        "--retries",
+        "3",
+    ]);
+    append_platform_ytdlp_args(&mut command, platform);
+    append_auth_args(&mut command, cookie_browser, cookie_file);
+
+    if platform == "youtube" {
+        let proxy_url = current_proxy_for_platform(platform);
+        append_network_args(&mut command, proxy_url.as_deref(), None);
+    } else {
+        command.arg("--proxy").arg("");
+    }
+
+    let output = command
+        .arg(source_url)
+        .output()
+        .map_err(|error| format!("启动 yt-dlp 批量解析失败：{error}"))?;
+
+    if !output.status.success() {
+        return Err(read_process_error(&output.stderr, "批量解析链接失败"));
+    }
+
+    #[derive(Deserialize)]
+    struct FlatPlaylist {
+        title: Option<String>,
+        entries: Option<Vec<FlatEntry>>,
+    }
+
+    #[derive(Deserialize)]
+    struct FlatEntry {
+        id: Option<String>,
+        title: Option<String>,
+        url: Option<String>,
+    }
+
+    let raw: FlatPlaylist = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("解析 yt-dlp 批量响应失败：{error}"))?;
+
+    let entries = raw.entries.unwrap_or_default();
+    let total = entries.len() as u32;
+    let profile_title = raw.title.unwrap_or_else(|| "未命名列表".to_string());
+
+    let items: Vec<VideoAsset> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let id = entry.id?;
+            let title = entry.title.unwrap_or_else(|| "未命名视频".to_string());
+            Some(VideoAsset {
+                asset_id: id,
+                platform: platform.to_string(),
+                source_url: entry.url.unwrap_or_else(|| source_url.to_string()),
+                title,
+                author: String::new(),
+                duration_seconds: 0,
+                publish_date: String::new(),
+                caption: String::new(),
+                category_label: None,
+                group_title: None,
+                cover_url: None,
+                cover_gradient: DEFAULT_GRADIENT.to_string(),
+                formats: vec![],
+            })
+        })
+        .collect();
+
+    let count = items.len() as u32;
+
+    Ok(ProfileBatch {
+        profile_title,
+        source_url: source_url.to_string(),
+        total_available: total,
+        fetched_count: count,
+        skipped_count: total.saturating_sub(count),
+        session_cookie_file: None,
+        items,
+    })
 }

@@ -1,7 +1,7 @@
 #[path = "../pack_common.rs"]
 mod pack_common;
 
-use pack_common::analyze_generic_url;
+use pack_common::{analyze_generic_url, analyze_generic_profile};
 
 fn main() {
     match run() {
@@ -44,6 +44,20 @@ fn run() -> Result<(), String> {
                 "{}",
                 serde_json::to_string(&asset)
                     .map_err(|error| format!("序列化 YouTube 结果失败：{error}"))?
+            );
+            Ok(())
+        }
+        "analyze-profile" => {
+            let batch = analyze_generic_profile(
+                "youtube",
+                &source_url,
+                cookie_browser.as_deref(),
+                cookie_file.as_deref(),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(&batch)
+                    .map_err(|error| format!("序列化 YouTube 批量结果失败：{error}"))?
             );
             Ok(())
         }

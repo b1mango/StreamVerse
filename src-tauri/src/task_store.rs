@@ -140,6 +140,18 @@ pub fn flush(store: &TaskStore) {
     }
 }
 
+pub fn remove_task(store: &TaskStore, task_id: &str) -> Result<(), String> {
+    let mut guard = store.entries.lock().unwrap();
+    let len_before = guard.len();
+    guard.retain(|entry| entry.task.id != task_id);
+    if guard.len() == len_before {
+        return Err("未找到对应的下载任务。".to_string());
+    }
+    save_entries(&guard);
+    emit_tasks_changed(store);
+    Ok(())
+}
+
 pub fn clear_finished(store: &TaskStore) -> Vec<DownloadTask> {
     let mut guard = store.entries.lock().unwrap();
     guard.retain(|entry| {

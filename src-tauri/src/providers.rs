@@ -200,19 +200,10 @@ fn preflight_auth(
     cookie_browser: Option<&str>,
     cookie_file: Option<&str>,
 ) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        if matches!(platform, "douyin" | "bilibili")
-            && cookie_browser == Some("chrome")
-            && cookie_file.is_none()
-        {
-            return Err(format!(
-                "Chrome 在 Windows 上启用了新的 Cookie 加密，当前无法直接从浏览器读取 {} 登录态。请先导出 Netscape 格式的 cookies.txt，再到设置里为 {} 选择该文件后重试。",
-                settings_platform_human_name(platform),
-                settings_platform_human_name(platform)
-            ));
-        }
-    }
+    // Chrome on Windows may have App-Bound Encryption — proceed anyway;
+    // the downstream `extract_browser_cookies` will try rookie first, then
+    // yt-dlp, and return a clear error if both fail.
+    let _ = (platform, cookie_browser);
 
     if let Some(cookie_file) = cookie_file {
         settings::validate_cookie_file_for_platform(cookie_file, platform)?;

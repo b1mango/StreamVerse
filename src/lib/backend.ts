@@ -365,6 +365,14 @@ export async function openInFileManager(
   return maybeInvoke<void>("open_in_file_manager", { path, revealParent });
 }
 
+export async function removeDownloadTask(taskId: string): Promise<void> {
+  if (!hasTauriRuntime()) {
+    return;
+  }
+
+  return maybeInvoke<void>("remove_download_task", { taskId });
+}
+
 export async function clearFinishedTasks(): Promise<DownloadTask[]> {
   if (!hasTauriRuntime()) {
     return mockState.tasks.filter(
