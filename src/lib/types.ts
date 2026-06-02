@@ -69,6 +69,60 @@ export interface VideoAsset {
   formats: VideoFormat[];
 }
 
+export type ProfileItemStatus =
+  | "idle"
+  | "pending"
+  | "loading"
+  | "ready"
+  | "failed";
+
+export interface ProfileItemPatch {
+  assetId: string;
+  thumbnailStatus: ProfileItemStatus;
+  formatStatus: ProfileItemStatus;
+}
+
+export type ProfileSessionEvent =
+  | {
+      event: "started";
+      data: {
+        sessionId: string;
+        profileTitle: string;
+        sourceUrl: string;
+        totalAvailable: number;
+      };
+    }
+  | {
+      event: "itemsAppended";
+      data: {
+        sessionId: string;
+        items: VideoAsset[];
+      };
+    }
+  | {
+      event: "itemPatched";
+      data: {
+        sessionId: string;
+        patch: ProfileItemPatch;
+      };
+    }
+  | {
+      event: "completed";
+      data: {
+        sessionId: string;
+        fetchedCount: number;
+        skippedCount: number;
+        sessionCookieFile?: string | null;
+      };
+    }
+  | {
+      event: "failed";
+      data: {
+        sessionId: string;
+        message: string;
+      };
+    };
+
 export interface DownloadTask {
   id: string;
   platform: PlatformId;

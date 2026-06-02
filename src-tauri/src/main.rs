@@ -8,6 +8,7 @@ mod pack_manager;
 mod pack_registry;
 mod parser;
 mod platforms;
+mod profile_session;
 mod providers;
 mod settings;
 mod task_store;
@@ -25,6 +26,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tauri::ipc::Channel;
 use tauri::Manager;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -420,6 +422,58 @@ async fn analyze_profile_input(
             }
         }
         result
+    })
+    .await
+    .map_err(|_| "批量解析线程异常退出".to_string())?
+}
+
+#[tauri::command]
+async fn analyze_profile_stream(
+    raw_input: String,
+    _limit: Option<u32>,
+    session_id: Option<String>,
+    on_event: Channel<profile_session::ProfileSessionEvent>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let sid = session_id.unwrap_or_else(|| "profile-stream".to_string());
+    let progress_file = Some(analysis_progress_path(&sid));
+    let _ = write_analysis_progress(Some(&sid), 0, 0, "正在读取主页视频…");
+    on_event
+        .send(profile_session::started_event(&sid, &raw_input))
+        .map_err(|error| format!("发送主页读取事件失败：{error}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = providers::analyze_profile_input(
+            &raw_input,
+            &settings.platform_auth,
+            progress_file.as_deref(),
+        );
+
+        match result {
+            Ok(batch) => {
+                for event in profile_session::batch_to_events(&sid, &batch) {
+                    on_event
+                        .send(event)
+                        .map_err(|error| format!("发送主页读取事件失败：{error}"))?;
+                }
+                let _ = write_analysis_progress(
+                    Some(&sid),
+                    batch.fetched_count,
+                    batch.total_available,
+                    "主页视频解析完成。",
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let _ = on_event.send(profile_session::ProfileSessionEvent::Failed {
+                    session_id: sid.clone(),
+                    message: error.clone(),
+                });
+                let _ = write_analysis_progress(Some(&sid), 0, 0, &error);
+                Err(error)
+            }
+        }
     })
     .await
     .map_err(|_| "批量解析线程异常退出".to_string())?
@@ -1444,6 +1498,7 @@ fn main() {
             clear_analysis_progress,
             analyze_input,
             analyze_profile_input,
+            analyze_profile_stream,
             open_profile_browser,
             collect_profile_browser,
             create_download_task,

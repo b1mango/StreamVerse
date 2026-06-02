@@ -1565,6 +1565,13 @@ select option:checked {
   color: var(--muted);
 }
 
+.profile-status-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
 .profile-format-slot {
   flex: 0 0 240px;
   width: 240px;
