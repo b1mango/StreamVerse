@@ -417,6 +417,7 @@ pub fn download_video(
     audio_direct_url: Option<&str>,
     audio_referer: Option<&str>,
     audio_user_agent: Option<&str>,
+    image_urls: &[String],
 ) -> Result<DownloadTask, String> {
     if !download_options.has_any_selection() {
         return Err("至少要选择一种要保存的内容。".to_string());
@@ -495,6 +496,7 @@ pub fn download_video(
     let audio_referer = audio_referer.map(str::to_string);
     let audio_user_agent = audio_user_agent.map(str::to_string);
     let ffmpeg_path = ffmpeg_path.map(str::to_string);
+    let image_urls_owned: Vec<String> = image_urls.to_vec();
     let artifacts = DownloadArtifacts {
         platform: platform.to_string(),
         source_url: source_url.to_string(),
@@ -535,8 +537,31 @@ pub fn download_video(
             audio_direct_url: audio_direct_url.clone(),
             audio_referer: audio_referer.clone(),
             audio_user_agent: audio_user_agent.clone(),
+            image_urls: image_urls_owned.clone(),
         },
     );
+
+    // Clone values shared between image_gallery and metadata_only workers
+    let mg_task_store = Arc::clone(&task_store);
+    let mg_controller_store = controller_store.clone();
+    let mg_task_id = task_id.clone();
+    let mg_title = title.clone();
+    let mg_format_display = format_display.clone();
+    let mg_artifacts = artifacts.clone();
+    let mg_output_layout = output_layout.clone();
+    let mg_download_options = download_options.clone();
+    let mg_controller = Arc::clone(&controller);
+
+    if format_id_text.as_deref() == Some("image-gallery") && !image_urls_owned.is_empty() {
+        thread::spawn(move || {
+            image_gallery_worker(
+                mg_task_store, mg_controller_store, mg_task_id, mg_title, mg_format_display,
+                mg_artifacts, mg_output_layout, mg_download_options, auto_reveal_in_file_manager,
+                image_urls_owned, mg_controller,
+            );
+        });
+        return Ok(task);
+    }
 
     if !download_options.download_video {
         thread::spawn(move || {
@@ -554,7 +579,6 @@ pub fn download_video(
                 controller,
             );
         });
-
         return Ok(task);
     }
 
@@ -903,6 +927,81 @@ pub fn download_video(
     });
 
     Ok(task)
+}
+
+fn infer_extension_from_url(url: &str) -> String {
+    let without_query = url.split('?').next().unwrap_or(url);
+    let lowered = without_query.to_ascii_lowercase();
+    if lowered.ends_with(".jpg") || lowered.ends_with(".jpeg") { return "jpg".into(); }
+    if lowered.ends_with(".png") { return "png".into(); }
+    if lowered.ends_with(".webp") { return "webp".into(); }
+    "jpg".to_string()
+}
+
+fn image_gallery_worker(
+    task_store: task_store::TaskStore,
+    _controller_store: TaskControllerStore,
+    task_id: String, title: String, format_display: String,
+    artifacts: DownloadArtifacts, output_layout: OutputLayout,
+    download_options: DownloadContentSelection, auto_reveal_in_file_manager: bool,
+    image_urls: Vec<String>, controller: Arc<TaskController>,
+) {
+    let safe_title = crate::parser::sanitize_filename(&title);
+    let bundle_dir = output_layout.bundle_dir.clone()
+        .unwrap_or_else(|| output_layout.base_dir.join(&safe_title));
+    if let Err(e) = std::fs::create_dir_all(&bundle_dir) {
+        fail_task(&task_store, &task_id, format!("创建图册目录失败：{e}")); return;
+    }
+    let total = image_urls.len() as u64;
+    let client = match build_http_client("douyin") {
+        Ok(c) => c, Err(e) => { fail_task(&task_store, &task_id, e); return; }
+    };
+    let mut saved_count = 0u32;
+    for (i, url) in image_urls.iter().enumerate() {
+        if controller.is_cancel_requested() { cancel_task_update(&task_store, &task_id); return; }
+        let ext = infer_extension_from_url(url);
+        let dest = bundle_dir.join(format!("image_{:03}.{ext}", i + 1));
+        match client.get(url).send() {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(bytes) = resp.bytes() {
+                    if std::fs::write(&dest, &bytes).is_ok() { saved_count += 1; }
+                }
+            }
+            _ => {}
+        }
+        let pct = ((i + 1) as u64 * 100 / total) as u32;
+        upsert_task(&task_store, DownloadTask {
+            id: task_id.clone(), platform: artifacts.platform.clone(), title: title.clone(),
+            progress: pct.min(99), speed_text: format!("{}/{}", i + 1, total),
+            format_label: format_display.clone(), status: "downloading".to_string(),
+            eta_text: String::new(),
+            message: Some(format!("正在下载图册图片 {}/{}…", i + 1, total)),
+            output_path: None, supports_pause: false, supports_cancel: true, can_retry: false,
+        });
+    }
+    if controller.is_cancel_requested() { cancel_task_update(&task_store, &task_id); return; }
+    let mut gallery_opts = download_options.clone();
+    gallery_opts.download_audio = false;
+    let video_path = bundle_dir.join(format!("image_001.{}", infer_extension_from_url(image_urls.first().map(String::as_str).unwrap_or(""))));
+    let mut summary = persist_download_artifacts(&output_layout, Some(&video_path), &artifacts, Some(&format_display), &gallery_opts, None);
+    summary.video_written = saved_count > 0;
+    summary.output_path = Some(bundle_dir.to_string_lossy().to_string());
+    let message = build_completion_message(&output_layout.base_dir.to_string_lossy(), &summary);
+    if saved_count == 0 {
+        fail_task(&task_store, &task_id, "图册图片下载失败，请检查网络后重试。".to_string());
+    } else {
+        upsert_task(&task_store, DownloadTask {
+            id: task_id.clone(), platform: artifacts.platform.clone(), title: title.clone(),
+            progress: 100, speed_text: "-".to_string(), format_label: format_display,
+            status: "completed".to_string(), eta_text: "完成".to_string(),
+            message: Some(message), output_path: summary.output_path.clone(),
+            supports_pause: false, supports_cancel: false, can_retry: false,
+        });
+        if auto_reveal_in_file_manager {
+            if let Some(path) = summary.output_path { let _ = open_in_file_manager(&path, false); }
+        }
+        download_history::record_download(&artifacts.platform, &artifacts.asset_id, &title);
+    }
 }
 
 fn metadata_only_worker(
@@ -2213,6 +2312,14 @@ fn persist_download_artifacts(
 }
 
 fn build_text_sidecar(artifacts: &DownloadArtifacts, format_label: Option<&str>) -> String {
+    if artifacts.platform == "douyin" {
+        return if artifacts.caption.trim().is_empty() {
+            String::new()
+        } else {
+            artifacts.caption.trim().to_string()
+        };
+    }
+
     let mut sections = vec![
         format!(
             "平台：{}",

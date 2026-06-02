@@ -8,7 +8,8 @@ export type ModuleId =
   | "douyin-profile"
   | "bilibili-single"
   | "bilibili-profile"
-  | "youtube-single";
+  | "youtube-single"
+  | "youtube-profile";
 export type QualityPreference =
   | "recommended"
   | "highest"
@@ -51,6 +52,7 @@ export interface VideoFormat {
   audioReferer?: string | null;
   audioUserAgent?: string | null;
   fileSizeBytes?: number | null;
+  imageUrls?: string[];
 }
 
 export interface VideoAsset {
@@ -248,6 +250,7 @@ export interface CreateTaskPayload {
   audioDirectUrl?: string | null;
   audioReferer?: string | null;
   audioUserAgent?: string | null;
+  imageUrls?: string[];
 }
 
 export interface SaveSettingsPayload {

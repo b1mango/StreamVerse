@@ -177,7 +177,7 @@ def first_url_from_candidate(candidate: Any) -> str | None:
 
 def extract_cover_url(detail: dict[str, Any]) -> str | None:
     top_video = detail.get("video") or {}
-    for key in ("origin_cover", "cover", "dynamic_cover", "animated_cover"):
+    for key in ("cover", "origin_cover"):
         cover_url = first_url_from_candidate(top_video.get(key))
         if cover_url:
             return cover_url
@@ -240,9 +240,37 @@ def collect_video_sources(detail: dict[str, Any]) -> list[tuple[str, dict[str, A
     return sources
 
 
+def _collect_image_urls(detail: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    for image in detail.get("images") or []:
+        if not isinstance(image, dict): continue
+        for key in ("url_list", "download_url_list"):
+            candidates = image.get(key) or []
+            if candidates:
+                url = str(candidates[0]).strip() if candidates else ""
+                if url and url not in urls: urls.append(url); break
+    return urls
+
+
 def collect_formats(detail: dict[str, Any], using_login: bool) -> list[dict[str, Any]]:
     formats: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
+
+    aweme_type = int(detail.get("aweme_type") or 0)
+    if aweme_type in IMAGE_AWEME_TYPES:
+        image_urls = _collect_image_urls(detail)
+        if image_urls:
+            return [{
+                "id": "image-gallery", "label": f"图册 ({len(image_urls)}P)",
+                "resolution": f"{len(image_urls)} 张图片", "bitrateKbps": 0,
+                "codec": "JPEG/WEBP", "container": "ZIP",
+                "noWatermark": True, "requiresLogin": using_login,
+                "requiresProcessing": False, "recommended": True,
+                "directUrl": None, "referer": DOUYIN_REFERER, "userAgent": DESKTOP_UA,
+                "audioDirectUrl": None, "audioReferer": None, "audioUserAgent": None,
+                "fileSizeBytes": None, "imageUrls": image_urls,
+            }]
+        return []
 
     for source_key, video in collect_video_sources(detail):
         bit_rates = video.get("bit_rate") or []
@@ -358,16 +386,7 @@ def compute_duration_seconds(detail: dict[str, Any]) -> int:
 
 
 def build_caption(detail: dict[str, Any], using_login: bool, has_video_formats: bool) -> str:
-    prefix = "已通过浏览器 Cookie 完成解析。" if using_login else "已通过网页接口完成解析。"
-    aweme_type = int(detail.get("aweme_type") or 0)
-
-    if aweme_type in IMAGE_AWEME_TYPES and has_video_formats:
-        return f"{prefix} 该复制链接实际指向笔记作品，已提取其中可下载的动态内容。"
-
-    if aweme_type in IMAGE_AWEME_TYPES:
-        return f"{prefix} 当前链接是图文笔记，暂不支持纯图片下载。"
-
-    return f"{prefix} 可以直接选择清晰度开始下载。"
+    return (detail.get("desc") or "").strip()
 
 
 async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:

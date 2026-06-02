@@ -86,6 +86,7 @@ pub(crate) struct TaskReplayRequest {
     pub(crate) audio_direct_url: Option<String>,
     pub(crate) audio_referer: Option<String>,
     pub(crate) audio_user_agent: Option<String>,
+    pub(crate) image_urls: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -291,6 +292,7 @@ fn fallback_profile_format(
         audio_referer: None,
         audio_user_agent: None,
         file_size_bytes: None,
+        image_urls: vec![],
     })
 }
 
@@ -327,6 +329,7 @@ fn sample_preview() -> VideoAsset {
                 audio_referer: None,
                 audio_user_agent: None,
                 file_size_bytes: None,
+                image_urls: vec![],
             },
             VideoFormat {
                 id: "uhd_plus".into(),
@@ -346,6 +349,7 @@ fn sample_preview() -> VideoAsset {
                 audio_referer: None,
                 audio_user_agent: None,
                 file_size_bytes: None,
+                image_urls: vec![],
             },
         ],
     }
@@ -548,6 +552,7 @@ fn create_download_task(
     audio_direct_url: Option<String>,
     audio_referer: Option<String>,
     audio_user_agent: Option<String>,
+    image_urls: Option<Vec<String>>,
 ) -> Result<DownloadTask, String> {
     let settings = state.settings.lock().unwrap().clone();
     let save_directory = match save_directory_override {
@@ -591,6 +596,7 @@ fn create_download_task(
         audio_direct_url.as_deref(),
         audio_referer.as_deref(),
         audio_user_agent.as_deref(),
+        image_urls.as_deref().unwrap_or(&[]),
     )
 }
 
@@ -662,9 +668,14 @@ fn create_profile_download_tasks(
                 None
             };
 
-            let resolved_asset = if download_options.download_video
-                && item.asset.formats.is_empty()
-                && fallback_format.is_none()
+            let needs_re_resolve = download_options.download_video
+                && (item.asset.formats.is_empty()
+                    || item.selected_format_id.as_deref().is_some_and(|fid| {
+                        item.asset.formats.iter()
+                            .find(|f| f.id == fid)
+                            .is_some_and(|f| f.direct_url.is_none())
+                    }));
+            let resolved_asset = if needs_re_resolve
             {
                 match pack_host::analyze_single(
                     &item.asset.source_url,
@@ -824,6 +835,10 @@ fn create_profile_download_tasks(
                 selected_format
                     .as_ref()
                     .and_then(|format| format.audio_user_agent.as_deref()),
+                selected_format
+                    .as_ref()
+                    .map(|format| format.image_urls.as_slice())
+                    .unwrap_or(&[]),
             ) {
                 skipped_count += 1;
                 if first_error.is_none() {
@@ -978,6 +993,7 @@ fn retry_download_task(
         replay.audio_direct_url.as_deref(),
         replay.audio_referer.as_deref(),
         replay.audio_user_agent.as_deref(),
+        &replay.image_urls,
     )
 }
 

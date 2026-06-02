@@ -790,22 +790,25 @@ fn can_execute_ytdlp(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn ffmpeg_source_path() -> Result<PathBuf, String> {
-    if let Some(resources) = packaged_resources_root() {
-        let bundled = resources.join("bin").join(ffmpeg_binary_name());
+pub fn ffmpeg_source_path() -> Result<PathBuf, String> {
+    if let Some(root) = packaged_pack_resource_root("download-engine") {
+        let bundled = root.join("bin").join(ffmpeg_binary_name());
         if bundled.is_file() {
             return Ok(bundled);
         }
     }
 
     let path = workspace_root()
-        .join("node_modules")
-        .join("ffmpeg-static")
+        .join("src-tauri")
+        .join("gen")
+        .join("resources")
+        .join("download-engine")
+        .join("bin")
         .join(ffmpeg_binary_name());
     if path.is_file() {
         Ok(path)
     } else {
-        Err("未找到本地 FFmpeg 二进制，请先执行 npm install。".to_string())
+        Err("未找到本地 FFmpeg 二进制，请先准备打包资源。".to_string())
     }
 }
 

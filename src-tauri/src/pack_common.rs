@@ -88,6 +88,7 @@ pub fn analyze_generic_url(
     command.args([
         "--dump-single-json",
         "--no-playlist",
+        "--no-update",
         "--socket-timeout",
         "30",
         "--retries",
@@ -375,6 +376,7 @@ fn fallback_streaming_format(id: &str, label: &str) -> VideoFormat {
         audio_referer: None,
         audio_user_agent: None,
         file_size_bytes: None,
+        image_urls: vec![],
     }
 }
 
@@ -845,6 +847,7 @@ fn map_generic_formats(raw_formats: Vec<RawFormat>) -> Vec<VideoFormat> {
             audio_referer: None,
             audio_user_agent: None,
             file_size_bytes: format.filesize.or(format.filesize_approx),
+            image_urls: vec![],
         })
         .collect::<Vec<_>>();
 
@@ -938,6 +941,7 @@ fn build_video_format(
         audio_referer: best_audio.and_then(format_referer),
         audio_user_agent: best_audio.and_then(format_user_agent),
         file_size_bytes: combined_size,
+        image_urls: vec![],
     }
 }
 
@@ -1071,10 +1075,11 @@ fn build_label(format: &RawFormat) -> String {
         return format!("{height}P");
     }
 
-    format
+    let note = format
         .format_note
         .clone()
-        .unwrap_or_else(|| "默认格式".to_string())
+        .unwrap_or_else(|| "默认格式".to_string());
+    note.replace("自适应", "").trim().to_string()
 }
 
 fn build_resolution(format: &RawFormat) -> String {
@@ -1342,6 +1347,30 @@ fn preferred_js_runtime() -> Option<String> {
         .clone()
 }
 
+/// Normalize YouTube channel URLs: /featured, /shorts, /community → /videos
+/// /playlists is kept as-is — it's a valid playlist URL.
+fn normalize_youtube_channel_url(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    if !lower.contains("@") && !lower.contains("/channel/") && !lower.contains("/c/") {
+        return url.to_string();
+    }
+    if lower.contains("/videos") { return url.to_string(); }
+    if lower.contains("/playlists") { return url.to_string(); }
+    for tab in &["/featured", "/shorts", "/community", "/about", "/streams"] {
+        if let Some(pos) = lower.find(tab) {
+            let mut result = url.to_string();
+            let end = pos + tab.len();
+            let suffix = &url[end..];
+            if suffix.starts_with('?') || suffix.starts_with('#') || suffix.is_empty() {
+                result.replace_range(pos..end, "/videos");
+                return result;
+            }
+        }
+    }
+    let trimmed = url.trim_end_matches('/');
+    if !trimmed.ends_with("/videos") { format!("{trimmed}/videos") } else { url.to_string() }
+}
+
 fn unique_suffix() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1355,17 +1384,26 @@ pub fn analyze_generic_profile(
     cookie_browser: Option<&str>,
     cookie_file: Option<&str>,
 ) -> Result<ProfileBatch, String> {
+    let normalized_url = if platform == "youtube" {
+        normalize_youtube_channel_url(source_url)
+    } else {
+        source_url.to_string()
+    };
+
     let mut command = prepare_ytdlp_command()?;
     command.args([
         "--flat-playlist",
         "--dump-single-json",
         "--no-playlist",
+        "--no-update",
         "--socket-timeout",
-        "30",
+        "15",
         "--retries",
-        "3",
+        "2",
     ]);
-    append_platform_ytdlp_args(&mut command, platform);
+    if platform == "youtube" {
+        append_platform_ytdlp_args(&mut command, platform);
+    }
     append_auth_args(&mut command, cookie_browser, cookie_file);
 
     if platform == "youtube" {
@@ -1375,10 +1413,14 @@ pub fn analyze_generic_profile(
         command.arg("--proxy").arg("");
     }
 
+    write_progress(0, 1, "正在请求视频列表…");
+
     let output = command
-        .arg(source_url)
+        .arg(&normalized_url)
         .output()
         .map_err(|error| format!("启动 yt-dlp 批量解析失败：{error}"))?;
+
+    write_progress(0, 1, "正在解析视频信息…");
 
     if !output.status.success() {
         return Err(read_process_error(&output.stderr, "批量解析链接失败"));
@@ -1395,6 +1437,15 @@ pub fn analyze_generic_profile(
         id: Option<String>,
         title: Option<String>,
         url: Option<String>,
+        #[serde(default)]
+        duration: Option<f64>,
+        #[serde(default)]
+        thumbnails: Option<Vec<FlatThumbnail>>,
+    }
+
+    #[derive(Deserialize)]
+    struct FlatThumbnail {
+        url: Option<String>,
     }
 
     let raw: FlatPlaylist = serde_json::from_slice(&output.stdout)
@@ -1404,23 +1455,34 @@ pub fn analyze_generic_profile(
     let total = entries.len() as u32;
     let profile_title = raw.title.unwrap_or_else(|| "未命名列表".to_string());
 
+    let total_entries = entries.len();
     let items: Vec<VideoAsset> = entries
         .into_iter()
-        .filter_map(|entry| {
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            if idx % 10 == 0 || idx == 0 {
+                write_progress(idx as u32, total_entries as u32,
+                    &format!("正在整理视频 {}/{}…", idx + 1, total_entries));
+            }
             let id = entry.id?;
             let title = entry.title.unwrap_or_else(|| "未命名视频".to_string());
+            let cover_url = entry
+                .thumbnails
+                .and_then(|thumbs| thumbs.into_iter().filter_map(|t| t.url).last())
+                .map(|url| if url.starts_with("//") { format!("https:{url}") } else { url });
+
             Some(VideoAsset {
                 asset_id: id,
                 platform: platform.to_string(),
                 source_url: entry.url.unwrap_or_else(|| source_url.to_string()),
                 title,
                 author: String::new(),
-                duration_seconds: 0,
+                duration_seconds: entry.duration.unwrap_or_default().round() as u32,
                 publish_date: String::new(),
                 caption: String::new(),
                 category_label: None,
                 group_title: None,
-                cover_url: None,
+                cover_url,
                 cover_gradient: DEFAULT_GRADIENT.to_string(),
                 formats: vec![],
             })

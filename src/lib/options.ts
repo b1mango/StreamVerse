@@ -102,9 +102,9 @@ export const moduleCatalog: Record<
     platform: "douyin",
     label: "抖音主页批量下载",
     badge: "Douyin",
-    description: "打开浏览器登录后读取主页作品，再勾选入队。",
+    description: "粘贴主页链接或分享文案，解析作品列表后批量下载。支持视频与图文。",
     accent: "mint",
-    dependencyHints: ["浏览器读取"]
+    dependencyHints: ["批量解析", "格式自选"]
   },
   "bilibili-single": {
     id: "bilibili-single",
@@ -132,6 +132,15 @@ export const moduleCatalog: Record<
     description: "解析 YouTube 视频并按所选格式下载。",
     accent: "slate",
     dependencyHints: ["高质量格式"]
+  },
+  "youtube-profile": {
+    id: "youtube-profile",
+    platform: "youtube",
+    label: "YouTube 频道 / 合集下载",
+    badge: "YouTube",
+    description: "解析 YouTube 频道或播放列表，批量入队下载。",
+    accent: "slate",
+    dependencyHints: ["频道解析", "批量下载"]
   }
 };
 
@@ -140,5 +149,6 @@ export const moduleOrder: ModuleId[] = [
   "douyin-profile",
   "bilibili-single",
   "bilibili-profile",
-  "youtube-single"
+  "youtube-single",
+  "youtube-profile"
 ];

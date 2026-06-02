@@ -954,7 +954,8 @@
         userAgent: format?.userAgent ?? null,
         audioDirectUrl: format?.audioDirectUrl ?? null,
         audioReferer: format?.audioReferer ?? null,
-        audioUserAgent: format?.audioUserAgent ?? null
+        audioUserAgent: format?.audioUserAgent ?? null,
+        imageUrls: format?.imageUrls ?? []
       });
 
       upsertTask(task);
