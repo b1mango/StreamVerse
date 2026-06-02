@@ -8,7 +8,8 @@ export type ModuleId =
   | "douyin-profile"
   | "bilibili-single"
   | "bilibili-profile"
-  | "youtube-single";
+  | "youtube-single"
+  | "youtube-profile";
 export type QualityPreference =
   | "recommended"
   | "highest"
@@ -51,6 +52,7 @@ export interface VideoFormat {
   audioReferer?: string | null;
   audioUserAgent?: string | null;
   fileSizeBytes?: number | null;
+  imageUrls?: string[];
 }
 
 export interface VideoAsset {
@@ -68,6 +70,60 @@ export interface VideoAsset {
   coverGradient: string;
   formats: VideoFormat[];
 }
+
+export type ProfileItemStatus =
+  | "idle"
+  | "pending"
+  | "loading"
+  | "ready"
+  | "failed";
+
+export interface ProfileItemPatch {
+  assetId: string;
+  thumbnailStatus: ProfileItemStatus;
+  formatStatus: ProfileItemStatus;
+}
+
+export type ProfileSessionEvent =
+  | {
+      event: "started";
+      data: {
+        sessionId: string;
+        profileTitle: string;
+        sourceUrl: string;
+        totalAvailable: number;
+      };
+    }
+  | {
+      event: "itemsAppended";
+      data: {
+        sessionId: string;
+        items: VideoAsset[];
+      };
+    }
+  | {
+      event: "itemPatched";
+      data: {
+        sessionId: string;
+        patch: ProfileItemPatch;
+      };
+    }
+  | {
+      event: "completed";
+      data: {
+        sessionId: string;
+        fetchedCount: number;
+        skippedCount: number;
+        sessionCookieFile?: string | null;
+      };
+    }
+  | {
+      event: "failed";
+      data: {
+        sessionId: string;
+        message: string;
+      };
+    };
 
 export interface DownloadTask {
   id: string;
@@ -194,6 +250,7 @@ export interface CreateTaskPayload {
   audioDirectUrl?: string | null;
   audioReferer?: string | null;
   audioUserAgent?: string | null;
+  imageUrls?: string[];
 }
 
 export interface SaveSettingsPayload {

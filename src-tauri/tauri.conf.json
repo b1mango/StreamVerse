@@ -43,7 +43,6 @@
       }
     },
     "resources": {
-      "../node_modules/ffmpeg-static/ffmpeg*": "bin/",
       "../registry/plugins.json": "registry/plugins.json",
       "target/release/streamverse-pack-*": "pack-binaries/",
       "gen/resources/download-engine/bin/*": "pack-resources/download-engine/bin/",

@@ -32,6 +32,8 @@ pub(crate) struct VideoFormat {
     pub(crate) audio_user_agent: Option<String>,
     #[serde(default)]
     pub(crate) file_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) image_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

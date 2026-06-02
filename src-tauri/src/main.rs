@@ -8,6 +8,7 @@ mod pack_manager;
 mod pack_registry;
 mod parser;
 mod platforms;
+mod profile_session;
 mod providers;
 mod settings;
 mod task_store;
@@ -25,6 +26,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tauri::ipc::Channel;
 use tauri::Manager;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -84,6 +86,7 @@ pub(crate) struct TaskReplayRequest {
     pub(crate) audio_direct_url: Option<String>,
     pub(crate) audio_referer: Option<String>,
     pub(crate) audio_user_agent: Option<String>,
+    pub(crate) image_urls: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -289,6 +292,7 @@ fn fallback_profile_format(
         audio_referer: None,
         audio_user_agent: None,
         file_size_bytes: None,
+        image_urls: vec![],
     })
 }
 
@@ -325,6 +329,7 @@ fn sample_preview() -> VideoAsset {
                 audio_referer: None,
                 audio_user_agent: None,
                 file_size_bytes: None,
+                image_urls: vec![],
             },
             VideoFormat {
                 id: "uhd_plus".into(),
@@ -344,6 +349,7 @@ fn sample_preview() -> VideoAsset {
                 audio_referer: None,
                 audio_user_agent: None,
                 file_size_bytes: None,
+                image_urls: vec![],
             },
         ],
     }
@@ -426,6 +432,58 @@ async fn analyze_profile_input(
 }
 
 #[tauri::command]
+async fn analyze_profile_stream(
+    raw_input: String,
+    _limit: Option<u32>,
+    session_id: Option<String>,
+    on_event: Channel<profile_session::ProfileSessionEvent>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let sid = session_id.unwrap_or_else(|| "profile-stream".to_string());
+    let progress_file = Some(analysis_progress_path(&sid));
+    let _ = write_analysis_progress(Some(&sid), 0, 0, "正在读取主页视频…");
+    on_event
+        .send(profile_session::started_event(&sid, &raw_input))
+        .map_err(|error| format!("发送主页读取事件失败：{error}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = providers::analyze_profile_input(
+            &raw_input,
+            &settings.platform_auth,
+            progress_file.as_deref(),
+        );
+
+        match result {
+            Ok(batch) => {
+                for event in profile_session::batch_to_events(&sid, &batch) {
+                    on_event
+                        .send(event)
+                        .map_err(|error| format!("发送主页读取事件失败：{error}"))?;
+                }
+                let _ = write_analysis_progress(
+                    Some(&sid),
+                    batch.fetched_count,
+                    batch.total_available,
+                    "主页视频解析完成。",
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let _ = on_event.send(profile_session::ProfileSessionEvent::Failed {
+                    session_id: sid.clone(),
+                    message: error.clone(),
+                });
+                let _ = write_analysis_progress(Some(&sid), 0, 0, &error);
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|_| "批量解析线程异常退出".to_string())?
+}
+
+#[tauri::command]
 fn open_profile_browser(
     raw_input: String,
     state: tauri::State<'_, AppState>,
@@ -494,6 +552,7 @@ fn create_download_task(
     audio_direct_url: Option<String>,
     audio_referer: Option<String>,
     audio_user_agent: Option<String>,
+    image_urls: Option<Vec<String>>,
 ) -> Result<DownloadTask, String> {
     let settings = state.settings.lock().unwrap().clone();
     let save_directory = match save_directory_override {
@@ -537,6 +596,7 @@ fn create_download_task(
         audio_direct_url.as_deref(),
         audio_referer.as_deref(),
         audio_user_agent.as_deref(),
+        image_urls.as_deref().unwrap_or(&[]),
     )
 }
 
@@ -608,9 +668,14 @@ fn create_profile_download_tasks(
                 None
             };
 
-            let resolved_asset = if download_options.download_video
-                && item.asset.formats.is_empty()
-                && fallback_format.is_none()
+            let needs_re_resolve = download_options.download_video
+                && (item.asset.formats.is_empty()
+                    || item.selected_format_id.as_deref().is_some_and(|fid| {
+                        item.asset.formats.iter()
+                            .find(|f| f.id == fid)
+                            .is_some_and(|f| f.direct_url.is_none())
+                    }));
+            let resolved_asset = if needs_re_resolve
             {
                 match pack_host::analyze_single(
                     &item.asset.source_url,
@@ -770,6 +835,10 @@ fn create_profile_download_tasks(
                 selected_format
                     .as_ref()
                     .and_then(|format| format.audio_user_agent.as_deref()),
+                selected_format
+                    .as_ref()
+                    .map(|format| format.image_urls.as_slice())
+                    .unwrap_or(&[]),
             ) {
                 skipped_count += 1;
                 if first_error.is_none() {
@@ -924,6 +993,7 @@ fn retry_download_task(
         replay.audio_direct_url.as_deref(),
         replay.audio_referer.as_deref(),
         replay.audio_user_agent.as_deref(),
+        &replay.image_urls,
     )
 }
 
@@ -1444,6 +1514,7 @@ fn main() {
             clear_analysis_progress,
             analyze_input,
             analyze_profile_input,
+            analyze_profile_stream,
             open_profile_browser,
             collect_profile_browser,
             create_download_task,

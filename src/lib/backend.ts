@@ -16,6 +16,7 @@ import type {
   SettingsProfile,
   ModuleRuntimeState,
   ModuleId,
+  ProfileSessionEvent,
   VideoAsset
 } from "./types";
 
@@ -125,6 +126,64 @@ export async function analyzeProfileInput(
   }
 
   return maybeInvoke<ProfileBatch>("analyze_profile_input", payload);
+}
+
+export async function analyzeProfileStream(
+  payload: AnalyzeProfilePayload,
+  onEvent: (event: ProfileSessionEvent) => void
+): Promise<void> {
+  if (!hasTauriRuntime()) {
+    const batch = await analyzeProfileInput(payload);
+    const sessionId = payload.sessionId ?? "mock-profile-stream";
+    onEvent({
+      event: "started",
+      data: {
+        sessionId,
+        profileTitle: batch.profileTitle,
+        sourceUrl: batch.sourceUrl,
+        totalAvailable: batch.totalAvailable
+      }
+    });
+    onEvent({
+      event: "itemsAppended",
+      data: {
+        sessionId,
+        items: batch.items
+      }
+    });
+    for (const item of batch.items) {
+      onEvent({
+        event: "itemPatched",
+        data: {
+          sessionId,
+          patch: {
+            assetId: item.assetId,
+            thumbnailStatus: item.coverUrl ? "ready" : "pending",
+            formatStatus: item.formats.length ? "ready" : "pending"
+          }
+        }
+      });
+    }
+    onEvent({
+      event: "completed",
+      data: {
+        sessionId,
+        fetchedCount: batch.fetchedCount,
+        skippedCount: batch.skippedCount,
+        sessionCookieFile: batch.sessionCookieFile ?? null
+      }
+    });
+    return;
+  }
+
+  const { Channel, invoke } = await import("@tauri-apps/api/core");
+  const onEventChannel = new Channel<ProfileSessionEvent>(onEvent);
+  await invoke<void>("analyze_profile_stream", {
+    rawInput: payload.rawInput,
+    limit: payload.limit,
+    sessionId: payload.sessionId,
+    onEvent: onEventChannel
+  });
 }
 
 export async function openProfileBrowser(

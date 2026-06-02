@@ -8,9 +8,10 @@
   import SingleVideoWorkspace from "./lib/components/SingleVideoWorkspace.svelte";
   import TaskQueuePanel from "./lib/components/TaskQueuePanel.svelte";
   import { setLanguage, t, tRaw } from "./lib/i18n";
+  import { createProfileSessionState } from "./lib/profile-session.svelte";
   import {
     analyzeInput,
-    analyzeProfileInput,
+    analyzeProfileStream,
     cancelDownloadTask,
     checkDownloadHistory,
     clearAnalysisProgress,
@@ -115,6 +116,7 @@
   let pastingDouyinProfile = false;
   let douyinProfileBrowserSession: BrowserLaunchResult | null = null;
   let douyinDownloadedAssetIds: string[] = [];
+  const douyinProfileSession = createProfileSessionState();
 
   let bilibiliInput = "";
   let bilibiliPreview: VideoAsset | null = null;
@@ -134,6 +136,7 @@
   let enqueuingBilibiliProfile = false;
   let pastingBilibiliProfile = false;
   let bilibiliDownloadedAssetIds: string[] = [];
+  const bilibiliProfileSession = createProfileSessionState();
 
   let youtubeInput = "";
   let youtubePreview: VideoAsset | null = null;
@@ -707,11 +710,20 @@
 
       await withAnalysisProgress(
         (progress) => (douyinProfileAnalysisProgress = progress),
-        (sessionId) => {
-          return analyzeProfileInput({
+        async (sessionId) => {
+          douyinProfileSession.reset();
+          await analyzeProfileStream({
             rawInput: douyinProfileInput,
             sessionId
+          }, (event) => {
+            douyinProfileSession.applyEvent(event);
+            douyinProfilePreview = douyinProfileSession.state.profileBatch;
           });
+          const batch = douyinProfileSession.state.profileBatch;
+          if (!batch) {
+            throw new Error("主页读取没有返回可用结果。");
+          }
+          return batch;
         },
         "正在读取抖音主页作品…",
         async (r) => {
@@ -768,11 +780,21 @@
 
       await withAnalysisProgress(
         (progress) => (bilibiliProfileAnalysisProgress = progress),
-        (sessionId) =>
-          analyzeProfileInput({
+        async (sessionId) => {
+          bilibiliProfileSession.reset();
+          await analyzeProfileStream({
             rawInput: bilibiliProfileInput,
             sessionId
-          }),
+          }, (event) => {
+            bilibiliProfileSession.applyEvent(event);
+            bilibiliProfilePreview = bilibiliProfileSession.state.profileBatch;
+          });
+          const batch = bilibiliProfileSession.state.profileBatch;
+          if (!batch) {
+            throw new Error("主页读取没有返回可用结果。");
+          }
+          return batch;
+        },
         "正在读取 Bilibili 主页视频…",
         async (r) => {
           bilibiliProfilePreview = r;
@@ -932,7 +954,8 @@
         userAgent: format?.userAgent ?? null,
         audioDirectUrl: format?.audioDirectUrl ?? null,
         audioReferer: format?.audioReferer ?? null,
-        audioUserAgent: format?.audioUserAgent ?? null
+        audioUserAgent: format?.audioUserAgent ?? null,
+        imageUrls: format?.imageUrls ?? []
       });
 
       upsertTask(task);
@@ -1496,6 +1519,7 @@
             enqueuingLabel="下载中…"
             pasting={pastingDouyinProfile}
             preview={douyinProfilePreview}
+            itemStatusByAssetId={douyinProfileSession.state.statusByAssetId}
             selectedIds={douyinSelectedProfileIds}
             selectedFormatIdsByAssetId={douyinSelectedProfileFormatIds}
             showPrepareAction={false}
@@ -1566,6 +1590,7 @@
             pasting={pastingBilibiliProfile}
             placeholder={$t("bilibili.profilePlaceholder")}
             preview={bilibiliProfilePreview}
+            itemStatusByAssetId={bilibiliProfileSession.state.statusByAssetId}
             selectedIds={bilibiliSelectedProfileIds}
             selectedFormatIdsByAssetId={bilibiliSelectedProfileFormatIds}
             resultEyebrow="Creator Result"

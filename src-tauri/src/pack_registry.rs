@@ -14,12 +14,13 @@ pub struct SharedPack {
 
 const DOUYIN_MODULES: [&str; 2] = ["douyin-single", "douyin-profile"];
 const BILIBILI_MODULES: [&str; 2] = ["bilibili-single", "bilibili-profile"];
-const YOUTUBE_MODULES: [&str; 1] = ["youtube-single"];
+const YOUTUBE_MODULES: [&str; 2] = ["youtube-single", "youtube-profile"];
 const DOUYIN_SINGLE_DEPS: [&str; 1] = ["download-engine"];
 const DOUYIN_PROFILE_DEPS: [&str; 2] = ["browser-bridge", "download-engine"];
 const BILIBILI_SINGLE_DEPS: [&str; 2] = ["download-engine", "media-engine"];
 const BILIBILI_PROFILE_DEPS: [&str; 3] = ["browser-bridge", "download-engine", "media-engine"];
 const YOUTUBE_SINGLE_DEPS: [&str; 2] = ["download-engine", "media-engine"];
+const YOUTUBE_PROFILE_DEPS: [&str; 2] = ["download-engine", "media-engine"];
 const MEDIA_ENGINE_PACK: SharedPack = SharedPack { id: "media-engine" };
 const BROWSER_BRIDGE_PACK: SharedPack = SharedPack {
     id: "browser-bridge",
@@ -86,6 +87,7 @@ pub fn shared_dependencies_for_module(module_id: &str) -> &'static [&'static str
         "bilibili-single" => &BILIBILI_SINGLE_DEPS,
         "bilibili-profile" => &BILIBILI_PROFILE_DEPS,
         "youtube-single" => &YOUTUBE_SINGLE_DEPS,
+        "youtube-profile" => &YOUTUBE_PROFILE_DEPS,
         _ => &[],
     }
 }

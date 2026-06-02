@@ -7,6 +7,7 @@
     AuthState,
     DownloadContentSelection,
     ProfileBatch,
+    ProfileItemPatch,
     VideoAsset
   } from "../types";
   import {
@@ -22,6 +23,7 @@
   export let preview: ProfileBatch | null = null;
   export let selectedIds: string[] = [];
   export let selectedFormatIdsByAssetId: Record<string, string> = {};
+  export let itemStatusByAssetId: Record<string, ProfileItemPatch> = {};
   export let downloadOptions: DownloadContentSelection;
   export let downloadedAssetIds: string[] = [];
   export let authState: AuthState = "guest";
@@ -342,6 +344,35 @@
     return formatsForItem(item).length > 0;
   }
 
+  function statusLabel(kind: "thumbnail" | "format", status: string) {
+    if (kind === "thumbnail") {
+      return status === "ready"
+        ? $t("profile.status.thumbnailReady")
+        : status === "failed"
+          ? $t("profile.status.thumbnailFailed")
+          : $t("profile.status.thumbnailPending");
+    }
+
+    return status === "ready"
+      ? $t("profile.status.formatReady")
+      : status === "failed"
+        ? $t("profile.status.formatFailed")
+        : status === "loading"
+          ? $t("profile.status.formatLoading")
+          : $t("profile.status.formatPending");
+  }
+
+  function itemStatusLabels(item: VideoAsset) {
+    const patch = itemStatusByAssetId[item.assetId];
+    if (!patch) {
+      return [];
+    }
+    return [
+      statusLabel("thumbnail", patch.thumbnailStatus),
+      statusLabel("format", patch.formatStatus)
+    ];
+  }
+
   function normalized(value: string) {
     return value.trim().toLowerCase();
   }
@@ -599,6 +630,13 @@
                   </span>
                   {#if downloadedIdSet.has(item.assetId)}
                     <small>{$t("task.completed")}</small>
+                  {/if}
+                  {#if itemStatusLabels(item).length}
+                    <div class="profile-status-tags">
+                      {#each itemStatusLabels(item) as label}
+                        <span class="mini-tag subtle">{label}</span>
+                      {/each}
+                    </div>
                   {/if}
                 </div>
               </div>
