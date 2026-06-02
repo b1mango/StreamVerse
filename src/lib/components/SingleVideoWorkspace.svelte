@@ -83,6 +83,9 @@
 <section class="page-shell">
   <article class="panel page-hero">
     <div class="composer-copy">
+      {#if heroEyebrow}
+        <p class="section-label">{heroEyebrow}</p>
+      {/if}
       <h2>{heading}</h2>
       {#if description}
         <p class="lede">{description}</p>

@@ -531,7 +531,6 @@ fn human_browser_name(value: &str) -> &'static str {
         "chrome" => "Chrome",
         "edge" => "Edge",
         _ => "Custom",
-        _ => "Custom",
     }
 }
 

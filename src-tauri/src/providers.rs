@@ -212,15 +212,6 @@ fn preflight_auth(
     Ok(())
 }
 
-fn settings_platform_human_name(platform: &str) -> &'static str {
-    match platform {
-        "douyin" => "抖音",
-        "bilibili" => "Bilibili",
-        "youtube" => "YouTube",
-        _ => "当前平台",
-    }
-}
-
 fn extract_source_url(raw_input: &str, message: &str) -> Result<String, String> {
     parser::extract_first_url(raw_input.trim()).ok_or_else(|| message.to_string())
 }

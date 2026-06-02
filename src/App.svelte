@@ -254,6 +254,11 @@
     // Cancel any in-progress animation
     if (_scrollRafId) cancelAnimationFrame(_scrollRafId);
 
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      scrollElement.scrollTop = targetTop;
+      return;
+    }
+
     // Longer duration for larger distances, with a nice curve feel
     const duration = Math.min(300, Math.max(150, Math.abs(distance) * 0.2 + 100));
     const startTime = performance.now();
@@ -941,88 +946,86 @@
     }
   }
 
-  async function handleEnqueueDouyinProfileTasks() {
-    if (!douyinProfilePreview) {
+  async function enqueueProfileTasks({
+    preview,
+    selectedIds,
+    selectedFormatIdsByAssetId,
+    downloadOptions,
+    emptySelectionMessage,
+    setEnqueuing
+  }: {
+    preview: ProfileBatch | null;
+    selectedIds: string[];
+    selectedFormatIdsByAssetId: Record<string, string>;
+    downloadOptions: DownloadContentSelection;
+    emptySelectionMessage: string;
+    setEnqueuing: (value: boolean) => void;
+  }) {
+    if (!preview) {
       return;
     }
 
-    const items = douyinProfilePreview.items.filter((item) =>
-      douyinSelectedProfileIds.includes(item.assetId)
+    const items = preview.items.filter((item) =>
+      selectedIds.includes(item.assetId)
     );
 
     if (!items.length) {
-      errorMessage = "请至少勾选一个主页作品。";
+      errorMessage = emptySelectionMessage;
       return;
     }
 
-    if (!hasSelectedDownloadOptions(douyinProfileOptions)) {
+    if (!hasSelectedDownloadOptions(downloadOptions)) {
       errorMessage = "至少要选择一种要保存的内容。";
       return;
     }
 
-    enqueuingDouyinProfile = true;
+    setEnqueuing(true);
     clearNotices();
 
     try {
       const result = await createProfileDownloadTasks({
-        profileTitle: douyinProfilePreview.profileTitle,
-        sourceUrl: douyinProfilePreview.sourceUrl,
+        profileTitle: preview.profileTitle,
+        sourceUrl: preview.sourceUrl,
         items: items.map((asset) => ({
           asset,
-          selectedFormatId: douyinSelectedProfileFormatIds[asset.assetId] ?? null
+          selectedFormatId: selectedFormatIdsByAssetId[asset.assetId] ?? null
         })),
-        sessionCookieFile: douyinProfilePreview.sessionCookieFile ?? null,
+        sessionCookieFile: preview.sessionCookieFile ?? null,
         saveDirectoryOverride: resolvedTargetDirectory(),
-        downloadOptions: douyinProfileOptions
+        downloadOptions
       });
       successMessage = result.message;
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
-      enqueuingDouyinProfile = false;
+      setEnqueuing(false);
     }
   }
 
+  async function handleEnqueueDouyinProfileTasks() {
+    await enqueueProfileTasks({
+      preview: douyinProfilePreview,
+      selectedIds: douyinSelectedProfileIds,
+      selectedFormatIdsByAssetId: douyinSelectedProfileFormatIds,
+      downloadOptions: douyinProfileOptions,
+      emptySelectionMessage: "请至少勾选一个主页作品。",
+      setEnqueuing: (value) => {
+        enqueuingDouyinProfile = value;
+      }
+    });
+  }
+
   async function handleEnqueueBilibiliProfileTasks() {
-    if (!bilibiliProfilePreview) {
-      return;
-    }
-
-    const items = bilibiliProfilePreview.items.filter((item) =>
-      bilibiliSelectedProfileIds.includes(item.assetId)
-    );
-
-    if (!items.length) {
-      errorMessage = "请至少勾选一个 UP 主视频。";
-      return;
-    }
-
-    if (!hasSelectedDownloadOptions(bilibiliProfileOptions)) {
-      errorMessage = "至少要选择一种要保存的内容。";
-      return;
-    }
-
-    enqueuingBilibiliProfile = true;
-    clearNotices();
-
-    try {
-      const result = await createProfileDownloadTasks({
-        profileTitle: bilibiliProfilePreview.profileTitle,
-        sourceUrl: bilibiliProfilePreview.sourceUrl,
-        items: items.map((asset) => ({
-          asset,
-          selectedFormatId: bilibiliSelectedProfileFormatIds[asset.assetId] ?? null
-        })),
-        sessionCookieFile: bilibiliProfilePreview.sessionCookieFile ?? null,
-        saveDirectoryOverride: resolvedTargetDirectory(),
-        downloadOptions: bilibiliProfileOptions
-      });
-      successMessage = result.message;
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      enqueuingBilibiliProfile = false;
-    }
+    await enqueueProfileTasks({
+      preview: bilibiliProfilePreview,
+      selectedIds: bilibiliSelectedProfileIds,
+      selectedFormatIdsByAssetId: bilibiliSelectedProfileFormatIds,
+      downloadOptions: bilibiliProfileOptions,
+      emptySelectionMessage: "请至少勾选一个 UP 主视频。",
+      setEnqueuing: (value) => {
+        enqueuingBilibiliProfile = value;
+      }
+    });
   }
 
   async function handleTaskControl(

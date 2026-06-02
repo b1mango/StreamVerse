@@ -36,6 +36,7 @@
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.24), 0 4px 12px rgba(0, 0, 0, 0.16);
 
   /* Radius */
+  --radius-xl: 8px;
   --radius-lg: 8px;
   --radius-md: 6px;
   --radius-sm: 4px;

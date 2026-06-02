@@ -48,41 +48,20 @@
   let lastToggledIndex: number | null = null;
 
   let thumbnailCache: Record<string, string> = {};
-  let thumbnailLastPreviewId = "";
-  let thumbnailAbort: (() => void) | null = null;
+  let thumbnailPreviewKey = "";
+  let thumbnailLoadingIds = new Set<string>();
+  let visibleItemCount = 80;
+  let visibleListKey = "";
 
-  $: if (preview && preview.items.length > 0) {
-    const previewId = preview.items.map(i => i.assetId).join(",");
-    if (previewId !== thumbnailLastPreviewId) {
-      thumbnailLastPreviewId = previewId;
-      thumbnailCache = {};
-      if (thumbnailAbort) { thumbnailAbort(); thumbnailAbort = null; }
-
-      let cancelled = false;
-      thumbnailAbort = () => { cancelled = true; };
-
-      const queue = preview.items
-        .filter(item => item.coverUrl)
-        .map(item => ({ aid: item.assetId, url: item.coverUrl! }));
-
-      (async () => {
-        const batch = 6;
-        for (let i = 0; i < queue.length; i += batch) {
-          if (cancelled) return;
-          const chunk = queue.slice(i, i + batch);
-          await Promise.allSettled(
-            chunk.map(({ aid, url }) =>
-              fetchThumbnail(url).then((dataUri) => {
-                if (!cancelled) {
-                  thumbnailCache[aid] = dataUri;
-                  thumbnailCache = thumbnailCache;
-                }
-              })
-            )
-          );
-        }
-      })();
-    }
+  $: previewItemKey = preview ? preview.items.map((item) => item.assetId).join(",") : "";
+  $: if (previewItemKey !== thumbnailPreviewKey) {
+    thumbnailPreviewKey = previewItemKey;
+    thumbnailCache = {};
+    thumbnailLoadingIds = new Set();
+  }
+  $: if (`${previewItemKey}:${filterText}` !== visibleListKey) {
+    visibleListKey = `${previewItemKey}:${filterText}`;
+    visibleItemCount = 80;
   }
 
   const dispatch = createEventDispatcher<{
@@ -282,6 +261,59 @@
     stopDragSelection();
   });
 
+  async function loadThumbnail(item: VideoAsset) {
+    if (!item.coverUrl || thumbnailCache[item.assetId] || thumbnailLoadingIds.has(item.assetId)) {
+      return;
+    }
+
+    thumbnailLoadingIds.add(item.assetId);
+    try {
+      const dataUri = await fetchThumbnail(item.coverUrl);
+      thumbnailCache[item.assetId] = dataUri;
+      thumbnailCache = thumbnailCache;
+    } catch {
+      // Thumbnail loading is decorative; keep the placeholder on failures.
+    } finally {
+      thumbnailLoadingIds.delete(item.assetId);
+    }
+  }
+
+  function loadThumbnailOnVisible(node: HTMLElement, item: VideoAsset) {
+    let currentItem = item;
+    let visible = false;
+    let observer: IntersectionObserver | null = null;
+
+    const requestLoad = () => {
+      if (visible) {
+        void loadThumbnail(currentItem);
+      }
+    };
+
+    if ("IntersectionObserver" in window) {
+      observer = new IntersectionObserver(
+        (entries) => {
+          visible = entries.some((entry) => entry.isIntersecting);
+          requestLoad();
+        },
+        { rootMargin: "240px" }
+      );
+      observer.observe(node);
+    } else {
+      visible = true;
+      requestLoad();
+    }
+
+    return {
+      update(nextItem: VideoAsset) {
+        currentItem = nextItem;
+        requestLoad();
+      },
+      destroy() {
+        observer?.disconnect();
+      }
+    };
+  }
+
   $: dragRectStyle = dragActive
     ? `left:${Math.min(dragStartX, dragCurrentX)}px;top:${Math.min(dragStartY, dragCurrentY)}px;width:${Math.abs(dragCurrentX - dragStartX)}px;height:${Math.abs(dragCurrentY - dragStartY)}px`
     : "";
@@ -370,6 +402,7 @@
           .includes(query);
       })
     : [];
+  $: visibleItems = filteredItems.slice(0, visibleItemCount);
   $: categoryStats = preview ? summarizeCategories(preview.items) : [];
   $: analysisPercent = analysisProgress
     ? Math.max(6, Math.min(100, Math.round((analysisProgress.current / Math.max(analysisProgress.total, 1)) * 100)))
@@ -381,11 +414,18 @@
       ? `已读取 ${analysisProgress.current} / ${analysisProgress.total} 个${itemLabel}`
       : `已读取 ${analysisProgress.current} 个${itemLabel}，正在统计总数…`
     : "";
+
+  function showMoreItems() {
+    visibleItemCount = Math.min(filteredItems.length, visibleItemCount + 80);
+  }
 </script>
 
 <section class="page-shell">
   <article class="panel page-hero">
     <div class="composer-copy">
+      {#if heroEyebrow}
+        <p class="section-label">{heroEyebrow}</p>
+      {/if}
       <h2>{heading}</h2>
       {#if description}
         <p class="lede">{description}</p>
@@ -458,12 +498,30 @@
       </button>
     </div>
 
+    {#if analyzing && analysisProgress}
+      <div class="analysis-progress-card">
+        <div class="section-head compact">
+          <div>
+            <h3>{$t("single.analyzeProgress")}</h3>
+          </div>
+          <span class="chip subtle">{analysisCounterLabel}</span>
+        </div>
+        <div class="task-progress analysis-progress-bar">
+          <div class="task-progress-fill" style={`width: ${analysisPercent}%`}></div>
+        </div>
+        <p class="analysis-progress-copy">{analysisProgress.message}</p>
+      </div>
+    {/if}
+
   </article>
 
   {#if preview}
     <article class="panel profile-panel">
       <div class="section-head">
         <div>
+          {#if resultEyebrow}
+            <p class="section-label">{resultEyebrow}</p>
+          {/if}
           <h3>{preview.profileTitle}</h3>
         </div>
 
@@ -510,7 +568,7 @@
         {#if filteredItems.length === 0}
           <p class="empty-state">{$t("batch.noMatch")}{itemLabel}</p>
         {:else}
-          {#each filteredItems as item, index (item.assetId)}
+          {#each visibleItems as item, index (item.assetId)}
             {@const selected = selectedIdSet.has(item.assetId)}
             <div class:selected-row={selected} class="profile-row" data-asset-id={item.assetId}>
               <div class="profile-check">
@@ -525,26 +583,31 @@
               </div>
 
               <div class="profile-copy">
-                {#if thumbnailCache[item.assetId]}
-                  <img src={thumbnailCache[item.assetId]} alt={item.title} class="profile-thumb" />
-                {/if}
+                <div
+                  class="profile-thumb-frame"
+                  class:empty-thumb={!thumbnailCache[item.assetId]}
+                  use:loadThumbnailOnVisible={item}
+                >
+                  {#if thumbnailCache[item.assetId]}
+                    <img src={thumbnailCache[item.assetId]} alt={item.title} class="profile-thumb" loading="lazy" />
+                  {/if}
+                </div>
                 <div class="profile-text">
                   <strong>{item.title}</strong>
                   <span>
                     {itemMetaLine(item)}
-                    {#if downloadedIdSet.has(item.assetId)}
-                      <span class="mini-tag accent" style="margin-left: 6px; display: inline-flex; font-size: 0.72rem;">{$t("common.alreadyDownloaded")}</span>
-                    {/if}
                   </span>
+                  {#if downloadedIdSet.has(item.assetId)}
+                    <small>{$t("task.completed")}</small>
+                  {/if}
                 </div>
               </div>
 
               {#if downloadOptions.downloadVideo && hasFormats(item)}
                 <div class="profile-format-slot">
-                  <small>{$t("batch.formatLabel")}：{selectedFormat(item, selectedFormatIdsByAssetId[item.assetId] ?? currentFormatId(item), authState)?.label ?? pickPreferredFormat(item, "recommended", authState)?.label ?? tRaw("batch.awaitingSelection")}</small>
+                  <small>{$t("batch.formatLabel")}：{currentFormatLabel(item)}</small>
                   <select
                     class="compact-select"
-                    disabled={!selected}
                     value={currentFormatId(item)}
                     onchange={(event) =>
                       dispatch("formatChange", {
@@ -562,6 +625,11 @@
               {/if}
             </div>
           {/each}
+          {#if filteredItems.length > visibleItems.length}
+            <button class="secondary-button load-more-button" onclick={showMoreItems} type="button">
+              {$t("common.loadMore")} {visibleItems.length} / {filteredItems.length}
+            </button>
+          {/if}
         {/if}
       </div>
     </article>

@@ -2892,7 +2892,7 @@ fn ensure_chrome_cookie_unlock_plugin() {
         if fs::create_dir_all(&dir).is_err() {
             return;
         }
-        let _ = fs::write(&target, include_str!("chrome_cookie_unlock_plugin.py"));
+        let _ = fs::write(&target, include_str!("../chrome_cookie_unlock_plugin.py"));
     });
 }
 

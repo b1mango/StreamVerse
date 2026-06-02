@@ -1042,20 +1042,31 @@ fn set_module_enabled(
     Ok(modules)
 }
 
+fn run_module_pack_operation<F>(
+    state: &AppState,
+    operation: F,
+) -> Result<Vec<ModuleRuntimeState>, String>
+where
+    F: FnOnce(&mut settings::AppSettings) -> Result<(), String>,
+{
+    let mut working_settings = state.settings.lock().unwrap().clone();
+    operation(&mut working_settings)?;
+    pack_manager::refresh_installed_state(&mut working_settings);
+
+    let mut guard = state.settings.lock().unwrap();
+    guard.modules = working_settings.modules;
+    settings::save_settings(&guard)?;
+    Ok(build_module_runtime_states(&guard))
+}
+
 #[tauri::command]
 fn install_module_pack(
     module_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ModuleRuntimeState>, String> {
-    let modules = {
-        let mut guard = state.settings.lock().unwrap();
-        pack_manager::install_pack_for_module(&module_id, &mut guard)?;
-        pack_manager::refresh_installed_state(&mut guard);
-        settings::save_settings(&guard)?;
-        build_module_runtime_states(&guard)
-    };
-
-    Ok(modules)
+    run_module_pack_operation(&state, |settings| {
+        pack_manager::install_pack_for_module(&module_id, settings)
+    })
 }
 
 #[tauri::command]
@@ -1063,15 +1074,9 @@ fn uninstall_module_pack(
     module_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ModuleRuntimeState>, String> {
-    let modules = {
-        let mut guard = state.settings.lock().unwrap();
-        pack_manager::uninstall_pack_for_module(&module_id, &mut guard)?;
-        pack_manager::refresh_installed_state(&mut guard);
-        settings::save_settings(&guard)?;
-        build_module_runtime_states(&guard)
-    };
-
-    Ok(modules)
+    run_module_pack_operation(&state, |settings| {
+        pack_manager::uninstall_pack_for_module(&module_id, settings)
+    })
 }
 
 #[tauri::command]
@@ -1079,15 +1084,9 @@ fn update_module_pack(
     module_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ModuleRuntimeState>, String> {
-    let modules = {
-        let mut guard = state.settings.lock().unwrap();
-        pack_manager::update_pack_for_module(&module_id, &mut guard)?;
-        pack_manager::refresh_installed_state(&mut guard);
-        settings::save_settings(&guard)?;
-        build_module_runtime_states(&guard)
-    };
-
-    Ok(modules)
+    run_module_pack_operation(&state, |settings| {
+        pack_manager::update_pack_for_module(&module_id, settings)
+    })
 }
 
 #[tauri::command]
@@ -1159,7 +1158,7 @@ fn check_download_history(
 fn list_download_history(
     limit: Option<usize>,
     platform: Option<String>,
-    state: tauri::State<'_, AppState>,
+    _state: tauri::State<'_, AppState>,
 ) -> Vec<download_history::DownloadHistoryEntry> {
     download_history::list_history(limit.unwrap_or(100), platform)
 }
