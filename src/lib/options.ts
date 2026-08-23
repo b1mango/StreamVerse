@@ -3,7 +3,6 @@ import type { DownloadStatus, PlatformId, QualityPreference } from "./types";
 export const qualityOptions: Array<{ value: QualityPreference; label: string }> = [
   { value: "recommended", label: "推荐优先" },
   { value: "highest", label: "最高质量" },
-  { value: "no_watermark", label: "无水印优先" },
   { value: "smallest", label: "最小体积" }
 ];
 

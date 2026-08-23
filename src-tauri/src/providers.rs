@@ -190,7 +190,14 @@ fn preflight_auth(
     let _ = (platform, cookie_browser);
 
     if let Some(cookie_file) = cookie_file {
-        settings::validate_cookie_file_for_platform(cookie_file, platform)?;
+        // YouTube 公开内容可匿名解析：本地 Cookie 校验失败时仅降级为来宾继续，
+        // 由 yt-dlp 的服务端鉴权报错（bot 校验/403）驱动静默重取与重试，
+        // 避免本地状态问题直接阻断整个批量解析
+        if platform == "youtube" {
+            let _ = settings::validate_cookie_file_for_platform(cookie_file, platform);
+        } else {
+            settings::validate_cookie_file_for_platform(cookie_file, platform)?;
+        }
     }
 
     Ok(())

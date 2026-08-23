@@ -40,11 +40,8 @@ export function detectInputTarget(value: string): InputTarget | null {
   }
 
   if (input.includes("douyin.com") || input.includes("iesdouyin.com")) {
-    const mode = /\/user(?:\/|\?|$)/.test(input)
-      ? "profile"
-      : /\/(?:video|note)(?:\/|\?|$)/.test(input)
-        ? "single"
-        : "unknown";
+    // 抖音单视频只接受分享文案中的短链；网页地址仅支持创作者主页（/user/）
+    const mode = /\/user(?:\/|\?|$)/.test(input) ? "profile" : "unknown";
     return { platform: "douyin", mode };
   }
 
@@ -78,8 +75,12 @@ export function validateInputTarget(
   }
 
   if (target.mode === "unknown") {
-    const isDouyinShortLink = target.platform === "douyin" && /v\.douyin\.com\//i.test(value);
+    const isDouyinShortLink =
+      target.platform === "douyin" && (/v\.douyin\.com\//i.test(value) || /iesdouyin\.com\/share\//i.test(value));
     if (!isDouyinShortLink) {
+      if (target.platform === "douyin") {
+        return "抖音单视频请粘贴完整分享文案（含 v.douyin.com 短链）；解析主页可用 https://www.douyin.com/user/… 地址或主页分享文案。";
+      }
       return `这是${PLATFORM_LABELS[target.platform]}链接，但不是当前支持的作品或主页链接，请复制具体作品页或创作者主页地址。`;
     }
   }

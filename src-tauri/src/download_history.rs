@@ -17,6 +17,10 @@ pub struct DownloadHistoryEntry {
     pub platform: String,
     pub title: String,
     pub downloaded_at: String,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub output_path: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -51,7 +55,14 @@ impl DownloadHistory {
             .collect()
     }
 
-    pub fn record(&mut self, platform: &str, asset_id: &str, title: &str) {
+    pub fn record(
+        &mut self,
+        platform: &str,
+        asset_id: &str,
+        title: &str,
+        cover_url: Option<String>,
+        output_path: Option<String>,
+    ) {
         let key = history_key(platform, asset_id);
         if self.index.contains(&key) {
             return;
@@ -65,6 +76,8 @@ impl DownloadHistory {
                 platform: platform.to_string(),
                 title: title.to_string(),
                 downloaded_at: current_timestamp(),
+                cover_url,
+                output_path,
             },
         );
 
@@ -126,10 +139,16 @@ pub fn load_history_store() -> DownloadHistoryStore {
     store
 }
 
-pub fn record_download(platform: &str, asset_id: &str, title: &str) {
+pub fn record_download(
+    platform: &str,
+    asset_id: &str,
+    title: &str,
+    cover_url: Option<String>,
+    output_path: Option<String>,
+) {
     if let Some(store) = GLOBAL_HISTORY.get() {
         if let Ok(mut guard) = store.lock() {
-            guard.record(platform, asset_id, title);
+            guard.record(platform, asset_id, title, cover_url, output_path);
         }
     }
 }

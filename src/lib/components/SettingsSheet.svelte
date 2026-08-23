@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { Check, ChevronRight, FileText, FolderOpen, KeyRound, LoaderCircle, ShieldCheck, Trash2, X } from "@lucide/svelte";
+  import { Check, ChevronRight, Download, FileText, FolderOpen, Globe, Info, KeyRound, LoaderCircle, Palette, RefreshCw, ShieldCheck, Sparkles, Trash2, X } from "@lucide/svelte";
   import { platformMeta, qualityOptions } from "../options";
   import { t } from "../i18n";
   import { resolveErrorMessage } from "../media";
+  import { checkForUpdate, openExternalUrl } from "../backend";
+  import Select from "./Select.svelte";
   import type {
     BootstrapState,
     BrowserSource,
@@ -57,7 +59,29 @@
   let notifyOnComplete = $state(true);
   let theme = $state<BootstrapState["theme"]>("dark");
   let language = $state<BootstrapState["language"]>("zh-CN");
+  let section = $state<"auth" | "download" | "appearance" | "about">("auth");
   let initializedOpen = false;
+
+  const GITHUB_REPO = "https://github.com/b1mango/StreamVerse";
+  let updateStatus = $state<"idle" | "checking" | "latest" | "available" | "failed">("idle");
+  let updateLatest = $state("");
+  let updateUrl = $state(`${GITHUB_REPO}/releases`);
+
+  // 后端会 clamp 到 1–8，输入超界时提前给出提示
+  const concurrentOutOfRange = $derived(maxConcurrentDownloads > 8 || maxConcurrentDownloads < 1);
+
+  async function checkUpdate() {
+    if (updateStatus === "checking") return;
+    updateStatus = "checking";
+    try {
+      const result = await checkForUpdate();
+      updateLatest = result.latestVersion;
+      updateUrl = result.releaseUrl;
+      updateStatus = result.hasUpdate ? "available" : "latest";
+    } catch {
+      updateStatus = "failed";
+    }
+  }
 
   $effect(() => {
     if (open && !initializedOpen) {
@@ -120,7 +144,7 @@
       downloadMode: "manual",
       qualityPreference,
       autoRevealInFinder,
-      maxConcurrentDownloads,
+      maxConcurrentDownloads: Math.min(8, Math.max(1, Math.round(maxConcurrentDownloads) || 1)),
       proxyUrl: proxyUrl.trim() || null,
       speedLimit: speedLimit.trim() || null,
       autoUpdate: bootstrap.autoUpdate,
@@ -160,77 +184,112 @@
 
 {#if open}
   <button class="sheet-backdrop" type="button" aria-label={$t("settings.close")} onclick={onClose}></button>
-  <div class="settings-sheet" role="dialog" aria-label={$t("app.settings")} aria-modal="true">
-    <header class="sheet-header">
-      <div><span class="eyebrow">CONTROL SURFACE</span><h2>{$t("app.settings")}</h2></div>
-      <button class="icon-button" type="button" title={$t("settings.close")} aria-label={$t("settings.close")} onclick={onClose}><X size={19} /></button>
-    </header>
+  <div class="settings-dialog" role="dialog" aria-label={$t("app.settings")} aria-modal="true">
+    <aside class="settings-nav">
+      <div class="settings-nav-head"><span class="eyebrow">{$t("settings.title")}</span></div>
+      <button class:active={section === "auth"} type="button" onclick={() => (section = "auth")}><KeyRound size={16} />{$t("settings.platformAuth")}</button>
+      <button class:active={section === "download"} type="button" onclick={() => (section = "download")}><Download size={16} />{$t("common.download")}</button>
+      <button class:active={section === "appearance"} type="button" onclick={() => (section = "appearance")}><Palette size={16} />{$t("settings.appearance")}</button>
+      <button class:active={section === "about"} type="button" onclick={() => (section = "about")}><Info size={16} />{$t("settings.about")}</button>
+    </aside>
 
-    <div class="settings-scroll">
-      <section class="settings-section">
-        <div class="section-title"><KeyRound size={17} /><div><h3>{$t("settings.platformAuth")}</h3><p>{$t("settings.authStorage")}</p></div></div>
-        <div class="platform-tabs" role="tablist" aria-label="认证平台">
-          {#each Object.keys(platformMeta) as id}
-            <button class:active={platform === id} type="button" role="tab" aria-selected={platform === id} onclick={() => { platform = id as PlatformId; authMessage = ""; authError = false; }}>{platformMeta[id as PlatformId].label}</button>
-          {/each}
-        </div>
+    <div class="settings-body">
+      <header class="settings-body-head">
+        <h2>{{ auth: $t("settings.platformAuth"), download: $t("common.download"), appearance: $t("settings.appearance"), about: $t("settings.about") }[section]}</h2>
+        <button class="icon-button" type="button" title={$t("settings.close")} aria-label={$t("settings.close")} onclick={onClose}><X size={18} /></button>
+      </header>
 
-        <div class="auth-status-line">
-          <span class:active={bootstrap.platformAuth[platform].status === "active"}></span>
-          <strong>{bootstrap.platformAuth[platform].status === "active" ? $t("auth.active") : $t("auth.guest")}</strong>
-          {#if bootstrap.platformAuth[platform].browserId}<small>{bootstrap.platformAuth[platform].browserId}</small>{/if}
-          {#if bootstrap.platformAuth[platform].status === "active"}
-            <button class="icon-button" type="button" title={$t("settings.clearAuth")} aria-label={$t("settings.clearAuth")} onclick={() => onClearAuth(platform)}><Trash2 size={15} /></button>
-          {/if}
-        </div>
+      <div class="settings-scroll">
+        {#if section === "auth"}
+          <section class="settings-section">
+            <div class="platform-tabs" role="tablist" aria-label="认证平台">
+              {#each Object.keys(platformMeta) as id}
+                <button class:active={platform === id} type="button" role="tab" aria-selected={platform === id} onclick={() => { platform = id as PlatformId; authMessage = ""; authError = false; }}>{platformMeta[id as PlatformId].label}</button>
+              {/each}
+            </div>
 
-        <label>{$t("settings.browserSource")}
-          <select bind:value={browserId} onchange={() => { profileId = selectedBrowser()?.profiles.find((profile) => profile.isDefault)?.id ?? selectedBrowser()?.profiles[0]?.id ?? ""; }}>
-            {#each browserSources as source}<option value={source.id}>{source.label}{source.isDefault ? " · 默认" : ""}</option>{/each}
-          </select>
-        </label>
-        <label>Profile
-          <select bind:value={profileId}>
-            {#each selectedBrowser()?.profiles ?? [] as profile}<option value={profile.id}>{profile.label}{profile.isDefault ? " · 推荐" : ""}</option>{/each}
-          </select>
-        </label>
-        <button class="primary-button" type="button" disabled={!browserId || busy} onclick={() => (consentOpen = true)}><ShieldCheck size={17} />{$t("settings.detectCookie")}</button>
+            <div class="auth-status-line">
+              <span class:active={bootstrap.platformAuth[platform].status === "active"}></span>
+              <strong>{bootstrap.platformAuth[platform].status === "active" ? $t("auth.active") : $t("auth.guest")}</strong>
+              {#if bootstrap.platformAuth[platform].browserId}<small>{bootstrap.platformAuth[platform].browserId}</small>{/if}
+              {#if bootstrap.platformAuth[platform].status === "active"}
+                <button class="icon-button" type="button" title={$t("settings.clearAuth")} aria-label={$t("settings.clearAuth")} onclick={() => onClearAuth(platform)}><Trash2 size={15} /></button>
+              {/if}
+            </div>
 
-        <div class="manual-auth">
-          <label>{$t("settings.cookieTextLabel")} / cookies.txt
-            <textarea bind:value={manualCookie} rows="4" spellcheck="false" placeholder={$t("settings.cookieTextPlaceholder")}></textarea>
-          </label>
-          <div class="manual-auth-actions">
-            <button class="quiet-button" type="button" disabled={busy} onclick={importCookieFile}><FileText size={16} />{$t("settings.importCookieFile")}</button>
-            <button class="quiet-button" type="button" disabled={!manualCookie.trim() || busy} onclick={saveManual}><Check size={16} />{$t("settings.saveCookieText")}</button>
-          </div>
-        </div>
-        {#if authMessage}<p class:error={authError} class="inline-message" aria-live="polite">{authMessage}</p>{/if}
-      </section>
+            <h3 class="auth-group-title">{$t("settings.autoFetch")}</h3>
+            <label>{$t("settings.browserSource")}
+              <Select value={browserId} options={browserSources.map((source) => ({ value: source.id, label: `${source.label}${source.isDefault ? " · 默认" : ""}` }))} onChange={(next) => { browserId = next; profileId = selectedBrowser()?.profiles.find((profile) => profile.isDefault)?.id ?? selectedBrowser()?.profiles[0]?.id ?? ""; }} />
+            </label>
+            <label>Profile
+              <Select value={profileId} options={(selectedBrowser()?.profiles ?? []).map((profile) => ({ value: profile.id, label: `${profile.label}${profile.isDefault ? " · 推荐" : ""}` }))} onChange={(next) => (profileId = next)} />
+            </label>
+            <button class="primary-button" type="button" disabled={!browserId || busy} onclick={() => (consentOpen = true)}><ShieldCheck size={17} />{$t("settings.detectCookie")}</button>
 
-      <section class="settings-section">
-        <div class="section-title"><FolderOpen size={17} /><div><h3>{$t("common.download")}</h3><p>{$t("settings.downloadControls")}</p></div></div>
-        <label>{$t("settings.downloadPath")}
-          <div class="input-action"><input bind:value={saveDirectory} /><button class="icon-button" type="button" title={$t("settings.pickDirectory")} aria-label={$t("settings.pickDirectory")} onclick={async () => { const path = await onPickDirectory(); if (path) saveDirectory = path; }}><FolderOpen size={16} /></button></div>
-        </label>
-        <div class="two-columns">
-          <label>{$t("settings.qualityStrategy")}<select bind:value={qualityPreference}>{#each qualityOptions as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-          <label>{$t("settings.maxConcurrent")}<input type="number" min="1" max="8" bind:value={maxConcurrentDownloads} /></label>
-        </div>
-        <div class="two-columns">
-          <label>{$t("settings.proxy")}<input bind:value={proxyUrl} placeholder="http://127.0.0.1:7890" /></label>
-          <label>{$t("settings.speedLimit")}<input bind:value={speedLimit} placeholder="8M" /></label>
-        </div>
-        <label class="toggle-line"><input type="checkbox" bind:checked={autoRevealInFinder} /><span>{$t("settings.autoReveal")}</span></label>
-        <label class="toggle-line"><input type="checkbox" bind:checked={notifyOnComplete} /><span>{$t("settings.notifyOnComplete")}</span></label>
-      </section>
+            <div class="manual-auth">
+              <h3 class="auth-group-title">{$t("settings.manualFetch")}</h3>
+              <label>{$t("settings.cookieTextLabel")} / cookies.txt
+                <textarea bind:value={manualCookie} rows="4" spellcheck="false" placeholder={$t("settings.cookieTextPlaceholder")}></textarea>
+              </label>
+              <div class="manual-auth-actions">
+                <button class="quiet-button" type="button" disabled={busy} onclick={importCookieFile}><FileText size={16} />{$t("settings.importCookieFile")}</button>
+                <button class="quiet-button" type="button" disabled={!manualCookie.trim() || busy} onclick={saveManual}><Check size={16} />{$t("settings.saveCookieText")}</button>
+              </div>
+            </div>
+            {#if authMessage}<p class:error={authError} class="inline-message" aria-live="polite">{authMessage}</p>{/if}
+          </section>
+        {:else if section === "download"}
+          <section class="settings-section">
+            <p class="section-desc">{$t("settings.downloadControls")}</p>
+            <label>{$t("settings.downloadPath")}
+              <div class="input-action"><input bind:value={saveDirectory} /><button class="icon-button" type="button" title={$t("settings.pickDirectory")} aria-label={$t("settings.pickDirectory")} onclick={async () => { const path = await onPickDirectory(); if (path) saveDirectory = path; }}><FolderOpen size={16} /></button></div>
+            </label>
+            <div class="two-columns">
+              <label>{$t("settings.qualityStrategy")}<Select value={qualityPreference} options={qualityOptions} onChange={(next) => (qualityPreference = next as BootstrapState["qualityPreference"])} /></label>
+              <label>{$t("settings.maxConcurrent")}<input type="number" min="1" max="8" bind:value={maxConcurrentDownloads} /></label>
+            </div>
+            {#if concurrentOutOfRange}<p class="inline-message error" role="alert">{$t("settings.maxConcurrentHint")}</p>{/if}
+            <div class="two-columns">
+              <label>{$t("settings.proxy")}<input bind:value={proxyUrl} placeholder="http://127.0.0.1:7890" /></label>
+              <label>{$t("settings.speedLimit")}<input bind:value={speedLimit} placeholder="8M" /></label>
+            </div>
+            <label class="toggle-line"><input type="checkbox" bind:checked={autoRevealInFinder} /><span>{$t("settings.autoReveal")}</span></label>
+            <label class="toggle-line"><input type="checkbox" bind:checked={notifyOnComplete} /><span>{$t("settings.notifyOnComplete")}</span></label>
+          </section>
+        {:else if section === "appearance"}
+          <section class="settings-section compact-settings">
+            <label>{$t("settings.theme")}<Select value={theme} options={[{ value: "dark", label: $t("theme.dark") }, { value: "light", label: $t("theme.light") }]} onChange={(next) => (theme = next as BootstrapState["theme"])} /></label>
+            <label>{$t("settings.language")}<Select value={language} options={[{ value: "zh-CN", label: "简体中文" }, { value: "en", label: "English" }]} onChange={(next) => (language = next as BootstrapState["language"])} /></label>
+          </section>
+        {:else}
+          <section class="settings-section">
+            <div class="about-card">
+              <span class="about-logo"><Sparkles size={19} /></span>
+              <div class="about-name"><strong>StreamVerse</strong><span>v{bootstrap.version}</span></div>
+            </div>
+            <div class="about-row">
+              <span>{$t("settings.repository")}</span>
+              <button class="link-button" type="button" onclick={() => void openExternalUrl(GITHUB_REPO).catch(() => undefined)}><Globe size={13} style="vertical-align: -2px;" /> github.com/b1mango/StreamVerse</button>
+            </div>
+            <div class="about-row">
+              <span>{$t("settings.version")} v{bootstrap.version}</span>
+              <button class="quiet-button" type="button" disabled={updateStatus === "checking"} onclick={checkUpdate}>{#if updateStatus === "checking"}<LoaderCircle class="spin" size={15} />{$t("settings.checkingUpdate")}{:else}<RefreshCw size={15} />{$t("settings.checkUpdate")}{/if}</button>
+            </div>
+            {#if updateStatus !== "idle" && updateStatus !== "checking"}
+              <p class="update-status" class:error={updateStatus === "failed"} role="status">
+                {#if updateStatus === "latest"}{$t("settings.updateLatest")}（v{updateLatest}）
+                {:else if updateStatus === "available"}{$t("settings.updateAvailable")}：v{updateLatest} <button class="link-button" type="button" onclick={() => void openExternalUrl(updateUrl).catch(() => undefined)}>{$t("settings.viewRelease")}</button>
+                {:else}{$t("settings.updateFailed")}{/if}
+              </p>
+            {/if}
+          </section>
+        {/if}
+      </div>
 
-      <section class="settings-section compact-settings">
-        <label>{$t("settings.theme")}<select bind:value={theme}><option value="dark">Dark</option><option value="light">Light</option></select></label>
-        <label>{$t("settings.language")}<select bind:value={language}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
-      </section>
+      {#if section !== "about"}
+        <footer class="sheet-footer"><button class="primary-button" type="button" disabled={busy} onclick={submitSettings}>{#if busy}<LoaderCircle class="spin" size={17} />{:else}<Check size={17} />{/if}{$t("settings.save")}</button></footer>
+      {/if}
     </div>
-    <footer class="sheet-footer"><button class="primary-button" type="button" disabled={busy} onclick={submitSettings}>{#if busy}<LoaderCircle class="spin" size={17} />{:else}<Check size={17} />{/if}{$t("settings.save")}</button></footer>
   </div>
 
   {#if consentOpen}

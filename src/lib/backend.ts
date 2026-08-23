@@ -15,6 +15,7 @@ import type {
   SaveSettingsPayload,
   SettingsProfile,
   TaskEvent,
+  UpdateCheckResult,
   VideoAsset
 } from "./types";
 
@@ -24,6 +25,11 @@ declare global {
 
 export function hasTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+}
+
+/** Windows 桌面端使用无边框窗口 + 自绘标题栏；macOS 保留原生窗框，浏览器预览不启用 */
+export function isFramelessWindows() {
+  return hasTauriRuntime() && typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
 }
 
 function desktopRuntimeRequired(): never {
@@ -181,4 +187,12 @@ export async function openInFileManager(path: string, revealParent = false): Pro
 
 export async function listDownloadHistory(limit = 100, platform?: PlatformId): Promise<DownloadHistoryEntry[]> {
   return hasTauriRuntime() ? invoke("list_download_history", { limit, platform }) : [];
+}
+
+export async function checkForUpdate(): Promise<UpdateCheckResult> {
+  return hasTauriRuntime() ? invoke("check_for_update") : desktopRuntimeRequired();
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  return hasTauriRuntime() ? invoke("open_external_url", { url }) : desktopRuntimeRequired();
 }

@@ -2,10 +2,13 @@
   import { onMount } from "svelte";
   import {
     Check,
+    CheckCircle2,
+    CircleAlert,
     ClipboardPaste,
     Download,
     FolderOpen,
     History,
+    Link2,
     ListVideo,
     LoaderCircle,
     Menu,
@@ -13,19 +16,20 @@
     PanelRightOpen,
     Search,
     Settings,
-    SlidersHorizontal,
-    Sparkles,
     SquareStack,
-    Trash2
+    Trash2,
+    X
   } from "@lucide/svelte";
+  import appIconUrl from "../src-tauri/icons/icon.png";
   import AnalysisProgress from "./lib/components/AnalysisProgress.svelte";
   import BatchList from "./lib/components/BatchList.svelte";
   import ContentOptions from "./lib/components/ContentOptions.svelte";
   import PlatformIcon from "./lib/components/PlatformIcon.svelte";
   import SettingsSheet from "./lib/components/SettingsSheet.svelte";
-  import SignalField from "./lib/components/SignalField.svelte";
   import SingleFormatList from "./lib/components/SingleFormatList.svelte";
   import TaskPanel from "./lib/components/TaskPanel.svelte";
+  import Thumb from "./lib/components/Thumb.svelte";
+  import TitleBar from "./lib/components/TitleBar.svelte";
   import {
     analyzeBatchItem,
     analyzeInput,
@@ -40,6 +44,7 @@
     getAnalysisProgress,
     getBootstrapState,
     importBrowserCookies,
+    isFramelessWindows,
     listBrowserSources,
     listDownloadHistory,
     openInFileManager,
@@ -77,7 +82,7 @@
   let analyzing = $state(false);
   let analysisProgress = $state<AnalysisProgressState | null>(null);
   let operationBusy = $state(false);
-  let notice = $state("");
+  let toasts = $state<{ id: number; kind: "success" | "error"; text: string }[]>([]);
   let errorMessage = $state("");
   let preview = $state<VideoAsset | null>(null);
   let previewCoverUrl = $state<string | null>(null);
@@ -95,6 +100,24 @@
   let history = $state<DownloadHistoryEntry[]>([]);
   let historyLoading = $state(false);
   let analysisGeneration = 0;
+  // YouTube 清晰度补全用独立的代际与登记表：切换模式不打断，重新解析/切平台才中止
+  let hydrationGeneration = 0;
+  const youtubeHydrations = new Map<string, Promise<number>>();
+
+  // 每个模式一份解析结果快照：切换 单视频/主页/合集 时不丢弃已解析内容
+  type WorkspaceSnapshot = {
+    rawInput: string;
+    preview: VideoAsset | null;
+    previewCoverUrl: string | null;
+    previewCoverFailed: boolean;
+    profile: ProfileBatch | null;
+    selectedFormatId: string;
+    formatsExpanded: boolean;
+    selectedProfileIds: Set<string>;
+    selectedProfileFormats: Record<string, string>;
+    lastSelectionIndex: number | null;
+  };
+  const workspaceSnapshots = new Map<WorkflowMode, WorkspaceSnapshot>();
 
   let authStatus = $derived(bootstrap?.platformAuth[platform]?.status ?? "guest");
   let previewFormats = $derived(visibleFormats(preview, authStatus));
@@ -107,6 +130,28 @@
   );
   let selectedCount = $derived(selectedProfileIds.size);
   let activeTaskCount = $derived(bootstrap?.tasks.filter((task) => ["queued", "downloading", "paused"].includes(task.status)).length ?? 0);
+
+  let toastSequence = 0;
+
+  function pushToast(kind: "success" | "error", text: string) {
+    const id = ++toastSequence;
+    // toast 文案统一去掉结尾句号，保持轻量
+    const message = text.replace(/[。.!！]+$/u, "").trim();
+    toasts = [...toasts.slice(-2), { id, kind, text: message }];
+    window.setTimeout(() => {
+      toasts = toasts.filter((toast) => toast.id !== id);
+    }, 4600);
+  }
+
+  function dismissToast(id: number) {
+    toasts = toasts.filter((toast) => toast.id !== id);
+  }
+
+  function formatHistoryTime(value: string) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) return value;
+    return new Date(seconds * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
@@ -141,17 +186,63 @@
     if (next === platform) return;
     platform = next;
     if (next !== "youtube" && workflowMode === "playlist") workflowMode = "single";
+    workspaceSnapshots.clear();
     resetWorkspace();
   }
 
   function selectWorkflowMode(next: WorkflowMode) {
     if (next === workflowMode) return;
+    workspaceSnapshots.set(workflowMode, {
+      rawInput,
+      preview,
+      previewCoverUrl,
+      previewCoverFailed,
+      profile,
+      selectedFormatId,
+      formatsExpanded,
+      selectedProfileIds,
+      selectedProfileFormats,
+      lastSelectionIndex
+    });
     workflowMode = next;
-    resetWorkspace();
+    const snapshot = workspaceSnapshots.get(next);
+    analysisGeneration += 1;
+    analysisProgress = null;
+    errorMessage = "";
+    if (snapshot) {
+      rawInput = snapshot.rawInput;
+      preview = snapshot.preview;
+      previewCoverUrl = snapshot.previewCoverUrl;
+      previewCoverFailed = snapshot.previewCoverFailed;
+      profile = snapshot.profile;
+      selectedFormatId = snapshot.selectedFormatId;
+      formatsExpanded = snapshot.formatsExpanded;
+      selectedProfileIds = snapshot.selectedProfileIds;
+      selectedProfileFormats = snapshot.selectedProfileFormats;
+      lastSelectionIndex = snapshot.lastSelectionIndex;
+      // YouTube 清晰度补全在后台持续进行；若会话已结束且有残留待读条目，则补齐
+      if (profile && profile.items.some((item) => item.formatStatus === "pending")) {
+        const batch = profile;
+        void hydrateYouTubeBatchFormats(batch, next).catch(() => 0);
+      }
+    } else {
+      rawInput = "";
+      preview = null;
+      previewCoverUrl = null;
+      previewCoverFailed = false;
+      profile = null;
+      selectedProfileIds = new Set();
+      selectedProfileFormats = {};
+      selectedFormatId = "";
+      formatsExpanded = false;
+      lastSelectionIndex = null;
+    }
   }
 
   function resetWorkspace() {
     analysisGeneration += 1;
+    hydrationGeneration += 1;
+    youtubeHydrations.clear();
     rawInput = "";
     preview = null;
     previewCoverUrl = null;
@@ -163,7 +254,6 @@
     formatsExpanded = false;
     analysisProgress = null;
     errorMessage = "";
-    notice = "";
   }
 
   function startProgressPolling(sessionId: string) {
@@ -251,70 +341,121 @@
     }
     if (preview?.assetId === asset.assetId && preview.sourceUrl === asset.sourceUrl) {
       previewCoverFailed = true;
-      notice = `作品已解析，但缩略图加载失败：${lastError}`;
+      pushToast("error", `作品已解析，但缩略图加载失败：${lastError}`);
     }
   }
 
-  async function hydrateYouTubeBatchFormats(batch: ProfileBatch, generation: number) {
-    const pendingItems = batch.items.map((item) => ({ ...item, formatStatus: "pending" as const }));
-    if (generation !== analysisGeneration) return 0;
+  function hydrateYouTubeBatchFormats(batch: ProfileBatch, ownerMode: WorkflowMode): Promise<number> {
+    // 同一批次只跑一个补全会话：切走时会话在后台继续，切回后直接加入进行中的会话
+    const key = (batch.hydrationKey ??= crypto.randomUUID());
+    const existing = youtubeHydrations.get(key);
+    if (existing) return existing;
+    const session = runYouTubeBatchHydration(batch, ownerMode, key).catch(() => 0);
+    youtubeHydrations.set(key, session);
+    void session.then(() => youtubeHydrations.delete(key));
+    return session;
+  }
 
-    profile = { ...batch, items: pendingItems };
-    selectedProfileFormats = {};
-    analysisProgress = {
-      current: 0,
-      total: pendingItems.length,
-      message: `正在读取真实清晰度（0/${pendingItems.length}）…`
-    };
+  async function runYouTubeBatchHydration(batch: ProfileBatch, ownerMode: WorkflowMode, key: string): Promise<number> {
+    const generation = ++hydrationGeneration;
+    // 已加载的条目保持原样（恢复或加入会话时避免重复请求）
+    const pendingItems = batch.items.map((item) =>
+      item.formatStatus === "loaded" ? item : { ...item, formatStatus: "pending" as const }
+    );
+    let wrapper: ProfileBatch = { ...batch, items: pendingItems };
+    profile = wrapper;
 
     let cursor = 0;
     let completed = 0;
     let failed = 0;
+    let orphaned = false;
+
+    // 进度条与文案均显示真实完成数；条目被拾取时同样触发刷新，
+    // 不会卡在（0/N）等待首个 yt-dlp 进程返回
+    const reportProgress = () => {
+      if (profile?.hydrationKey !== key) return;
+      analysisProgress = {
+        current: completed,
+        total: pendingItems.length,
+        message: `正在读取真实清晰度（已完成 ${completed}/${pendingItems.length}）…`
+      };
+    };
+    reportProgress();
+
+    // 把结果提交到用户能看到的地方：仍停留在该模式则更新实时 profile，
+    // 否则写入该模式的快照，切回时即可看到最新进度；两处都不再有该批次则中止
+    const commit = (index: number, nextItem: VideoAsset) => {
+      pendingItems[index] = nextItem;
+      const nextWrapper: ProfileBatch = { ...wrapper, items: pendingItems };
+      const visibleNow = profile?.hydrationKey === key;
+      if (visibleNow) {
+        profile = nextWrapper;
+      } else {
+        const snapshot = workspaceSnapshots.get(ownerMode);
+        if (snapshot?.profile?.hydrationKey === key) {
+          snapshot.profile = nextWrapper;
+        } else {
+          orphaned = true;
+        }
+      }
+      wrapper = nextWrapper;
+      const formats = visibleFormats(nextItem, "active");
+      const selected = formats.find((format) => format.recommended)?.id ?? formats[0]?.id;
+      if (selected && !selectedProfileFormats[nextItem.assetId]) {
+        selectedProfileFormats = { ...selectedProfileFormats, [nextItem.assetId]: selected };
+      }
+      reportProgress();
+    };
+
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // 单条目带退避重试：限流/网络抖动等瞬时错误不再直接判死刑
+    const resolveItem = async (item: VideoAsset): Promise<VideoAsset> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (generation !== hydrationGeneration || orphaned) break;
+        if (attempt > 0) await sleep(900 * attempt + Math.random() * 600);
+        try {
+          const resolved = await analyzeBatchItem(item.sourceUrl);
+          if (resolved.formats.length > 0) {
+            return {
+              ...item,
+              ...resolved,
+              categoryLabel: item.categoryLabel,
+              groupTitle: item.groupTitle,
+              formatStatus: "loaded" as const
+            };
+          }
+        } catch {
+          // 进入下一次重试
+        }
+      }
+      return { ...item, formatStatus: "failed" as const };
+    };
+
     const worker = async () => {
-      while (generation === analysisGeneration) {
+      while (generation === hydrationGeneration && !orphaned) {
         const index = cursor;
         cursor += 1;
         const item = pendingItems[index];
         if (!item) return;
 
-        let nextItem: VideoAsset;
-        try {
-          const resolved = await analyzeBatchItem(item.sourceUrl);
-          const loaded = resolved.formats.length > 0;
-          if (!loaded) failed += 1;
-          nextItem = {
-            ...item,
-            ...resolved,
-            categoryLabel: item.categoryLabel,
-            groupTitle: item.groupTitle,
-            formatStatus: loaded ? "loaded" : "failed"
-          };
-        } catch {
-          failed += 1;
-          nextItem = { ...item, formatStatus: "failed" };
-        }
-
-        if (generation !== analysisGeneration || !profile) return;
+        const nextItem = await resolveItem(item);
+        if (generation !== hydrationGeneration) return;
         completed += 1;
-        profile = {
-          ...profile,
-          items: profile.items.map((candidate, candidateIndex) => candidateIndex === index ? nextItem : candidate)
-        };
-        const formats = visibleFormats(nextItem, "active");
-        const selected = formats.find((format) => format.recommended)?.id ?? formats[0]?.id;
-        if (selected) {
-          selectedProfileFormats = { ...selectedProfileFormats, [nextItem.assetId]: selected };
-        }
-        analysisProgress = {
-          current: completed,
-          total: pendingItems.length,
-          message: `正在读取真实清晰度（${completed}/${pendingItems.length}）…`
-        };
+        if (nextItem.formatStatus === "failed") failed += 1;
+        commit(index, nextItem);
       }
     };
 
-    const workers = Math.min(4, pendingItems.length);
-    await Promise.all(Array.from({ length: workers }, worker));
+    const workers = Math.min(8, pendingItems.length);
+    // 错开启动工人，削掉瞬时并发峰值，降低触发 YouTube 限流的概率
+    await Promise.all(Array.from({ length: workers }, (_, i) => sleep(i * 160).then(worker)));
+    if (generation === hydrationGeneration) {
+      if (profile?.hydrationKey === key) analysisProgress = null;
+      if (failed > 0) {
+        pushToast("error", `${batch.items.length - failed} 个视频已读取真实清晰度，${failed} 个读取失败，可重新解析后再试。`);
+      }
+    }
     return failed;
   }
 
@@ -323,7 +464,6 @@
     const validationError = validateInputTarget(rawInput, platform, workflowMode);
     if (validationError) {
       errorMessage = validationError;
-      notice = "";
       return;
     }
 
@@ -341,7 +481,6 @@
           : "正在解析作品链接…"
     };
     errorMessage = "";
-    notice = "";
     try {
       if (workflowMode === "single") {
         const asset = await analyzeInput(rawInput.trim(), sessionId);
@@ -360,10 +499,8 @@
         selectedProfileIds = new Set();
         if (batch.items[0]?.platform === "youtube") {
           stopProgressPolling();
-          const failed = await hydrateYouTubeBatchFormats(batch, generation);
-          if (generation === analysisGeneration && failed > 0) {
-            notice = `${batch.items.length - failed} 个视频已读取真实清晰度，${failed} 个读取失败，可重新解析后再试。`;
-          }
+          // 清晰度补全在后台持续进行：切换模式不中断，analyze 也不等待它完成
+          void hydrateYouTubeBatchFormats(batch, workflowMode);
         } else {
           profile = batch;
           selectedProfileFormats = Object.fromEntries(batch.items.map((item) => {
@@ -377,7 +514,9 @@
     } finally {
       stopProgressPolling();
       await clearAnalysisProgress(sessionId).catch(() => undefined);
-      analysisProgress = null;
+      // YouTube 批量清晰度补全仍在后台进行时，保留它的进度展示
+      const hydrating = profile?.items.some((item) => item.formatStatus === "pending") ?? false;
+      if (!hydrating) analysisProgress = null;
       analyzing = false;
     }
   }
@@ -411,7 +550,7 @@
         audioUserAgent: format?.audioUserAgent
       });
       applyTaskEvent({ type: "upsert", task });
-      notice = "任务已加入队列。";
+      pushToast("success", $t("single.taskCreated"));
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
@@ -433,7 +572,7 @@
         saveDirectoryOverride: bootstrap.saveDirectory,
         downloadOptions
       });
-      notice = result.message;
+      pushToast("success", result.message);
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
@@ -522,13 +661,13 @@
   }
 </script>
 
-<svelte:head><meta name="theme-color" content="#101113" /></svelte:head>
+<svelte:head><meta name="theme-color" content="#1f1f20" /></svelte:head>
 
 <svelte:boundary onerror={(error) => (errorMessage = resolveErrorMessage(error))}>
-  <div class="app-shell" data-platform={platform}>
-    <SignalField paused={settingsOpen} />
+  <div class="app-shell" class:has-titlebar={isFramelessWindows()} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>
+    <TitleBar />
     <aside class="nav-rail" aria-label={$t("app.mainNavigation")}>
-      <button class="brand-mark" type="button" title="StreamVerse" aria-label={`StreamVerse ${$t("workspace.title")}`} onclick={() => (view = "download")}><Sparkles size={21} /></button>
+      <button class="brand-mark" type="button" title="StreamVerse" aria-label={`StreamVerse ${$t("workspace.title")}`} onclick={() => (view = "download")}><img class="brand-icon" src={appIconUrl} alt="" /></button>
       <nav>
         <button class:active={view === "download"} class="rail-button" type="button" title={$t("common.download")} aria-label={$t("common.download")} onclick={() => (view = "download")}><Download size={19} /></button>
         <button class:active={view === "history"} class="rail-button" type="button" title={$t("history.title")} aria-label={$t("history.title")} onclick={loadHistory}><History size={19} /></button>
@@ -538,18 +677,26 @@
 
     <main class="main-stage">
       <header class="stage-header">
-        <div class="wordmark"><span>STREAM</span><strong>VERSE</strong><small>1.0</small></div>
-        <div class="stage-status"><span class:online={activeTaskCount > 0}></span><b>{activeTaskCount > 0 ? `${activeTaskCount} ACTIVE` : $t("app.systemReady")}</b></div>
-        <button class="queue-toggle icon-button" type="button" title={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} aria-label={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} onclick={() => (queueCollapsed = !queueCollapsed)}>{#if queueCollapsed}<PanelRightOpen size={18} />{:else}<PanelRightClose size={18} />{/if}</button>
+        <div class="wordmark"><span>STREAM</span><strong>VERSE</strong><small>{bootstrap?.version ?? ""}</small></div>
+        <div class="stage-status" class:online={activeTaskCount > 0}><span></span><b>{activeTaskCount > 0 ? `${activeTaskCount} ${$t("task.activeCount")}` : $t("app.systemReady")}</b></div>
+        <button class="queue-toggle icon-button" type="button" title={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} aria-label={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} onclick={() => (queueCollapsed = !queueCollapsed)}>{#if queueCollapsed}<PanelRightOpen size={18} />{:else}<PanelRightClose size={18} />{/if}{#if (bootstrap?.tasks.length ?? 0) > 0}<em class="queue-badge">{bootstrap!.tasks.length}</em>{/if}</button>
       </header>
 
       {#if view === "history"}
         <section class="history-workspace">
-          <header><div><span class="eyebrow">ARCHIVE INDEX</span><h1>{$t("history.title")}</h1></div><strong>{history.length.toString().padStart(3, "0")}</strong></header>
+          <header><h1>{$t("history.title")}</h1><strong>{history.length} {$t("history.entries")}</strong></header>
           {#if historyLoading}<div class="center-loader"><LoaderCircle class="spin" size={22} /></div>{:else}
             <div class="history-list">
-              {#each history as entry, index (entry.platform + entry.assetId)}
-                <article><span>{String(index + 1).padStart(3, "0")}</span><b style:--platform-color={platformMeta[entry.platform].color}>{platformMeta[entry.platform].code}</b><strong>{entry.title}</strong><time>{entry.downloadedAt}</time></article>
+              {#each history as entry (entry.platform + entry.assetId)}
+                <article>
+                  <Thumb url={entry.coverUrl} platform={entry.platform} title={entry.title} />
+                  <b style:--platform-color={platformMeta[entry.platform].color}>{platformMeta[entry.platform].label}</b>
+                  <strong title={entry.title}>{entry.title}</strong>
+                  <time>{formatHistoryTime(entry.downloadedAt)}</time>
+                  {#if entry.outputPath}
+                    <button class="icon-button" type="button" title={$t("task.revealFile")} aria-label={$t("task.revealFile")} onclick={() => openInFileManager(entry.outputPath!, true)}><FolderOpen size={16} /></button>
+                  {/if}
+                </article>
               {:else}<div class="empty-state">{$t("history.empty")}</div>{/each}
             </div>
           {/if}
@@ -557,7 +704,7 @@
       {:else}
         <section class="download-workspace">
           <div class="workspace-heading">
-            <div><span class="eyebrow">SIGNAL IN / FILE OUT</span><h1>{$t("workspace.title")}</h1></div>
+            <div><h1>{$t("workspace.title")}</h1></div>
             <div class="platform-switch" role="tablist" aria-label="平台">
               {#each Object.keys(platformMeta) as id}
                 <button class:active={platform === id} style:--platform-color={platformMeta[id as PlatformId].color} type="button" role="tab" aria-selected={platform === id} onclick={() => selectPlatform(id as PlatformId)}><PlatformIcon platform={id as PlatformId} size={14} />{platformMeta[id as PlatformId].label}</button>
@@ -566,15 +713,23 @@
           </div>
 
           <div class="input-console">
-            <div class="mode-switch" role="tablist" aria-label={$t("workspace.mode")}><button class:active={workflowMode === "single"} type="button" role="tab" onclick={() => selectWorkflowMode("single")}><Download size={15} />{$t("workspace.single")}</button><button class:active={workflowMode === "profile"} type="button" role="tab" onclick={() => selectWorkflowMode("profile")}><SquareStack size={15} />{platform === "youtube" ? $t("workspace.youtubeChannel") : $t("workspace.profile")}</button>{#if platform === "youtube"}<button class:active={workflowMode === "playlist"} type="button" role="tab" onclick={() => selectWorkflowMode("playlist")}><ListVideo size={15} />{$t("workspace.youtubePlaylist")}</button>{/if}</div>
-            <div class="signal-input"><textarea bind:value={rawInput} rows="3" aria-label={$t("workspace.inputLabel")} placeholder={$t("workspace.placeholder")} onkeydown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") analyze(); }}></textarea><button class="icon-button paste-button" type="button" title={$t("workspace.paste")} aria-label={$t("workspace.paste")} onclick={pasteInput}><ClipboardPaste size={18} /></button><button class="analyze-button" type="button" disabled={analyzing || !rawInput.trim()} onclick={analyze}>{#if analyzing}<LoaderCircle class="spin" size={18} />{:else}<Search size={18} />{/if}<span>{analyzing ? $t("common.analyzing") : $t("common.analyze")}</span></button></div>
-            <div class="console-meta"><span style:--platform-color={platformMeta[platform].color}>{platformMeta[platform].code} / {workflowMode === "single" ? "SINGLE" : workflowMode === "playlist" ? "PLAYLIST" : "CHANNEL"}</span><span class:active-auth={authStatus === "active"}>{authStatus === "active" ? "AUTH ACTIVE" : "GUEST MODE"}</span><button type="button" onclick={openSettings}><SlidersHorizontal size={14} />{bootstrap?.saveDirectory ?? "--"}</button></div>
+            <div class="console-head">
+              <div class="mode-switch" role="tablist" aria-label={$t("workspace.mode")}><button class:active={workflowMode === "single"} type="button" role="tab" onclick={() => selectWorkflowMode("single")}><Download size={15} />{$t("workspace.single")}</button><button class:active={workflowMode === "profile"} type="button" role="tab" onclick={() => selectWorkflowMode("profile")}><SquareStack size={15} />{platform === "youtube" ? $t("workspace.youtubeChannel") : $t("workspace.profile")}</button>{#if platform === "youtube"}<button class:active={workflowMode === "playlist"} type="button" role="tab" onclick={() => selectWorkflowMode("playlist")}><ListVideo size={15} />{$t("workspace.youtubePlaylist")}</button>{/if}</div>
+              <button class="console-savedir" type="button" title={$t("settings.downloadPath")} onclick={openSettings}><FolderOpen size={13} /><span>{bootstrap?.saveDirectory ?? "--"}</span></button>
+            </div>
+            <div class="signal-input">
+              <textarea bind:value={rawInput} rows="2" aria-label={$t("workspace.inputLabel")} placeholder={$t("workspace.placeholder")} onkeydown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") analyze(); }}></textarea>
+              <button class="icon-button paste-button" type="button" title={$t("workspace.paste")} aria-label={$t("workspace.paste")} onclick={pasteInput}><ClipboardPaste size={16} /></button>
+            </div>
+            <div class="console-actions">
+              <div class="console-meta"><span class="meta-chip" style:--platform-color={platformMeta[platform].color}>{platformMeta[platform].label}</span><span class="meta-chip auth" class:active-auth={authStatus === "active"}><i></i>{authStatus === "active" ? $t("auth.active") : $t("auth.guest")}</span></div>
+              <button class="analyze-button" type="button" disabled={analyzing || !rawInput.trim()} onclick={analyze}>{#if analyzing}<LoaderCircle class="spin" size={16} />{:else}<Search size={16} />{/if}<span>{analyzing ? $t("common.analyzing") : $t("common.analyze")}</span></button>
+            </div>
           </div>
 
-          {#if analyzing && analysisProgress}<AnalysisProgress progress={analysisProgress} />{/if}
+          {#if analysisProgress}<AnalysisProgress progress={analysisProgress} />{/if}
 
           {#if errorMessage}<div class="message-strip error" role="alert">{errorMessage}</div>{/if}
-          {#if notice}<div class="message-strip success" aria-live="polite">{notice}</div>{/if}
 
           {#if workflowMode === "single"}
             {#if preview}
@@ -582,10 +737,19 @@
                 <figure>{#if previewCoverUrl && !previewCoverFailed}<img src={previewCoverUrl} alt={preview.title} width="960" height="540" decoding="async" onerror={() => (previewCoverFailed = true)} />{:else}<div class="cover-placeholder"><PlatformIcon platform={preview.platform} size={52} /></div>{/if}<figcaption><span>{formatDuration(preview.durationSeconds)}</span></figcaption></figure>
                 <div class="result-detail"><span class="eyebrow">{platformMeta[preview.platform].label} / {preview.author}</span><h2>{preview.title}</h2><p>{preview.publishDate || "--"}</p>{#if previewIsAlbum}<div class="album-summary"><strong>{$t("content.album")}</strong><span>{preview.imageUrls?.length ?? 0} {$t("content.images")}</span></div>{:else}<SingleFormatList formats={previewFormats} selectedId={selectedFormatId} expanded={formatsExpanded} durationSeconds={preview.durationSeconds} onSelect={(formatId) => (selectedFormatId = formatId)} onExpandedChange={(expanded) => (formatsExpanded = expanded)} />{/if}<ContentOptions options={downloadOptions} onChange={(next) => (downloadOptions = next)} label={$t("single.downloadContent")} /><button class="download-button" type="button" disabled={operationBusy || !canDownloadSingle} onclick={downloadSingle}>{#if operationBusy}<LoaderCircle class="spin" size={18} />{:else}<Download size={18} />{/if}{$t("workspace.enqueue")}</button></div>
               </div>
-            {:else}<div class="idle-stage"><span>01</span><strong>AWAITING SIGNAL</strong></div>{/if}
+            {:else}
+              <div class="idle-stage">
+                <div class="idle-icon"><Link2 size={22} /></div>
+                <strong>{$t("workspace.idleTitle")}</strong>
+                <p>{$t("workspace.idleHint")}</p>
+              </div>
+            {/if}
           {:else}
             <div class="batch-workspace">
-              <header><div><span class="eyebrow">{profile?.profileTitle ?? "BATCH SELECTOR"}</span><strong>{profile?.items.length ?? 0} ITEMS / {selectedCount} SELECTED</strong></div><div><button class="quiet-button" type="button" disabled={!profile} onclick={selectAllProfileItems}><Check size={15} />全选</button><button class="quiet-button" type="button" disabled={!profile} onclick={invertProfileSelection}><Menu size={15} />反选</button><button class="primary-button" type="button" disabled={!profile || selectedCount === 0 || operationBusy || !hasSelectedDownloadOptions(downloadOptions)} onclick={downloadBatch}><Download size={16} />下载 {selectedCount}</button></div></header>
+              <header>
+                <div class="batch-summary"><span class="eyebrow">{profile?.profileTitle ?? $t("batch.awaitingSelection")}</span><strong>{$t("batch.fetched")} {profile?.items.length ?? 0} · {$t("batch.selected")} {selectedCount}</strong></div>
+                <div class="batch-actions"><button class="quiet-button" type="button" disabled={!profile} onclick={selectAllProfileItems}><Check size={15} />{$t("common.selectAll")}</button><button class="quiet-button" type="button" disabled={!profile} onclick={invertProfileSelection}><Menu size={15} />{$t("batch.invertSelection")}</button><button class="primary-button" type="button" disabled={!profile || selectedCount === 0 || operationBusy || !hasSelectedDownloadOptions(downloadOptions)} onclick={downloadBatch}><Download size={16} />{$t("batch.enqueue")}{selectedCount > 0 ? ` · ${selectedCount}` : ""}</button></div>
+              </header>
               {#if profile}<ContentOptions options={downloadOptions} onChange={(next) => (downloadOptions = next)} label={$t("batch.downloadContent")} />{/if}
               <BatchList items={profile?.items ?? []} selectedIds={selectedProfileIds} selectedFormats={selectedProfileFormats} onToggle={toggleProfileItem} onFormat={(id, formatId) => (selectedProfileFormats = { ...selectedProfileFormats, [id]: formatId })} />
             </div>
@@ -599,6 +763,16 @@
     {#if bootstrap}
       <SettingsSheet open={settingsOpen} {bootstrap} {browserSources} busy={operationBusy} onClose={() => (settingsOpen = false)} onSave={handleSaveSettings} onPickDirectory={() => pickSaveDirectory(bootstrap!.saveDirectory)} onPickCookieFile={pickCookieFile} onImportBrowser={handleImportBrowser} onSaveManual={async (platformId, value) => { const result = await saveManualCookies(platformId, { cookieText: value }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onImportCookieFile={async (platformId, path) => { const result = await saveManualCookies(platformId, { cookieFile: path }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onClearAuth={async (platformId) => { await clearPlatformAuth(platformId); bootstrap!.platformAuth[platformId] = { mode: "none", status: "guest" }; }} />
     {/if}
+
+    <div class="toast-stack" aria-live="polite">
+      {#each toasts as toast (toast.id)}
+        <div class="toast {toast.kind}" role="status">
+          {#if toast.kind === "success"}<CheckCircle2 size={16} />{:else}<CircleAlert size={16} />{/if}
+          <span>{toast.text}</span>
+          <button class="toast-dismiss" type="button" aria-label={$t("common.close")} onclick={() => dismissToast(toast.id)}><X size={14} /></button>
+        </div>
+      {/each}
+    </div>
   </div>
 
   {#snippet failed(error, reset)}

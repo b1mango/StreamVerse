@@ -114,6 +114,22 @@ pub fn import_browser_cookies(request: &CookieImportRequest) -> Result<CookieImp
     }
 }
 
+/// 登录态失效后，用设置中保存的浏览器来源静默重取 Cookie（自动续期）。
+pub fn refresh_browser_cookies(
+    platform: &str,
+    browser_id: &str,
+    profile_id: Option<String>,
+) -> Result<CookieImportResult, String> {
+    import_browser_cookies(&CookieImportRequest {
+        platform: platform.to_string(),
+        browser_id: browser_id.to_string(),
+        profile_id,
+        consent: "always".to_string(),
+        allow_elevation: true,
+        owner_account: None,
+    })
+}
+
 pub fn save_manual_cookies(platform: &str, content: &str) -> Result<CookieImportResult, String> {
     let platform = validate_platform(platform)?;
     let cookies = parse_manual_cookies(platform, content)?;
@@ -544,8 +560,12 @@ fn validate_critical_cookies(platform: &str, cookies: &[Cookie]) -> Result<(), S
         "douyin" => has("sessionid") || has("sessionid_ss"),
         "bilibili" => has("SESSDATA"),
         "youtube" => {
+            // 与 settings::validate_cookie_file_for_platform 保持一致：
+            // LOGIN_INFO 或 SAPISID 家族任一存在即可构成 YouTube 登录态
             has("LOGIN_INFO")
-                && (has("SAPISID") || has("__Secure-1PAPISID") || has("__Secure-3PAPISID"))
+                || has("SAPISID")
+                || has("__Secure-1PAPISID")
+                || has("__Secure-3PAPISID")
         }
         _ => false,
     };
@@ -838,9 +858,15 @@ mod tests {
             parse_manual_cookies("youtube", "LOGIN_INFO=login; __Secure-1PAPISID=account").unwrap();
         assert!(validate_critical_cookies("youtube", &valid).is_ok());
 
-        let missing_login_info =
+        // SAPISID 家族单独存在即构成登录态（SAPISIDHASH 鉴权），不再强制要求 LOGIN_INFO
+        let sapisid_only =
             parse_manual_cookies("youtube", "SAPISID=account; SID=legacy").unwrap();
-        assert!(validate_critical_cookies("youtube", &missing_login_info).is_err());
+        assert!(validate_critical_cookies("youtube", &sapisid_only).is_ok());
+
+        // 两族 Cookie 都不在场才判定缺少关键 Cookie
+        let missing_critical =
+            parse_manual_cookies("youtube", "SID=legacy; HSID=hint").unwrap();
+        assert!(validate_critical_cookies("youtube", &missing_critical).is_err());
     }
 
     #[test]

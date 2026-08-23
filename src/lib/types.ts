@@ -73,6 +73,7 @@ export interface DownloadTask {
   supportsPause: boolean;
   supportsCancel: boolean;
   canRetry: boolean;
+  coverUrl?: string | null;
 }
 
 export type TaskEvent =
@@ -127,6 +128,7 @@ export interface AppMetrics {
 }
 
 export interface BootstrapState {
+  version: string;
   authState: "guest" | "active";
   accountLabel: string;
   isWindows: boolean;
@@ -149,6 +151,13 @@ export interface BootstrapState {
 }
 
 export type SettingsProfile = Omit<BootstrapState, "isWindows" | "metrics" | "preview" | "tasks">;
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseUrl: string;
+}
 
 export interface DownloadRequest {
   assetId: string;
@@ -199,6 +208,8 @@ export interface ProfileBatch {
   fetchedCount: number;
   skippedCount: number;
   items: VideoAsset[];
+  /** 前端内部使用：标识一次清晰度补全会话，后端不返回 */
+  hydrationKey?: string;
 }
 
 export interface BatchDownloadResult {
@@ -216,4 +227,6 @@ export interface DownloadHistoryEntry {
   platform: PlatformId;
   title: string;
   downloadedAt: string;
+  coverUrl?: string | null;
+  outputPath?: string | null;
 }

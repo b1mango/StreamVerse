@@ -216,6 +216,7 @@ pub fn download_video(
         supports_pause,
         supports_cancel,
         can_retry: true,
+        cover_url: request.cover_url.clone(),
     };
 
     upsert_task(&task_store, task.clone());
@@ -473,12 +474,14 @@ pub fn download_video(
                 supports_pause: false,
                 supports_cancel: true,
                 can_retry: true,
+                cover_url: artifacts.cover_url.clone(),
             },
         );
 
         let output_path = Arc::new(Mutex::new(None::<String>));
         let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let task_platform = artifacts.platform.clone();
+        let task_cover_url = artifacts.cover_url.clone();
 
         let stdout_handle = child.stdout.take().map(|stdout| {
             let task_store = Arc::clone(&task_store);
@@ -487,6 +490,7 @@ pub fn download_video(
             let title = title.clone();
             let format_display = format_display.clone();
             let task_platform = task_platform.clone();
+            let task_cover_url = task_cover_url.clone();
             thread::spawn(move || {
                 read_process_output_lines(stdout, |line| {
                     if let Some(progress) = parse_progress_line(&line) {
@@ -507,6 +511,7 @@ pub fn download_video(
                                 supports_pause: false,
                                 supports_cancel: true,
                                 can_retry: true,
+                                cover_url: task_cover_url.clone(),
                             },
                         );
                     } else if let Some(path) = line.strip_prefix("output:") {
@@ -524,6 +529,7 @@ pub fn download_video(
             let title = title.clone();
             let format_display = format_display.clone();
             let task_platform = task_platform.clone();
+            let task_cover_url = task_cover_url.clone();
 
             thread::spawn(move || {
                 read_process_output_lines(stderr, |line| {
@@ -545,6 +551,7 @@ pub fn download_video(
                                 supports_pause: false,
                                 supports_cancel: true,
                                 can_retry: true,
+                                cover_url: task_cover_url.clone(),
                             },
                         );
                     } else {
@@ -640,6 +647,7 @@ pub fn download_video(
                     supports_pause: false,
                     supports_cancel: true,
                     can_retry: true,
+                    cover_url: artifacts.cover_url.clone(),
                 },
             );
 
@@ -651,7 +659,13 @@ pub fn download_video(
                 }
             }
 
-            download_history::record_download(&task_platform, &artifacts.asset_id, &title);
+            download_history::record_download(
+                &task_platform,
+                &artifacts.asset_id,
+                &title,
+                artifacts.cover_url.clone(),
+                artifact_summary.output_path.clone(),
+            );
         } else {
             let reason = stderr_lines
                 .lock()
@@ -703,6 +717,7 @@ fn album_download_worker(
             supports_pause: false,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -796,6 +811,7 @@ fn album_download_worker(
                 supports_pause: false,
                 supports_cancel: true,
                 can_retry: true,
+                cover_url: artifacts.cover_url.clone(),
             },
         );
     }
@@ -845,6 +861,7 @@ fn album_download_worker(
             supports_pause: false,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -853,7 +870,13 @@ fn album_download_worker(
             let _ = open_in_file_manager(path, false);
         }
     }
-    download_history::record_download(&artifacts.platform, &artifacts.asset_id, &artifacts.title);
+    download_history::record_download(
+        &artifacts.platform,
+        &artifacts.asset_id,
+        &artifacts.title,
+        artifacts.cover_url.clone(),
+        summary.output_path.clone(),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -886,6 +909,7 @@ fn metadata_only_worker(
             supports_pause: false,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -931,6 +955,7 @@ fn metadata_only_worker(
             supports_pause: false,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -940,7 +965,13 @@ fn metadata_only_worker(
         }
     }
 
-    download_history::record_download(&artifacts.platform, &artifacts.asset_id, &artifacts.title);
+    download_history::record_download(
+        &artifacts.platform,
+        &artifacts.asset_id,
+        &artifacts.title,
+        artifacts.cover_url.clone(),
+        summary.output_path.clone(),
+    );
 }
 
 fn dash_message(video_finished: bool, audio_finished: bool) -> &'static str {
@@ -1089,6 +1120,7 @@ fn direct_download_worker(
             supports_pause: true,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -1226,6 +1258,7 @@ fn direct_download_worker(
                     supports_pause: true,
                     supports_cancel: true,
                     can_retry: true,
+                    cover_url: artifacts.cover_url.clone(),
                 },
             );
 
@@ -1259,6 +1292,7 @@ fn direct_download_worker(
                     supports_pause: true,
                     supports_cancel: true,
                     can_retry: true,
+                    cover_url: artifacts.cover_url.clone(),
                 },
             );
         }
@@ -1312,6 +1346,7 @@ fn direct_download_worker(
                     supports_pause: true,
                     supports_cancel: true,
                     can_retry: true,
+                    cover_url: artifacts.cover_url.clone(),
                 },
             );
             last_report = Instant::now();
@@ -1364,6 +1399,7 @@ fn direct_download_worker(
             supports_pause: true,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -1373,7 +1409,13 @@ fn direct_download_worker(
         }
     }
 
-    download_history::record_download(&artifacts.platform, &artifacts.asset_id, &artifacts.title);
+    download_history::record_download(
+        &artifacts.platform,
+        &artifacts.asset_id,
+        &artifacts.title,
+        artifacts.cover_url.clone(),
+        artifact_summary.output_path.clone(),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1412,6 +1454,7 @@ fn dash_download_worker(
             supports_pause: true,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -1640,6 +1683,7 @@ fn dash_download_worker(
                     supports_pause: true,
                     supports_cancel: true,
                     can_retry: true,
+                    cover_url: artifacts.cover_url.clone(),
                 },
             );
 
@@ -1706,6 +1750,7 @@ fn dash_download_worker(
                     supports_pause: true,
                     supports_cancel: true,
                     can_retry: true,
+                    cover_url: artifacts.cover_url.clone(),
                 },
             );
             last_report = Instant::now();
@@ -1757,6 +1802,7 @@ fn dash_download_worker(
             supports_pause: true,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -1841,6 +1887,7 @@ fn dash_download_worker(
             supports_pause: true,
             supports_cancel: true,
             can_retry: true,
+            cover_url: artifacts.cover_url.clone(),
         },
     );
 
@@ -1850,7 +1897,13 @@ fn dash_download_worker(
         }
     }
 
-    download_history::record_download(&artifacts.platform, &artifacts.asset_id, &artifacts.title);
+    download_history::record_download(
+        &artifacts.platform,
+        &artifacts.asset_id,
+        &artifacts.title,
+        artifacts.cover_url.clone(),
+        artifact_summary.output_path.clone(),
+    );
 }
 
 fn ensure_ytdlp_available() -> Result<(), String> {

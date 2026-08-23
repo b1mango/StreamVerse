@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Check } from "@lucide/svelte";
   import type { DownloadContentSelection } from "../types";
   import { t } from "../i18n";
 
@@ -12,15 +13,30 @@
     label?: string;
   } = $props();
 
-  function setOption(key: keyof DownloadContentSelection, checked: boolean) {
-    onChange({ ...options, [key]: checked });
-  }
+  const keys: (keyof DownloadContentSelection)[] = ["downloadVideo", "downloadAudio", "downloadCover", "downloadCaption"];
+  const labels: Record<keyof DownloadContentSelection, string> = {
+    downloadVideo: "content.video",
+    downloadAudio: "content.audio",
+    downloadCover: "content.cover",
+    downloadCaption: "content.caption"
+  };
 </script>
 
 <fieldset class="content-options" aria-label={label}>
   <legend>{label}</legend>
-  <label><input type="checkbox" checked={options.downloadVideo} onchange={(event) => setOption("downloadVideo", event.currentTarget.checked)} />{$t("content.video")}</label>
-  <label><input type="checkbox" checked={options.downloadAudio} onchange={(event) => setOption("downloadAudio", event.currentTarget.checked)} />{$t("content.audio")}</label>
-  <label><input type="checkbox" checked={options.downloadCover} onchange={(event) => setOption("downloadCover", event.currentTarget.checked)} />{$t("content.cover")}</label>
-  <label><input type="checkbox" checked={options.downloadCaption} onchange={(event) => setOption("downloadCaption", event.currentTarget.checked)} />{$t("content.caption")}</label>
+  <div class="option-chips">
+    {#each keys as key}
+      <button
+        class="option-chip"
+        class:on={options[key]}
+        type="button"
+        role="checkbox"
+        aria-checked={options[key]}
+        onclick={() => onChange({ ...options, [key]: !options[key] })}
+      >
+        <span class="chip-check">{#if options[key]}<Check size={12} />{/if}</span>
+        {$t(labels[key])}
+      </button>
+    {/each}
+  </div>
 </fieldset>

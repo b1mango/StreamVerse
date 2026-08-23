@@ -12,6 +12,7 @@ use std::time::Duration;
 
 static RESOURCE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 pub(crate) const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default";
+const YOUTUBE_COLLECTION_EXTRACTOR_ARGS: &str = "youtubetab:skip=webpage,authcheck";
 const YOUTUBE_INFO_CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Deserialize)]
@@ -187,7 +188,7 @@ pub fn analyze_youtube_collection(
         "--playlist-end",
         "2000",
         "--extractor-args",
-        "youtubetab:skip=webpage",
+        YOUTUBE_COLLECTION_EXTRACTOR_ARGS,
     ]);
     if let Some(file) = cookie_file.filter(|value| !value.trim().is_empty()) {
         command.arg("--cookies").arg(file);
@@ -567,7 +568,7 @@ fn read_process_error(stderr: &[u8], fallback: &str) -> String {
     }
 }
 
-fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+pub(crate) fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
     {
@@ -605,7 +606,7 @@ mod tests {
     use super::{
         format_height, map_formats, normalize_codec, normalize_youtube_collection_url,
         target_triple, youtube_format_selector, youtube_info_cache_path, RawFormat,
-        YOUTUBE_EXTRACTOR_ARGS,
+        YOUTUBE_COLLECTION_EXTRACTOR_ARGS, YOUTUBE_EXTRACTOR_ARGS,
     };
 
     #[test]
@@ -675,6 +676,14 @@ mod tests {
         );
         assert!(formats[0].id.starts_with("137+"));
         assert!(formats[0].recommended);
+    }
+
+    #[test]
+    fn youtube_collections_skip_authcheck_when_webpage_is_skipped() {
+        assert_eq!(
+            YOUTUBE_COLLECTION_EXTRACTOR_ARGS,
+            "youtubetab:skip=webpage,authcheck"
+        );
     }
 
     #[test]

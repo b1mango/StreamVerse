@@ -1,6 +1,7 @@
 import type { BootstrapState } from "./types";
 
 export const mockState: BootstrapState = {
+  version: "1.0.0",
   authState: "guest",
   accountLabel: "No active sessions",
   isWindows: true,

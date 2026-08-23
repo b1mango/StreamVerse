@@ -3,8 +3,10 @@
   import { Check, ListChecks } from "@lucide/svelte";
   import { untrack } from "svelte";
   import { t } from "../i18n";
-  import { visibleFormats } from "../media";
-  import type { VideoAsset } from "../types";
+  import { estimateFileSize, formatFileSize, visibleFormats } from "../media";
+  import Thumb from "./Thumb.svelte";
+  import Select from "./Select.svelte";
+  import type { VideoAsset, VideoFormat } from "../types";
 
   let {
     items,
@@ -36,6 +38,18 @@
       $virtualizer.setOptions({ count, getScrollElement: () => scrollElement });
     });
   });
+
+  function formatOptionLabel(item: VideoAsset, format: VideoFormat) {
+    // B 站批量条目 codec 固定为「自适应」（DASH 流），此时显示封装容器更直观
+    const codec = format.codec && format.codec !== "自适应" ? format.codec : format.container;
+    const size = format.fileSizeBytes && format.fileSizeBytes > 0
+      ? formatFileSize(format.fileSizeBytes)
+      : (() => {
+          const estimate = estimateFileSize(format.bitrateKbps, item.durationSeconds);
+          return estimate ? formatFileSize(estimate) : "--";
+        })();
+    return `${format.label} · ${codec} · ${size}`;
+  }
 </script>
 
 {#snippet row(item: VideoAsset, index: number)}
@@ -52,28 +66,24 @@
     >
       {#if selectedIds.has(item.assetId)}<Check size={15} />{/if}
     </button>
-    <div class="batch-index">{String(index + 1).padStart(2, "0")}</div>
+    <Thumb url={item.coverUrl} platform={item.platform} title={item.title} iconSize={16} />
     <div class="batch-copy">
       <strong title={item.title}>{item.title}</strong>
       <span>{imageCount > 0 ? `${$t("content.album")} · ${imageCount} ${$t("content.images")}` : item.author || "Unknown"} · {item.publishDate || "--"}</span>
     </div>
-    <select
-      aria-label={`${item.title} ${$t("batch.formatLabel")}`}
+    <Select
+      ariaLabel={`${item.title} ${$t("batch.formatLabel")}`}
       value={selectedFormats[item.assetId] ?? formats.find((format) => format.recommended)?.id ?? formats[0]?.id ?? ""}
       disabled={item.formatStatus === "pending" || item.formatStatus === "failed"}
-      onchange={(event) => onFormat(item.assetId, event.currentTarget.value)}
-    >
-      {#if imageCount > 0}
-        <option value="">{$t("content.album")} · {imageCount} {$t("content.images")}</option>
-      {:else}
-        {#each formats as format}
-          <option value={format.id}>{format.label} · {format.resolution} · {format.codec}</option>
-        {/each}
-        {#if formats.length === 0}
-          <option value="">{item.formatStatus === "pending" ? $t("batch.loadingFormats") : item.formatStatus === "failed" ? $t("batch.formatLoadFailed") : $t("common.auto")}</option>
-        {/if}
-      {/if}
-    </select>
+      options={imageCount > 0
+        ? [{ value: "", label: `${$t("content.album")} · ${imageCount} ${$t("content.images")}` }]
+        : formats.length > 0
+          ? formats.map((format) => ({ value: format.id, label: formatOptionLabel(item, format) }))
+          : [{ value: "", label: item.formatStatus === "pending" ? $t("batch.loadingFormats") : item.formatStatus === "failed" ? $t("batch.formatLoadFailed") : $t("common.auto") }]}
+      onChange={(next) => {
+        if (next) onFormat(item.assetId, next);
+      }}
+    />
   </div>
 {/snippet}
 

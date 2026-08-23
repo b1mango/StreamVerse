@@ -147,11 +147,12 @@ pub fn validate_cookie_file_for_platform(path: &str, platform: &str) -> Result<(
         _ => return Err("不支持的平台。".to_string()),
     };
     let names = collect_cookie_names(Path::new(path), spec.0)?;
+    // YouTube 的登录态可以由 LOGIN_INFO 或 SAPISID 家族（SAPISIDHASH 鉴权）单独成立，
+    // 浏览器导出/部分解密缺失其中一族属常见情况，不应误判为登录态失效
     let valid = if platform == "youtube" {
-        names.contains("LOGIN_INFO")
-            && ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"]
-                .iter()
-                .any(|name| names.contains(*name))
+        ["LOGIN_INFO", "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"]
+            .iter()
+            .any(|name| names.contains(*name))
     } else {
         spec.1.iter().any(|name| names.contains(*name))
     };

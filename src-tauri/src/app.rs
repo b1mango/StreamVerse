@@ -35,6 +35,8 @@ pub(crate) struct DownloadTask {
     pub(crate) supports_cancel: bool,
     #[serde(default)]
     pub(crate) can_retry: bool,
+    #[serde(default)]
+    pub(crate) cover_url: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -91,6 +93,7 @@ struct PlatformAuthProfile {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapState {
+    version: String,
     auth_state: String,
     account_label: String,
     is_windows: bool,
@@ -115,6 +118,7 @@ struct BootstrapState {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsProfile {
+    version: String,
     auth_state: String,
     account_label: String,
     platform_auth: BTreeMap<String, PlatformAuthProfile>,
@@ -351,12 +355,178 @@ fn sample_preview() -> VideoAsset {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckResult {
+    current_version: String,
+    latest_version: String,
+    has_update: bool,
+    release_url: String,
+}
+
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let parse = |value: &str| {
+        value
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let latest = parse(latest);
+    let current = parse(current);
+    for index in 0..latest.len().max(current.len()) {
+        let lhs = latest.get(index).copied().unwrap_or(0);
+        let rhs = current.get(index).copied().unwrap_or(0);
+        if lhs != rhs {
+            return lhs > rhs;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+async fn check_for_update(state: tauri::State<'_, AppState>) -> Result<UpdateCheckResult, String> {
+    let proxy_url = state.settings.lock().unwrap().proxy_url.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut builder = reqwest::blocking::Client::builder()
+            .user_agent(concat!("StreamVerse/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(12));
+        if let Some(proxy) = settings::effective_proxy_url(proxy_url.as_deref()) {
+            builder = builder
+                .proxy(reqwest::Proxy::all(&proxy).map_err(|error| format!("代理配置无效：{error}"))?);
+        }
+        let client = builder.build().map_err(|error| format!("初始化更新检查失败：{error}"))?;
+        let response = client
+            .get("https://api.github.com/repos/b1mango/StreamVerse/releases/latest")
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .map_err(|error| format!("无法连接更新服务器：{error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("更新服务器返回错误（HTTP {}）。", response.status()));
+        }
+        let payload: serde_json::Value = serde_json::from_str(
+            &response
+                .text()
+                .map_err(|error| format!("读取更新信息失败：{error}"))?,
+        )
+        .map_err(|error| format!("解析更新信息失败：{error}"))?;
+        let latest = payload
+            .get("tag_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim_start_matches('v')
+            .to_string();
+        if latest.is_empty() {
+            return Err("更新信息中缺少版本号。".to_string());
+        }
+        let release_url = payload
+            .get("html_url")
+            .and_then(|value| value.as_str())
+            .unwrap_or("https://github.com/b1mango/StreamVerse/releases")
+            .to_string();
+        let current = env!("CARGO_PKG_VERSION").to_string();
+        Ok(UpdateCheckResult {
+            has_update: version_is_newer(&latest, &current),
+            latest_version: latest,
+            current_version: current,
+            release_url,
+        })
+    })
+    .await
+    .map_err(|error| format!("更新检查任务异常退出：{error}"))?
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("仅支持打开 http(s) 链接。".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        provider_runtime::silent_command("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map_err(|error| format!("打开链接失败：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        provider_runtime::silent_command("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|error| format!("打开链接失败：{error}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        provider_runtime::silent_command("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|error| format!("打开链接失败：{error}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn get_bootstrap_state(
     state: tauri::State<'_, AppState>,
     tooling: tauri::State<'_, ToolingState>,
 ) -> BootstrapState {
     build_bootstrap_state(&state, tooling.ffmpeg_path.as_deref())
+}
+
+/// 从输入文本推断目标平台（用于登录态失效后的定向续期）。
+fn infer_platform_from_input(raw_input: &str) -> Option<&'static str> {
+    let lower = raw_input.to_ascii_lowercase();
+    if lower.contains("youtube.com") || lower.contains("youtu.be") {
+        Some("youtube")
+    } else if lower.contains("douyin") || lower.contains("iesdouyin") {
+        Some("douyin")
+    } else if lower.contains("bilibili") || lower.contains("b23.tv") {
+        Some("bilibili")
+    } else {
+        None
+    }
+}
+
+/// 判断解析报错是否属于登录态失效（Cookie 过期/被服务端轮换）。
+fn is_auth_class_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    const PATTERNS: &[&str] = &[
+        "sign in to confirm",
+        "sign in to your account",
+        "login required",
+        "http error 401",
+        "http error 403",
+        "only available to registered",
+        "use --cookies",
+        "cookies are needed",
+        "关键 cookie",
+        "登录态已失效",
+        "需要登录",
+    ];
+    PATTERNS.iter().any(|pattern| lower.contains(pattern))
+}
+
+/// 用设置里“始终授权”的浏览器来源静默重取 Cookie；未授权过则返回 Err。
+fn try_refresh_browser_auth(
+    platform_auth: &BTreeMap<String, settings::PlatformAuthSettings>,
+    platform: &str,
+) -> Result<(), String> {
+    let entry = platform_auth
+        .get(platform)
+        .ok_or_else(|| "该平台未导入浏览器登录态。".to_string())?;
+    if entry.mode != "browser" || entry.consented_at.is_none() {
+        return Err("未开启浏览器登录态长期授权。".to_string());
+    }
+    let browser_id = entry
+        .browser_id
+        .clone()
+        .ok_or_else(|| "缺少浏览器来源。".to_string())?;
+    let result = auth::refresh_browser_cookies(platform, &browser_id, entry.profile_id.clone())?;
+    if result.status == "active" {
+        Ok(())
+    } else {
+        Err(result.message)
+    }
 }
 
 #[tauri::command]
@@ -372,12 +542,29 @@ async fn analyze_input(
     tauri::async_runtime::spawn_blocking(move || {
         let progress_file = sid.as_deref().map(analysis_progress_path);
         let _ = write_analysis_progress(sid.as_deref(), 0, 1, "正在解析作品链接…");
-        let result = providers::analyze_input(
-            &raw_input,
-            &settings.platform_auth,
-            progress_file.as_deref(),
-            proxy_url.as_deref(),
-        );
+        let run = || {
+            providers::analyze_input(
+                &raw_input,
+                &settings.platform_auth,
+                progress_file.as_deref(),
+                proxy_url.as_deref(),
+            )
+        };
+        // YouTube 的 Cookie 会被服务端频繁轮换而失效：命中登录态类报错时，
+        // 若用户开启过“始终授权”，自动重取浏览器 Cookie 并重试一次
+        let result = match run() {
+            Err(error)
+                if is_auth_class_error(&error)
+                    && infer_platform_from_input(&raw_input).is_some_and(|platform| {
+                        try_refresh_browser_auth(&settings.platform_auth, platform).is_ok()
+                    }) =>
+            {
+                let _ =
+                    write_analysis_progress(sid.as_deref(), 0, 1, "登录态已自动更新，正在重试解析…");
+                run()
+            }
+            other => other,
+        };
         match &result {
             Ok(_) => {
                 let _ = write_analysis_progress(sid.as_deref(), 1, 1, "作品解析完成。");
@@ -403,22 +590,46 @@ async fn analyze_profile_input(
     let sid = session_id.clone();
     let proxy_url = settings::effective_proxy_url(settings.proxy_url.as_deref());
     let progress_file = session_id.as_deref().map(analysis_progress_path);
-    let _ = write_analysis_progress(session_id.as_deref(), 0, 0, "正在读取主页视频…");
+    // YouTube 合集与频道主页共用这个入口，进度文案按链接形态区分
+    let is_playlist = raw_input.contains("playlist");
+    let reading_message = if is_playlist { "正在读取合集视频…" } else { "正在读取主页视频…" };
+    let done_message = if is_playlist { "合集视频解析完成。" } else { "主页视频解析完成。" };
+    let _ = write_analysis_progress(session_id.as_deref(), 0, 0, reading_message);
 
     tauri::async_runtime::spawn_blocking(move || {
-        let result = providers::analyze_profile_input(
-            &raw_input,
-            &settings.platform_auth,
-            progress_file.as_deref(),
-            proxy_url.as_deref(),
-        );
+        let run = || {
+            providers::analyze_profile_input(
+                &raw_input,
+                &settings.platform_auth,
+                progress_file.as_deref(),
+                proxy_url.as_deref(),
+            )
+        };
+        // 登录态失效时自动续期后重试一次（与单视频解析同一策略）
+        let result = match run() {
+            Err(error)
+                if is_auth_class_error(&error)
+                    && infer_platform_from_input(&raw_input).is_some_and(|platform| {
+                        try_refresh_browser_auth(&settings.platform_auth, platform).is_ok()
+                    }) =>
+            {
+                let _ = write_analysis_progress(
+                    sid.as_deref(),
+                    0,
+                    0,
+                    "登录态已自动更新，正在重试解析…",
+                );
+                run()
+            }
+            other => other,
+        };
         match &result {
             Ok(batch) => {
                 let _ = write_analysis_progress(
                     sid.as_deref(),
                     batch.fetched_count,
                     batch.total_available,
-                    "主页视频解析完成。",
+                    done_message,
                 );
             }
             Err(error) => {
@@ -583,6 +794,7 @@ fn create_profile_download_tasks(
                                 supports_pause: false,
                                 supports_cancel: false,
                                 can_retry: false,
+                                cover_url: item.asset.cover_url.clone(),
                             },
                         );
                         continue;
@@ -632,6 +844,7 @@ fn create_profile_download_tasks(
                         supports_pause: false,
                         supports_cancel: false,
                         can_retry: false,
+                        cover_url: asset.cover_url.clone(),
                     },
                 );
                 continue;
@@ -670,6 +883,7 @@ fn create_profile_download_tasks(
                                 supports_pause: false,
                                 supports_cancel: false,
                                 can_retry: false,
+                                cover_url: asset.cover_url.clone(),
                             },
                         );
                         continue;
@@ -745,6 +959,7 @@ fn create_profile_download_tasks(
                         supports_pause: false,
                         supports_cancel: false,
                         can_retry: false,
+                        cover_url: asset.cover_url.clone(),
                     },
                 );
             }
@@ -772,6 +987,7 @@ fn create_profile_download_tasks(
                     supports_pause: false,
                     supports_cancel: false,
                     can_retry: false,
+                    cover_url: None,
                 },
             );
         }
@@ -1110,6 +1326,7 @@ fn build_bootstrap_state(
     };
 
     BootstrapState {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         auth_state: if settings::has_auth_source(&settings.platform_auth) {
             "active".into()
         } else {
@@ -1146,6 +1363,7 @@ fn build_settings_profile(
     ffmpeg_path: Option<&str>,
 ) -> SettingsProfile {
     SettingsProfile {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         auth_state: if settings::has_auth_source(&settings.platform_auth) {
             "active".into()
         } else {
@@ -1352,7 +1570,9 @@ pub(crate) fn run() {
             search_download_history,
             check_download_history,
             get_download_history_count,
-            fetch_thumbnail
+            fetch_thumbnail,
+            check_for_update,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1362,6 +1582,14 @@ pub(crate) fn run() {
 mod tests {
     use super::{fallback_profile_format, sample_preview};
     use crate::provider_runtime::{thumbnail_candidates, thumbnail_referer};
+
+    #[test]
+    fn update_check_compares_versions() {
+        assert!(super::version_is_newer("1.0.1", "1.0.0"));
+        assert!(super::version_is_newer("v2.0", "1.9.9"));
+        assert!(!super::version_is_newer("1.0.0", "1.0.0"));
+        assert!(!super::version_is_newer("0.9.9", "1.0.0"));
+    }
 
     #[test]
     fn youtube_batch_items_are_reanalyzed_instead_of_using_best_placeholder() {
