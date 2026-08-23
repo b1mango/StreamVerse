@@ -2,7 +2,7 @@
 
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-body { background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 13px; }
+body { background: transparent; color: var(--text); font-family: var(--font-sans); font-size: 13px; }
 button, input, textarea, select { font: inherit; letter-spacing: 0; }
 button { color: inherit; }
 button, select, input[type="checkbox"] { cursor: pointer; }
@@ -18,32 +18,49 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .app-shell {
   position: relative;
   isolation: isolate;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  /* 窗口本身透明（tauri transparent:true），容器铺满窗口：
+     仅圆角弧线处透出桌面，视觉上窗口就是这张圆角卡片 */
+  background: transparent;
+}
+
+/* 悬浮容器即窗口本体：个人站同款黑紫渐变（顶部暗紫/暗粉晕向近黑）+ 底部紫色环境光，
+   由 overflow:hidden 收进圆角；最大化时退化为直角满屏（见 .app-shell.maximized） */
+.app-frame {
+  position: relative;
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr) auto;
   grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
   height: 100%;
-  /* 与个人站（b1mango.cc）一致的黑紫渐变底：顶部暗紫/暗粉晕向近黑 */
+  overflow: hidden;
+  border: 1px solid rgba(150, 122, 200, .16);
+  border-radius: 14px;
   background:
-    radial-gradient(ellipse 140% 90% at 50% 0%, #2e2838 0%, #2a222d 35%, var(--app-wash) 75%);
+    radial-gradient(ellipse 140% 90% at 50% 0%, #2e2838 0%, #2a222d 35%, transparent 75%),
+    radial-gradient(ellipse 100% 50% at 50% 112%, rgba(86, 62, 124, .34), transparent 72%),
+    var(--app-wash);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .45), 0 0 80px rgba(102, 74, 150, .12);
 }
 
-/* 个人站同款胶片噪点：粗细两层 feTurbulence，overlay + soft-light 混合覆盖全窗口 */
-.app-shell::before,
-.app-shell::after {
+/* 个人站同款胶片噪点：粗细两层 feTurbulence，overlay + soft-light 混合铺满容器 */
+.app-frame::before,
+.app-frame::after {
   content: "";
   position: absolute;
   inset: 0;
   z-index: 1;
   pointer-events: none;
 }
-.app-shell::before {
+.app-frame::before {
   mix-blend-mode: overlay;
   opacity: .5;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch' result='t'/%3E%3CfeColorMatrix in='t' type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-size: 180px 180px;
 }
-.app-shell::after {
+.app-frame::after {
   mix-blend-mode: soft-light;
   opacity: .22;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='90' height='90'%3E%3Cfilter id='m'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='2' stitchTiles='stitch' result='t'/%3E%3CfeColorMatrix in='t' type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 1 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23m)'/%3E%3C/svg%3E");
@@ -55,17 +72,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .titlebar-controls button { display: grid; place-items: center; width: 44px; padding: 0; border: 0; color: var(--muted); background: transparent; border-radius: 0; }
 .titlebar-controls button:hover { color: var(--text); background: var(--hover); }
 .titlebar-controls .titlebar-close:hover { color: #fff; background: #e81123; }
-/* 无边框窗口缺少系统描边：Win10 直角 / Win11 圆角下都用内描边界定窗口边缘 */
-.app-shell.has-titlebar { box-shadow: inset 0 0 0 1px var(--line); }
-[data-theme="light"] .app-shell {
+/* 最大化：容器退化为直角满屏，去掉描边与投影 */
+.app-shell.maximized .app-frame { border: 0; border-radius: 0; box-shadow: none; }
+/* 浅色主题：容器为不透明纸面，带一点薄荷色顶光 */
+[data-theme="light"] .app-frame {
   background:
     radial-gradient(1100px 480px at 50% -12%, rgba(29, 173, 133, .07), transparent 62%),
     var(--app-wash);
+  border-color: var(--line);
+  box-shadow: 0 18px 60px rgba(20, 28, 32, .12);
 }
 
 /* 噪点纹理仅用于深色主题，浅色下会显得脏 */
-[data-theme="light"] .app-shell::before,
-[data-theme="light"] .app-shell::after {
+[data-theme="light"] .app-frame::before,
+[data-theme="light"] .app-frame::after {
   display: none;
 }
 
@@ -378,12 +398,13 @@ input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: va
 }
 
 @media (max-width: 920px) {
-  .app-shell { grid-template-columns: 52px minmax(0, 1fr); }
-  .task-panel { position: fixed; z-index: 12; top: 58px; right: 0; width: min(340px, calc(100vw - 52px)); height: calc(100% - 58px); background: var(--panel); box-shadow: -20px 0 60px rgba(0, 0, 0, .28); }
-  .task-panel.collapsed { width: min(340px, calc(100vw - 52px)); transform: translateX(100%); opacity: 0; }
+  .app-frame { grid-template-columns: 52px minmax(0, 1fr); }
+  .task-panel { position: fixed; z-index: 12; top: 66px; right: 12px; bottom: 12px; width: min(340px, calc(100vw - 68px)); height: auto; border: 1px solid rgba(150, 122, 200, .16); border-radius: 12px; background: rgba(20, 16, 30, .92); backdrop-filter: blur(20px) saturate(1.2); -webkit-backdrop-filter: blur(20px) saturate(1.2); box-shadow: -20px 0 60px rgba(0, 0, 0, .28); }
+  [data-theme="light"] .task-panel { background: rgba(244, 245, 246, .94); border-color: var(--line); }
+  .task-panel.collapsed { width: min(340px, calc(100vw - 68px)); transform: translateX(calc(100% + 12px)); opacity: 0; }
   .download-workspace, .history-workspace { padding-inline: 20px; }
   .workspace-heading { align-items: flex-start; flex-direction: column; }
-  .has-titlebar .task-panel { top: 90px; height: calc(100% - 90px); }
+  .has-titlebar .task-panel { top: 98px; }
 }
 
 .has-titlebar .toast-stack { top: 100px; }

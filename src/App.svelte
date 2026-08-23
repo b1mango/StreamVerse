@@ -77,6 +77,7 @@
   let bootstrap = $state<BootstrapState | null>(null);
   let view = $state<View>("download");
   let platform = $state<PlatformId>("douyin");
+  let windowMaximized = $state(false);
   let workflowMode = $state<WorkflowMode>("single");
   let rawInput = $state("");
   let analyzing = $state(false);
@@ -155,6 +156,7 @@
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenResize: (() => void) | undefined;
     void (async () => {
       bootstrap = await getBootstrapState();
       document.documentElement.dataset.theme = bootstrap.theme;
@@ -162,8 +164,17 @@
       setLanguage(bootstrap.language);
       preview = null;
       unlisten = await subscribeTaskEvents(applyTaskEvent);
+      if (isFramelessWindows()) {
+        // 透明窗口下监听最大化：最大化时容器退化为直角满屏
+        const api = await import("@tauri-apps/api/window");
+        const win = api.getCurrentWindow();
+        windowMaximized = await win.isMaximized();
+        unlistenResize = await win.onResized(async () => {
+          windowMaximized = await win.isMaximized();
+        });
+      }
     })().catch((error) => (errorMessage = resolveErrorMessage(error)));
-    return () => unlisten?.();
+    return () => { unlisten?.(); unlistenResize?.(); };
   });
 
   function applyTaskEvent(event: TaskEvent) {
@@ -664,7 +675,8 @@
 <svelte:head><meta name="theme-color" content="#08070a" /></svelte:head>
 
 <svelte:boundary onerror={(error) => (errorMessage = resolveErrorMessage(error))}>
-  <div class="app-shell" class:has-titlebar={isFramelessWindows()} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>
+  <div class="app-shell" class:has-titlebar={isFramelessWindows()} class:maximized={windowMaximized} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>
+    <div class="app-frame">
     <TitleBar />
     <aside class="nav-rail" aria-label={$t("app.mainNavigation")}>
       <button class="brand-mark" type="button" title="StreamVerse" aria-label={`StreamVerse ${$t("workspace.title")}`} onclick={() => (view = "download")}><img class="brand-icon" src={appIconUrl} alt="" /></button>
@@ -759,6 +771,7 @@
     </main>
 
     <TaskPanel tasks={bootstrap?.tasks ?? []} collapsed={queueCollapsed} onControl={handleTaskControl} onReveal={(task) => task.outputPath && openInFileManager(task.outputPath, true)} onRemove={async (task) => { await removeDownloadTask(task.id); applyTaskEvent({ type: "delete", taskId: task.id }); }} onClear={async () => { if (!bootstrap) return; bootstrap.tasks = await clearFinishedTasks(); }} />
+    </div>
 
     {#if bootstrap}
       <SettingsSheet open={settingsOpen} {bootstrap} {browserSources} busy={operationBusy} onClose={() => (settingsOpen = false)} onSave={handleSaveSettings} onPickDirectory={() => pickSaveDirectory(bootstrap!.saveDirectory)} onPickCookieFile={pickCookieFile} onImportBrowser={handleImportBrowser} onSaveManual={async (platformId, value) => { const result = await saveManualCookies(platformId, { cookieText: value }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onImportCookieFile={async (platformId, path) => { const result = await saveManualCookies(platformId, { cookieFile: path }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onClearAuth={async (platformId) => { await clearPlatformAuth(platformId); bootstrap!.platformAuth[platformId] = { mode: "none", status: "guest" }; }} />

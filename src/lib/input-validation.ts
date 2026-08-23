@@ -16,7 +16,7 @@ const PLATFORM_LABELS: Record<PlatformId, string> = {
 function modeLabel(platform: PlatformId, mode: Exclude<InputTarget["mode"], "unknown">) {
   if (mode === "single") return "单视频";
   if (mode === "playlist") return "合集";
-  return platform === "youtube" ? "频道主页" : "主页批量";
+  return platform === "youtube" ? "主页频道" : "主页批量";
 }
 
 function normalizedInput(value: string) {
