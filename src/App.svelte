@@ -661,7 +661,7 @@
   }
 </script>
 
-<svelte:head><meta name="theme-color" content="#1f1f20" /></svelte:head>
+<svelte:head><meta name="theme-color" content="#08070a" /></svelte:head>
 
 <svelte:boundary onerror={(error) => (errorMessage = resolveErrorMessage(error))}>
   <div class="app-shell" class:has-titlebar={isFramelessWindows()} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>

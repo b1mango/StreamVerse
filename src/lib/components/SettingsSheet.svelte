@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Check, ChevronRight, Download, FileText, FolderOpen, Globe, Info, KeyRound, LoaderCircle, Palette, RefreshCw, ShieldCheck, Sparkles, Trash2, X } from "@lucide/svelte";
+  import { Check, ChevronRight, Download, FileText, FolderOpen, Globe, Info, KeyRound, LoaderCircle, Palette, RefreshCw, ShieldCheck, Trash2, X } from "@lucide/svelte";
+  import appIconUrl from "../../../src-tauri/icons/icon.png";
   import { platformMeta, qualityOptions } from "../options";
   import { t } from "../i18n";
   import { resolveErrorMessage } from "../media";
@@ -264,7 +265,7 @@
         {:else}
           <section class="settings-section">
             <div class="about-card">
-              <span class="about-logo"><Sparkles size={19} /></span>
+              <img class="about-logo" src={appIconUrl} alt="" />
               <div class="about-name"><strong>StreamVerse</strong><span>v{bootstrap.version}</span></div>
             </div>
             <div class="about-row">
