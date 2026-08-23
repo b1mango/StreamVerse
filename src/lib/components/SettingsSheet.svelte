@@ -191,7 +191,7 @@
         </label>
         <label>Profile
           <select bind:value={profileId}>
-            {#each selectedBrowser()?.profiles ?? [] as profile}<option value={profile.id}>{profile.label}{profile.isDefault ? " · 默认" : ""}</option>{/each}
+            {#each selectedBrowser()?.profiles ?? [] as profile}<option value={profile.id}>{profile.label}{profile.isDefault ? " · 推荐" : ""}</option>{/each}
           </select>
         </label>
         <button class="primary-button" type="button" disabled={!browserId || busy} onclick={() => (consentOpen = true)}><ShieldCheck size={17} />{$t("settings.detectCookie")}</button>

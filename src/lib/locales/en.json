@@ -28,7 +28,7 @@
   "settings.pickDirectory": "Browse",
   "settings.pickingDirectory": "Browsing…",
   "settings.platformAuth": "Per-platform Auth",
-  "settings.authStorage": "Cookies are stored only in the local 2.0 authentication directory.",
+  "settings.authStorage": "Cookies are stored only in StreamVerse's local authentication directory.",
   "settings.clearAuth": "Revoke and delete session",
   "settings.importCookieFile": "Import cookies.txt",
   "settings.saveCookieText": "Save Pasted Cookies",

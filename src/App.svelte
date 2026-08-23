@@ -538,7 +538,7 @@
 
     <main class="main-stage">
       <header class="stage-header">
-        <div class="wordmark"><span>STREAM</span><strong>VERSE</strong><small>2.0</small></div>
+        <div class="wordmark"><span>STREAM</span><strong>VERSE</strong><small>1.0</small></div>
         <div class="stage-status"><span class:online={activeTaskCount > 0}></span><b>{activeTaskCount > 0 ? `${activeTaskCount} ACTIVE` : $t("app.systemReady")}</b></div>
         <button class="queue-toggle icon-button" type="button" title={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} aria-label={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} onclick={() => (queueCollapsed = !queueCollapsed)}>{#if queueCollapsed}<PanelRightOpen size={18} />{:else}<PanelRightClose size={18} />{/if}</button>
       </header>

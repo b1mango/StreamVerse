@@ -143,14 +143,19 @@ pub fn validate_cookie_file_for_platform(path: &str, platform: &str) -> Result<(
             &["sessionid", "sessionid_ss"][..],
         ),
         "bilibili" => (&["bilibili.com", "b23.tv"][..], &["SESSDATA"][..]),
-        "youtube" => (
-            &["youtube.com", "google.com"][..],
-            &["SAPISID", "__Secure-3PAPISID", "SID"][..],
-        ),
+        "youtube" => (&["youtube.com", "google.com"][..], &[][..]),
         _ => return Err("不支持的平台。".to_string()),
     };
     let names = collect_cookie_names(Path::new(path), spec.0)?;
-    if spec.1.iter().any(|name| names.contains(*name)) {
+    let valid = if platform == "youtube" {
+        names.contains("LOGIN_INFO")
+            && ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"]
+                .iter()
+                .any(|name| names.contains(*name))
+    } else {
+        spec.1.iter().any(|name| names.contains(*name))
+    };
+    if valid {
         Ok(())
     } else {
         Err("当前登录态缺少平台关键 Cookie，请重新导入。".to_string())

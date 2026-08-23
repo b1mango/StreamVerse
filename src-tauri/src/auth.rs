@@ -59,7 +59,11 @@ pub fn list_browser_sources() -> Result<Vec<BrowserSource>, String> {
         if !matches!(id.as_str(), "chrome" | "edge" | "firefox" | "safari") {
             continue;
         }
-        let profiles = match rookie::browser_profiles(&id) {
+        let profiles = match if id == "chrome" {
+            rookie::chrome_profiles()
+        } else {
+            rookie::browser_profiles(&id)
+        } {
             Ok(profiles) => profiles,
             Err(_) => continue,
         };
@@ -68,14 +72,15 @@ pub fn list_browser_sources() -> Result<Vec<BrowserSource>, String> {
         }
         sources.push(BrowserSource {
             is_default: default.as_deref() == Some(id.as_str()),
-            id,
+            id: id.clone(),
             label: browser.display_name,
             profiles: profiles
                 .into_iter()
-                .map(|profile| BrowserProfile {
+                .enumerate()
+                .map(|(index, profile)| BrowserProfile {
                     id: profile.profile.profile_id.as_str().to_string(),
                     label: profile.profile.display_name,
-                    is_default: profile.is_default,
+                    is_default: preferred_profile(&id, index, profile.is_default),
                 })
                 .collect(),
         });
@@ -215,13 +220,16 @@ fn extract_browser_cookies(request: &CookieImportRequest) -> Result<Vec<Cookie>,
     .map_err(|error| cookie_extraction_error(&request.browser_id, &error.to_string()))?;
     let mut cookies = Vec::new();
     let mut issue_text = String::new();
+    let mut has_decryption_issue = false;
+    let mut selected_profile = None;
     for profile in report.profiles {
         for issue in profile.issues {
-            issue_text.push_str(&format!(" {issue:?}"));
+            record_extraction_issue(&issue, &mut issue_text, &mut has_decryption_issue);
         }
+        selected_profile = Some(profile.profile.display_name);
         for source in profile.sources {
             for issue in source.issues {
-                issue_text.push_str(&format!(" {issue:?}"));
+                record_extraction_issue(&issue, &mut issue_text, &mut has_decryption_issue);
             }
             if source.selected {
                 cookies.extend(source.cookies);
@@ -229,13 +237,51 @@ fn extract_browser_cookies(request: &CookieImportRequest) -> Result<Vec<Cookie>,
         }
     }
     for issue in report.issues {
-        issue_text.push_str(&format!(" {issue:?}"));
+        record_extraction_issue(&issue, &mut issue_text, &mut has_decryption_issue);
     }
     if cookies.is_empty() {
         return Err(cookie_extraction_error(&request.browser_id, &issue_text));
     }
-    validate_critical_cookies(&request.platform, &cookies)?;
+    if let Err(error) = validate_critical_cookies(&request.platform, &cookies) {
+        if request.browser_id == "chrome" && has_decryption_issue {
+            return Err(cookie_extraction_error(&request.browser_id, &issue_text));
+        }
+        let profile = selected_profile.as_deref().unwrap_or("所选 Profile");
+        return Err(format!(
+            "{error} 当前读取的是“{profile}”；如登录账号位于其他 Chrome Profile，请在下拉框中切换后重试。"
+        ));
+    }
     Ok(cookies)
+}
+
+fn preferred_profile(browser_id: &str, index: usize, declared_default: bool) -> bool {
+    if browser_id == "chrome" {
+        index == 0
+    } else {
+        declared_default
+    }
+}
+
+fn record_extraction_issue(
+    issue: &rookie::report::ExtractionIssue,
+    issue_text: &mut String,
+    has_decryption_issue: &mut bool,
+) {
+    let code = issue.code.as_str();
+    if is_decryption_issue_code(code) {
+        *has_decryption_issue = true;
+    }
+    issue_text.push(' ');
+    issue_text.push_str(code);
+    issue_text.push_str(": ");
+    issue_text.push_str(&issue.message);
+}
+
+fn is_decryption_issue_code(code: &str) -> bool {
+    matches!(
+        code,
+        "decrypt_failed" | "provider_unavailable" | "provider_failed"
+    )
 }
 
 fn persist_import(
@@ -489,16 +535,21 @@ fn parse_manual_cookies(platform: &str, content: &str) -> Result<Vec<Cookie>, St
 }
 
 fn validate_critical_cookies(platform: &str, cookies: &[Cookie]) -> Result<(), String> {
-    let required = match platform {
-        "douyin" => &["sessionid", "sessionid_ss"][..],
-        "bilibili" => &["SESSDATA"][..],
-        "youtube" => &["SAPISID", "__Secure-3PAPISID", "SID"][..],
-        _ => &[],
+    let has = |name: &str| {
+        cookies
+            .iter()
+            .any(|cookie| cookie.name == name && !cookie.value.trim().is_empty())
     };
-    if cookies
-        .iter()
-        .any(|cookie| required.iter().any(|name| cookie.name == *name) && !cookie.value.is_empty())
-    {
+    let valid = match platform {
+        "douyin" => has("sessionid") || has("sessionid_ss"),
+        "bilibili" => has("SESSDATA"),
+        "youtube" => {
+            has("LOGIN_INFO")
+                && (has("SAPISID") || has("__Secure-1PAPISID") || has("__Secure-3PAPISID"))
+        }
+        _ => false,
+    };
+    if valid {
         Ok(())
     } else {
         Err(format!(
@@ -634,6 +685,8 @@ fn needs_elevation(error: &str) -> bool {
         || lower.contains("appbound")
         || lower.contains("elevation")
         || lower.contains("decrypt")
+        || lower.contains("provider_failed")
+        || lower.contains("provider_unavailable")
         || lower.contains("access denied")
 }
 
@@ -658,7 +711,12 @@ fn cookie_extraction_error(browser_id: &str, issue_text: &str) -> String {
     if lower.contains("app-bound") || lower.contains("appbound") {
         return format!("{browser} 使用了 App-Bound Encryption，普通权限无法解密 Cookie。");
     }
-    if lower.contains("decrypt") || lower.contains("access denied") || lower.contains("elevation") {
+    if lower.contains("decrypt")
+        || lower.contains("provider_failed")
+        || lower.contains("provider_unavailable")
+        || lower.contains("access denied")
+        || lower.contains("elevation")
+    {
         return format!("{browser} 的 Cookie 解密被系统拒绝，需要 elevation 权限。");
     }
 
@@ -775,6 +833,24 @@ mod tests {
     }
 
     #[test]
+    fn youtube_cookie_check_matches_ytdlp_auth_requirements() {
+        let valid =
+            parse_manual_cookies("youtube", "LOGIN_INFO=login; __Secure-1PAPISID=account").unwrap();
+        assert!(validate_critical_cookies("youtube", &valid).is_ok());
+
+        let missing_login_info =
+            parse_manual_cookies("youtube", "SAPISID=account; SID=legacy").unwrap();
+        assert!(validate_critical_cookies("youtube", &missing_login_info).is_err());
+    }
+
+    #[test]
+    fn chrome_prefers_the_recent_profile_exposed_first_by_rookie() {
+        assert!(super::preferred_profile("chrome", 0, false));
+        assert!(!super::preferred_profile("chrome", 1, true));
+        assert!(super::preferred_profile("edge", 1, true));
+    }
+
+    #[test]
     fn locked_browser_database_has_actionable_error() {
         let error = cookie_extraction_error(
             "chrome",
@@ -789,6 +865,13 @@ mod tests {
     fn app_bound_error_still_requests_elevation() {
         let error = cookie_extraction_error("chrome", "App-Bound Encryption blocked decrypt");
         assert!(super::needs_elevation(&error));
+        assert!(super::is_decryption_issue_code("decrypt_failed"));
+        assert!(super::is_decryption_issue_code("provider_failed"));
+        assert!(!super::is_decryption_issue_code("decode_failed"));
+        assert!(super::needs_elevation(&cookie_extraction_error(
+            "chrome",
+            "provider_failed: protected key unavailable"
+        )));
     }
 
     #[cfg(target_os = "windows")]

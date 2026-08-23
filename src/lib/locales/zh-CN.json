@@ -28,7 +28,7 @@
   "settings.pickDirectory": "选择目录",
   "settings.pickingDirectory": "选择中…",
   "settings.platformAuth": "分平台登录态",
-  "settings.authStorage": "Cookie 只写入本机 2.0 专用认证目录。",
+  "settings.authStorage": "Cookie 只写入 StreamVerse 本机认证目录。",
   "settings.clearAuth": "撤销并删除登录态",
   "settings.importCookieFile": "导入 cookies.txt",
   "settings.saveCookieText": "保存粘贴内容",

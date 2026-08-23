@@ -2,15 +2,14 @@
 
 ## 当前基线
 
-- 产品版本：`2.0.0`
-- 发布分支：`codex/streamverse-2.0`，基于远端 `main` 的 `a294ca2`
+- 产品版本：`1.0.0`
 - 桌面壳：Tauri 2
 - 前端：Svelte 5 + TypeScript
 - 后端：Rust
 - 构建时 helper：Python 3.11 + PyInstaller；用户机器不需要 Python 或 pip
 - 支持范围：抖音、Bilibili、YouTube 单视频；抖音和 Bilibili 主页批量；YouTube 频道与合集批量
 
-2.0 是破坏性版本。设置、任务、历史与认证都使用 v2 文件，不读取或迁移 0.1 数据。
+1.0 是首个稳定版本。设置、任务、历史与认证使用当前稳定数据结构。
 
 ## 运行架构
 

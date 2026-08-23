@@ -2,7 +2,7 @@
 
 All notable changes to `StreamVerse` will be documented in this file.
 
-## [2.0.0] - 2026-08-23
+## [1.0.0] - 2026-08-23
 
 ### 新增
 
@@ -21,10 +21,13 @@ All notable changes to `StreamVerse` will be documented in this file.
 - 任务同步改为初始加载一次后接收增量 `TaskEvent`，删除前端轮询。
 - 下载后端拆为启动、IPC、provider runtime、任务控制、传输执行和产物保存模块。
 - 前端迁移到 Svelte 5 runes、callback props、Lucide 图标和 TanStack Virtual。
-- 设置、任务、历史和认证使用 v2 数据文件，不迁移 0.1 数据。
+- 设置、任务、历史和认证使用新的稳定版数据结构。
 
 ### 修复
 
+- Chrome Profile 默认改为最近使用项，修复多 Profile 机器读取到未登录目录的问题。
+- 修复 Chrome App-Bound Encryption 部分解密失败时误报“缺少关键 Cookie”，现在会正确进入一次性 UAC helper。
+- YouTube 登录态校验与 yt-dlp 对齐，支持 `__Secure-1PAPISID` 并要求完整的账号登录组合。
 - 修复批量列表更新 virtualizer options 时订阅自身 store，导致所有主页批量模块触发 `effect_update_depth_exceeded` 的问题。
 - 移除浏览器 UI 预览中的虚构解析结果和任务；真实解析只允许通过 Tauri 桌面运行时调用。
 - 修复 Cookie 授权失败后弹窗无反馈且可重复提交的问题，并为浏览器数据库占用提供可执行提示。

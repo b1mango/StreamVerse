@@ -14,7 +14,7 @@ def main(argv: list[str]) -> int:
 
     command, *rest = argv
     if command == "health":
-        print("streamverse-helper 2.0.0")
+        print("streamverse-helper 1.0.0")
         return 0
     if command == "douyin-analyze":
         import douyin_bridge
