@@ -1,6 +1,6 @@
 [package]
 name = "streamverse"
-version = "0.1.5"
+version = "2.0.0"
 description = "Desktop downloader for Douyin, Bilibili, YouTube and more"
 authors = ["Codex"]
 edition = "2021"
@@ -16,13 +16,13 @@ rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-rookie = "0.5"
+rookie = { package = "rookie-cookies", version = "0.5.9" }
+base64 = "0.22"
 tauri = { version = "2.1.1", features = [] }
 tauri-plugin-notification = "2"
-zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -37,18 +37,6 @@ custom-protocol = ["tauri/custom-protocol"]
 [[bin]]
 name = "streamverse"
 path = "src/main.rs"
-
-[[bin]]
-name = "streamverse-pack-douyin"
-path = "src/bin/streamverse-pack-douyin.rs"
-
-[[bin]]
-name = "streamverse-pack-bilibili"
-path = "src/bin/streamverse-pack-bilibili.rs"
-
-[[bin]]
-name = "streamverse-pack-youtube"
-path = "src/bin/streamverse-pack-youtube.rs"
 
 [profile.release]
 lto = true

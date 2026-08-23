@@ -1,36 +1,23 @@
-export type AuthState = "guest" | "active" | "expired";
+export type AuthStatus = "guest" | "active" | "expired" | "needsElevation";
+export type AuthMode = "none" | "browser" | "manual";
 export type DownloadMode = "manual";
 export type PlatformId = "douyin" | "bilibili" | "youtube";
 export type ThemeMode = "dark" | "light";
 export type LanguageCode = "zh-CN" | "en";
-export type ModuleId =
-  | "douyin-single"
-  | "douyin-profile"
-  | "bilibili-single"
-  | "bilibili-profile"
-  | "youtube-single";
-export type QualityPreference =
-  | "recommended"
-  | "highest"
-  | "smallest"
-  | "no_watermark";
-
-export type DownloadStatus =
-  | "idle"
-  | "analyzing"
-  | "queued"
-  | "downloading"
-  | "paused"
-  | "cancelled"
-  | "completed"
-  | "failed";
+export type QualityPreference = "recommended" | "highest" | "smallest" | "no_watermark";
+export type DownloadStatus = "idle" | "analyzing" | "queued" | "downloading" | "paused" | "cancelled" | "completed" | "failed";
 
 export interface DownloadContentSelection {
   downloadVideo: boolean;
   downloadAudio: boolean;
   downloadCover: boolean;
   downloadCaption: boolean;
-  downloadMetadata: boolean;
+}
+
+export interface AnalysisProgress {
+  current: number;
+  total: number;
+  message: string;
 }
 
 export interface VideoFormat {
@@ -65,8 +52,11 @@ export interface VideoAsset {
   categoryLabel?: string | null;
   groupTitle?: string | null;
   coverUrl?: string | null;
+  coverUrls?: string[];
   coverGradient: string;
+  imageUrls?: string[];
   formats: VideoFormat[];
+  formatStatus?: "pending" | "loaded" | "failed";
 }
 
 export interface DownloadTask {
@@ -85,6 +75,50 @@ export interface DownloadTask {
   canRetry: boolean;
 }
 
+export type TaskEvent =
+  | { type: "upsert"; task: DownloadTask }
+  | { type: "delete"; taskId: string }
+  | { type: "reset"; tasks: DownloadTask[] };
+
+export interface PlatformAuthSettings {
+  mode: AuthMode;
+  browserId?: string | null;
+  profileId?: string | null;
+  consentedAt?: number | null;
+  status: AuthStatus;
+}
+
+export interface BrowserProfile {
+  id: string;
+  label: string;
+  isDefault: boolean;
+}
+
+export interface BrowserSource {
+  id: string;
+  label: string;
+  isDefault: boolean;
+  profiles: BrowserProfile[];
+}
+
+export interface CookieImportRequest {
+  platform: PlatformId;
+  browserId: string;
+  profileId?: string | null;
+  consent: "once" | "always";
+  allowElevation?: boolean;
+}
+
+export interface CookieImportResult {
+  platform: PlatformId;
+  browserId: string;
+  profileId?: string | null;
+  status: AuthStatus;
+  importedCount: number;
+  requiresElevation: boolean;
+  message: string;
+}
+
 export interface AppMetrics {
   todayDownloads: number;
   successRate: string;
@@ -92,28 +126,11 @@ export interface AppMetrics {
   maxQuality: string;
 }
 
-export interface ModuleRuntimeState {
-  id: ModuleId;
-  installed: boolean;
-  enabled: boolean;
-  packId?: string | null;
-  currentVersion?: string | null;
-  latestVersion?: string | null;
-  sizeBytes?: number | null;
-  sourceKind?: string | null;
-  updateAvailable: boolean;
-}
-
-export interface ModuleInstallProgress {
-  percent: number;
-  label: string;
-}
-
 export interface BootstrapState {
-  authState: AuthState;
+  authState: "guest" | "active";
   accountLabel: string;
   isWindows: boolean;
-  platformAuth: Record<PlatformId, PlatformAuthProfile>;
+  platformAuth: Record<PlatformId, PlatformAuthSettings>;
   saveDirectory: string;
   downloadMode: DownloadMode;
   qualityPreference: QualityPreference;
@@ -127,55 +144,13 @@ export interface BootstrapState {
   language: LanguageCode;
   ffmpegAvailable: boolean;
   metrics: AppMetrics;
-  modules: ModuleRuntimeState[];
   preview: VideoAsset;
   tasks: DownloadTask[];
 }
 
-export interface AuthProfile {
-  authState: AuthState;
-  accountLabel: string;
-  cookieBrowser: string | null;
-}
+export type SettingsProfile = Omit<BootstrapState, "isWindows" | "metrics" | "preview" | "tasks">;
 
-export interface PlatformAuthSettings {
-  cookieBrowser: string | null;
-  cookieFile: string | null;
-}
-
-export interface PlatformAuthProfile extends PlatformAuthSettings {
-  authState: AuthState;
-  accountLabel: string;
-}
-
-export interface PlatformAuthDraft extends PlatformAuthSettings {
-  cookieText?: string | null;
-}
-
-export interface SettingsProfile {
-  authState: AuthState;
-  accountLabel: string;
-  platformAuth: Record<PlatformId, PlatformAuthProfile>;
-  saveDirectory: string;
-  downloadMode: DownloadMode;
-  qualityPreference: QualityPreference;
-  autoRevealInFinder: boolean;
-  maxConcurrentDownloads: number;
-  proxyUrl: string | null;
-  speedLimit: string | null;
-  autoUpdate: boolean;
-  theme: ThemeMode;
-  notifyOnComplete: boolean;
-  language: LanguageCode;
-  ffmpegAvailable: boolean;
-}
-
-export interface AnalyzeInputPayload {
-  rawInput: string;
-  sessionId?: string | null;
-}
-
-export interface CreateTaskPayload {
+export interface DownloadRequest {
   assetId: string;
   platform: PlatformId;
   sourceUrl: string;
@@ -184,10 +159,12 @@ export interface CreateTaskPayload {
   publishDate: string;
   caption: string;
   coverUrl?: string | null;
+  imageUrls?: string[];
   formatId?: string | null;
   formatLabel?: string | null;
-  saveDirectoryOverride?: string | null;
+  saveDirectory: string;
   downloadOptions: DownloadContentSelection;
+  autoRevealInFileManager: boolean;
   directUrl?: string | null;
   referer?: string | null;
   userAgent?: string | null;
@@ -197,7 +174,6 @@ export interface CreateTaskPayload {
 }
 
 export interface SaveSettingsPayload {
-  platformAuth: Record<PlatformId, PlatformAuthDraft>;
   saveDirectory: string;
   downloadMode: DownloadMode;
   qualityPreference: QualityPreference;
@@ -211,40 +187,9 @@ export interface SaveSettingsPayload {
   language: LanguageCode;
 }
 
-export interface SetModuleEnabledPayload {
-  moduleId: ModuleId;
-  enabled: boolean;
-}
-
 export interface BatchItemSelection {
   asset: VideoAsset;
   selectedFormatId?: string | null;
-}
-
-export interface CreateProfileDownloadTasksPayload {
-  profileTitle: string;
-  sourceUrl: string;
-  items: BatchItemSelection[];
-  sessionCookieFile?: string | null;
-  saveDirectoryOverride?: string | null;
-  downloadOptions: DownloadContentSelection;
-}
-
-export interface AnalyzeProfilePayload {
-  rawInput: string;
-  limit?: number;
-  sessionId?: string | null;
-}
-
-export interface AnalysisProgress {
-  current: number;
-  total: number;
-  message: string;
-}
-
-export interface BrowserLaunchResult {
-  port: number;
-  browser: string;
 }
 
 export interface ProfileBatch {
@@ -253,7 +198,6 @@ export interface ProfileBatch {
   totalAvailable: number;
   fetchedCount: number;
   skippedCount: number;
-  sessionCookieFile?: string | null;
   items: VideoAsset[];
 }
 
@@ -269,7 +213,7 @@ export interface BatchDownloadResult {
 
 export interface DownloadHistoryEntry {
   assetId: string;
-  platform: string;
+  platform: PlatformId;
   title: string;
   downloadedAt: string;
 }

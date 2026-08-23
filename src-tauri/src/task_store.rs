@@ -1,4 +1,4 @@
-use crate::{DownloadTask, TaskReplayRequest};
+use crate::{DownloadRequest, DownloadTask};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -24,7 +24,15 @@ pub struct TaskStoreInner {
 #[serde(rename_all = "camelCase")]
 pub struct StoredTaskEntry {
     pub task: DownloadTask,
-    pub replay: Option<TaskReplayRequest>,
+    pub replay: Option<DownloadRequest>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum TaskEvent {
+    Upsert { task: DownloadTask },
+    Delete { task_id: String },
+    Reset { tasks: Vec<DownloadTask> },
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -78,7 +86,7 @@ pub fn list_tasks(store: &TaskStore) -> Vec<DownloadTask> {
         .collect()
 }
 
-pub fn replay_for_task(store: &TaskStore, task_id: &str) -> Option<TaskReplayRequest> {
+pub fn replay_for_task(store: &TaskStore, task_id: &str) -> Option<DownloadRequest> {
     store
         .entries
         .lock()
@@ -88,7 +96,7 @@ pub fn replay_for_task(store: &TaskStore, task_id: &str) -> Option<TaskReplayReq
         .and_then(|entry| entry.replay.clone())
 }
 
-pub fn set_replay(store: &TaskStore, task_id: &str, replay: TaskReplayRequest) {
+pub fn set_replay(store: &TaskStore, task_id: &str, replay: DownloadRequest) {
     let mut guard = store.entries.lock().unwrap();
     if let Some(entry) = guard.iter_mut().find(|entry| entry.task.id == task_id) {
         entry.replay = Some(replay);
@@ -98,6 +106,7 @@ pub fn set_replay(store: &TaskStore, task_id: &str, replay: TaskReplayRequest) {
 }
 
 pub fn upsert_task(store: &TaskStore, next: DownloadTask) {
+    let emitted = next.clone();
     let mut guard = store.entries.lock().unwrap();
     if let Some(existing) = guard.iter_mut().find(|entry| entry.task.id == next.id) {
         existing.task = next;
@@ -112,7 +121,7 @@ pub fn upsert_task(store: &TaskStore, next: DownloadTask) {
     }
     trim_entries(&mut guard);
     store.dirty.store(true, Ordering::Release);
-    emit_tasks_changed(store);
+    emit_task_event(store, TaskEvent::Upsert { task: emitted });
 }
 
 pub fn mutate_task<F>(store: &TaskStore, task_id: &str, mutator: F) -> Result<DownloadTask, String>
@@ -127,7 +136,12 @@ where
     mutator(&mut entry.task);
     let updated = entry.task.clone();
     save_entries(&guard);
-    emit_tasks_changed(store);
+    emit_task_event(
+        store,
+        TaskEvent::Upsert {
+            task: updated.clone(),
+        },
+    );
     Ok(updated)
 }
 
@@ -148,7 +162,12 @@ pub fn remove_task(store: &TaskStore, task_id: &str) -> Result<(), String> {
         return Err("未找到对应的下载任务。".to_string());
     }
     save_entries(&guard);
-    emit_tasks_changed(store);
+    emit_task_event(
+        store,
+        TaskEvent::Delete {
+            task_id: task_id.to_string(),
+        },
+    );
     Ok(())
 }
 
@@ -161,8 +180,13 @@ pub fn clear_finished(store: &TaskStore) -> Vec<DownloadTask> {
         )
     });
     save_entries(&guard);
-    let result = guard.iter().map(|entry| entry.task.clone()).collect();
-    emit_tasks_changed(store);
+    let result: Vec<DownloadTask> = guard.iter().map(|entry| entry.task.clone()).collect();
+    emit_task_event(
+        store,
+        TaskEvent::Reset {
+            tasks: result.clone(),
+        },
+    );
     result
 }
 
@@ -228,21 +252,33 @@ fn trim_entries(entries: &mut Vec<StoredTaskEntry>) {
 }
 
 fn tasks_path() -> PathBuf {
-    PathBuf::from(crate::settings::home_dir()).join(".streamverse").join("tasks.json")
+    crate::settings::app_data_root().join("tasks-v2.json")
 }
 
-fn emit_tasks_changed(store: &TaskStore) {
+fn emit_task_event(store: &TaskStore, event: TaskEvent) {
     let now = Instant::now();
+    let (key, force) = match &event {
+        TaskEvent::Upsert { task } => (
+            task.id.clone(),
+            matches!(
+                task.status.as_str(),
+                "completed" | "failed" | "cancelled" | "paused"
+            ),
+        ),
+        TaskEvent::Delete { task_id } => (task_id.clone(), true),
+        TaskEvent::Reset { .. } => ("__reset__".to_string(), true),
+    };
     let mut last_map = store.last_emit.lock().unwrap();
-    let should_emit = last_map
-        .get("__global__")
-        .map_or(true, |last| now.duration_since(*last).as_millis() as u64 >= PROGRESS_THROTTLE_MS);
+    let should_emit = force
+        || last_map.get(&key).is_none_or(|last| {
+            now.duration_since(*last).as_millis() as u64 >= PROGRESS_THROTTLE_MS
+        });
 
     if should_emit {
-        last_map.insert("__global__".to_string(), now);
+        last_map.insert(key, now);
         drop(last_map);
         if let Some(handle) = store.app_handle.lock().unwrap().as_ref() {
-            let _ = handle.emit("tasks-changed", ());
+            let _ = handle.emit("task-event", event);
         }
     }
 }

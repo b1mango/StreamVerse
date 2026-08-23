@@ -54,8 +54,12 @@ pub(crate) struct VideoAsset {
     pub(crate) category_label: Option<String>,
     pub(crate) group_title: Option<String>,
     pub(crate) cover_url: Option<String>,
+    #[serde(default)]
+    pub(crate) cover_urls: Vec<String>,
     #[serde(default = "default_gradient")]
     pub(crate) cover_gradient: String,
+    #[serde(default)]
+    pub(crate) image_urls: Vec<String>,
     #[serde(default)]
     pub(crate) formats: Vec<VideoFormat>,
 }
@@ -68,7 +72,6 @@ pub(crate) struct ProfileBatch {
     pub(crate) total_available: u32,
     pub(crate) fetched_count: u32,
     pub(crate) skipped_count: u32,
-    pub(crate) session_cookie_file: Option<String>,
     pub(crate) items: Vec<VideoAsset>,
 }
 
@@ -87,14 +90,6 @@ pub(crate) struct DownloadContentSelection {
     pub(crate) download_audio: bool,
     pub(crate) download_cover: bool,
     pub(crate) download_caption: bool,
-    pub(crate) download_metadata: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct BrowserLaunchResult {
-    pub(crate) port: u16,
-    pub(crate) browser: String,
 }
 
 #[cfg(test)]
@@ -147,5 +142,6 @@ mod tests {
         assert_eq!(batch.items[0].asset_id, "123");
         assert!(!batch.items[0].formats[0].requires_processing);
         assert!(batch.items[0].formats[0].audio_direct_url.is_none());
+        assert!(batch.items[0].image_urls.is_empty());
     }
 }

@@ -10,7 +10,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -22,10 +22,8 @@ jobs:
         include:
           - os: macos-latest
             bundles: app,dmg
-            exe_suffix: ""
           - os: windows-latest
             bundles: nsis
-            exe_suffix: ".exe"
 
     steps:
       - name: Checkout
@@ -48,29 +46,45 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install helper build dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-douyin-helper.txt pyinstaller==6.22.0
+
+      - name: Frontend and sidecar manifest tests
+        run: npm test
+
+      - name: Python helper tests
+        run: npm run test:helper
+
       - name: Frontend typecheck
         run: npm run check
 
       - name: Build frontend bundle
         run: npm run build
 
-      - name: Prepare pack placeholders
-        shell: bash
-        run: |
-          mkdir -p src-tauri/target/release
-          touch "src-tauri/target/release/streamverse-pack-douyin${{ matrix.exe_suffix }}"
-          touch "src-tauri/target/release/streamverse-pack-bilibili${{ matrix.exe_suffix }}"
-          touch "src-tauri/target/release/streamverse-pack-youtube${{ matrix.exe_suffix }}"
+      - name: Build Python helper sidecar
+        run: npm run build:helper
 
-      - name: Build pack binaries
-        run: cargo build --release --bin streamverse-pack-douyin --bin streamverse-pack-bilibili --bin streamverse-pack-youtube
+      - name: Prepare and verify fixed sidecars
+        run: npm run prepare:sidecars
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+        working-directory: src-tauri
+
+      - name: Rust lint and tests
+        run: cargo clippy --all-targets -- -D warnings
         working-directory: src-tauri
 
       - name: Rust tests
-        run: cargo test
+        run: cargo test --all-targets
         working-directory: src-tauri
 
-      - name: Build desktop bundle
+      - name: Build Windows desktop bundle
+        if: runner.os == 'Windows'
+        run: npm run tauri:build -- --bundles ${{ matrix.bundles }} --config src-tauri/tauri.windows.conf.json
+
+      - name: Build macOS desktop bundle
+        if: runner.os == 'macOS'
         run: npm run tauri:build -- --bundles ${{ matrix.bundles }}
 
       - name: Upload desktop artifacts
@@ -79,26 +93,3 @@ jobs:
           name: streamverse-${{ matrix.os }}-${{ matrix.bundles }}
           path: src-tauri/target/release/bundle/
           if-no-files-found: error
-
-  publish-release:
-    name: publish-desktop-release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download desktop artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: streamverse-*
-          merge-multiple: true
-
-      - name: Publish desktop release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.exe
-          fail_on_unmatched_files: true

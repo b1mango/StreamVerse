@@ -1,492 +1,184 @@
 import { mockState } from "./mock";
 import type {
-  AnalyzeInputPayload,
   AnalysisProgress,
-  AnalyzeProfilePayload,
-  BatchItemSelection,
   BatchDownloadResult,
-  BrowserLaunchResult,
+  BatchItemSelection,
   BootstrapState,
-  CreateProfileDownloadTasksPayload,
-  CreateTaskPayload,
+  BrowserSource,
+  CookieImportRequest,
+  CookieImportResult,
+  DownloadHistoryEntry,
+  DownloadRequest,
   DownloadTask,
+  PlatformId,
   ProfileBatch,
   SaveSettingsPayload,
-  SetModuleEnabledPayload,
   SettingsProfile,
-  ModuleRuntimeState,
-  ModuleId,
+  TaskEvent,
   VideoAsset
 } from "./types";
 
 declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
+  interface Window { __TAURI_INTERNALS__?: unknown; }
 }
 
-function hasTauriRuntime() {
+export function hasTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 }
 
-async function maybeInvoke<T>(command: string, payload?: unknown): Promise<T> {
-  if (!hasTauriRuntime()) {
-    throw new Error(`Tauri runtime unavailable for command: ${command}`);
-  }
+function desktopRuntimeRequired(): never {
+  throw new Error("浏览器地址仅用于界面预览，无法调用本机解析器。请运行桌面版 StreamVerse 解析真实链接。");
+}
 
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command, payload as Record<string, unknown> | undefined);
+async function invoke<T>(command: string, payload?: unknown): Promise<T> {
+  if (!hasTauriRuntime()) throw new Error(`Tauri runtime unavailable: ${command}`);
+  const api = await import("@tauri-apps/api/core");
+  return api.invoke<T>(command, payload as Record<string, unknown> | undefined);
 }
 
 export async function getBootstrapState(): Promise<BootstrapState> {
-  if (!hasTauriRuntime()) {
-    return mockState;
-  }
-
-  return maybeInvoke<BootstrapState>("get_bootstrap_state");
+  return hasTauriRuntime() ? invoke("get_bootstrap_state") : structuredClone(mockState);
 }
 
-export async function analyzeInput(
-  payload: AnalyzeInputPayload
-): Promise<VideoAsset> {
-  if (!hasTauriRuntime()) {
-    return mockState.preview;
-  }
-
-  return maybeInvoke<VideoAsset>("analyze_input", payload);
+export async function analyzeInput(rawInput: string, sessionId = crypto.randomUUID()): Promise<VideoAsset> {
+  return hasTauriRuntime()
+    ? invoke("analyze_input", { rawInput, sessionId })
+    : desktopRuntimeRequired();
 }
 
-export async function getAnalysisProgress(
-  sessionId: string
-): Promise<AnalysisProgress | null> {
-  if (!hasTauriRuntime()) {
-    return null;
-  }
+export async function analyzeBatchItem(rawInput: string): Promise<VideoAsset> {
+  return hasTauriRuntime()
+    ? invoke("analyze_input", { rawInput, sessionId: null })
+    : desktopRuntimeRequired();
+}
 
-  return maybeInvoke<AnalysisProgress | null>("get_analysis_progress", { sessionId });
+export async function analyzeProfileInput(rawInput: string, sessionId = crypto.randomUUID()): Promise<ProfileBatch> {
+  if (hasTauriRuntime()) {
+    return invoke("analyze_profile_input", { rawInput, sessionId });
+  }
+  return desktopRuntimeRequired();
+}
+
+export async function getAnalysisProgress(sessionId: string): Promise<AnalysisProgress | null> {
+  return hasTauriRuntime() ? invoke("get_analysis_progress", { sessionId }) : null;
 }
 
 export async function clearAnalysisProgress(sessionId: string): Promise<void> {
-  if (!hasTauriRuntime()) {
-    return;
-  }
-
-  await maybeInvoke<void>("clear_analysis_progress", { sessionId });
-}
-
-export async function createDownloadTask(
-  payload: CreateTaskPayload
-): Promise<DownloadTask> {
-  if (!hasTauriRuntime()) {
-    return {
-      id: `task-${Date.now()}`,
-      platform: payload.platform,
-      title: payload.title,
-      progress: 100,
-      speedText: "-",
-      formatLabel: payload.formatLabel ?? "视频",
-      status: "completed",
-      etaText: "已完成",
-      message: "下载任务已完成",
-      outputPath: `${payload.saveDirectoryOverride ?? mockState.saveDirectory}/${payload.title}`,
-      supportsPause: false,
-      supportsCancel: false,
-      canRetry: true
-    };
-  }
-
-  return maybeInvoke<DownloadTask>("create_download_task", payload);
-}
-
-export async function analyzeProfileInput(
-  payload: AnalyzeProfilePayload
-): Promise<ProfileBatch> {
-  if (!hasTauriRuntime()) {
-    const isBilibili = /bilibili|b23\.tv/i.test(payload.rawInput);
-    const preview = {
-      ...mockState.preview,
-      platform: isBilibili ? "bilibili" : "douyin",
-      sourceUrl: payload.rawInput
-    } as VideoAsset;
-
-    return {
-      profileTitle: isBilibili ? "示例 UP 主" : "示例主页",
-      sourceUrl: payload.rawInput,
-      totalAvailable: payload.limit ?? 12,
-      fetchedCount: payload.limit ?? 12,
-      skippedCount: 0,
-      items: Array.from({ length: payload.limit ?? 12 }).map((_, index) => ({
-        ...preview,
-        assetId: `${preview.assetId}-${index + 1}`,
-        title: `${preview.title} ${index + 1}`,
-        sourceUrl: `${preview.sourceUrl}?item=${index + 1}`
-      }))
-    };
-  }
-
-  return maybeInvoke<ProfileBatch>("analyze_profile_input", payload);
-}
-
-export async function openProfileBrowser(
-  payload: AnalyzeProfilePayload
-): Promise<BrowserLaunchResult> {
-  if (!hasTauriRuntime()) {
-    return {
-      port: 9222,
-      browser: "chrome"
-    };
-  }
-
-  return maybeInvoke<BrowserLaunchResult>("open_profile_browser", payload);
-}
-
-export async function collectProfileBrowser(
-  payload: AnalyzeProfilePayload & { port: number }
-): Promise<ProfileBatch> {
-  if (!hasTauriRuntime()) {
-    const preview = {
-      ...mockState.preview,
-      platform: "douyin",
-      sourceUrl: payload.rawInput,
-      formats: []
-    } as VideoAsset;
-
-    return {
-      profileTitle: "示例主页",
-      sourceUrl: payload.rawInput,
-      totalAvailable: 12,
-      fetchedCount: 12,
-      skippedCount: 0,
-      sessionCookieFile: null,
-      items: Array.from({ length: 12 }).map((_, index) => ({
-        ...preview,
-        assetId: `${preview.assetId}-${index + 1}`,
-        title: `${preview.title} ${index + 1}`,
-        sourceUrl: `${preview.sourceUrl}?item=${index + 1}`
-      }))
-    };
-  }
-
-  return maybeInvoke<ProfileBatch>("collect_profile_browser", payload);
-}
-
-export async function createProfileDownloadTasks(
-  payload: CreateProfileDownloadTasksPayload
-): Promise<BatchDownloadResult> {
-  if (!hasTauriRuntime()) {
-    return {
-      profileTitle: "示例主页",
-      sourceUrl: payload.sourceUrl,
-      totalAvailable: payload.items.length,
-      fetchedCount: payload.items.length,
-      enqueuedCount: payload.items.length,
-      skippedCount: 0,
-      message: "已加入队列"
-    };
-  }
-
-  return maybeInvoke<BatchDownloadResult>("create_profile_download_tasks", payload);
-}
-
-export async function listDownloadTasks(): Promise<DownloadTask[]> {
-  if (!hasTauriRuntime()) {
-    return mockState.tasks;
-  }
-
-  return maybeInvoke<DownloadTask[]>("list_download_tasks");
-}
-
-export async function saveSettings(
-  payload: SaveSettingsPayload
-): Promise<SettingsProfile> {
-  if (!hasTauriRuntime()) {
-    const platformAuth = Object.fromEntries(
-      Object.entries(payload.platformAuth).map(([platform, auth]) => {
-        const importedCookieFile = auth.cookieText
-          ? `~/.streamverse/auth/saved-${platform}-cookies.txt`
-          : auth.cookieFile;
-        const importedCookieLabel = importedCookieFile?.split(/[\\/]/).pop() ?? importedCookieFile;
-        return [
-          platform,
-          {
-            authState: auth.cookieBrowser || importedCookieFile ? "active" : "guest",
-            accountLabel: auth.cookieText
-              ? "已保存登录态"
-              : importedCookieFile
-                ? `Cookie 文件 · ${importedCookieLabel}`
-                : auth.cookieBrowser
-                  ? `浏览器 Cookie · ${auth.cookieBrowser}`
-                  : "未登录",
-            cookieBrowser: auth.cookieBrowser,
-            cookieFile: importedCookieFile
-          }
-        ];
-      })
-    ) as SettingsProfile["platformAuth"];
-    const activePlatforms = Object.values(platformAuth).filter(
-      (auth) => auth.authState === "active"
-    );
-    return {
-      authState: activePlatforms.length ? "active" : "guest",
-      accountLabel:
-        activePlatforms.length === 0
-          ? "未登录"
-          : activePlatforms.length === 1
-            ? activePlatforms[0].accountLabel
-            : `已配置 ${activePlatforms.length} 个平台登录态`,
-      platformAuth,
-      saveDirectory: payload.saveDirectory,
-      downloadMode: payload.downloadMode,
-      qualityPreference: payload.qualityPreference,
-      autoRevealInFinder: payload.autoRevealInFinder,
-      maxConcurrentDownloads: payload.maxConcurrentDownloads,
-      proxyUrl: payload.proxyUrl,
-      speedLimit: payload.speedLimit,
-      autoUpdate: payload.autoUpdate,
-      theme: payload.theme,
-      notifyOnComplete: payload.notifyOnComplete,
-      language: payload.language,
-      ffmpegAvailable: false
-    };
-  }
-
-  return maybeInvoke<SettingsProfile>("save_settings", payload);
-}
-
-export async function setModuleEnabled(
-  payload: SetModuleEnabledPayload
-): Promise<ModuleRuntimeState[]> {
-  if (!hasTauriRuntime()) {
-    return mockState.modules.map((module) =>
-      module.id === payload.moduleId ? { ...module, enabled: payload.enabled } : module
-    );
-  }
-
-  return maybeInvoke<ModuleRuntimeState[]>("set_module_enabled", payload);
-}
-
-function applyMockModulePack(
-  moduleId: ModuleId,
-  installed: boolean
-): ModuleRuntimeState[] {
-  const sharedIds =
-    moduleId === "douyin-single" || moduleId === "douyin-profile"
-      ? ["douyin-single", "douyin-profile"]
-      : moduleId === "bilibili-single" || moduleId === "bilibili-profile"
-        ? ["bilibili-single", "bilibili-profile"]
-        : ["youtube-single"];
-
-  return mockState.modules.map((module) =>
-    sharedIds.includes(module.id)
-      ? { ...module, installed, enabled: installed ? true : false }
-      : module
-  );
-}
-
-export async function installModulePack(
-  moduleId: ModuleId
-): Promise<ModuleRuntimeState[]> {
-  if (!hasTauriRuntime()) {
-    return applyMockModulePack(moduleId, true);
-  }
-
-  return maybeInvoke<ModuleRuntimeState[]>("install_module_pack", { moduleId });
-}
-
-export async function uninstallModulePack(
-  moduleId: ModuleId
-): Promise<ModuleRuntimeState[]> {
-  if (!hasTauriRuntime()) {
-    return applyMockModulePack(moduleId, false);
-  }
-
-  return maybeInvoke<ModuleRuntimeState[]>("uninstall_module_pack", { moduleId });
-}
-
-export async function updateModulePack(
-  moduleId: ModuleId
-): Promise<ModuleRuntimeState[]> {
-  if (!hasTauriRuntime()) {
-    return applyMockModulePack(moduleId, true).map((module) =>
-      module.id === moduleId
-        ? {
-            ...module,
-            installed: true,
-            enabled: true,
-            currentVersion: module.latestVersion ?? "0.1.0",
-            updateAvailable: false
-          }
-        : module
-    );
-  }
-
-  return maybeInvoke<ModuleRuntimeState[]>("update_module_pack", { moduleId });
-}
-
-export async function pickSaveDirectory(
-  currentDirectory: string | null
-): Promise<string | null> {
-  if (!hasTauriRuntime()) {
-    return currentDirectory ?? mockState.saveDirectory;
-  }
-
-  return maybeInvoke<string | null>("pick_save_directory", { currentDirectory });
-}
-
-export async function pickCookieFile(
-  currentFile: string | null
-): Promise<string | null> {
-  if (!hasTauriRuntime()) {
-    return currentFile;
-  }
-
-  return maybeInvoke<string | null>("pick_cookie_file", { currentFile });
-}
-
-export async function detectBrowserCookies(
-  platform: string,
-  browser: string
-): Promise<string> {
-  if (!hasTauriRuntime()) {
-    return `~/.streamverse/auth/saved-${platform}-cookies.txt`;
-  }
-
-  return maybeInvoke<string>("detect_browser_cookies", { platform, browser });
-}
-
-export async function openInFileManager(
-  path: string,
-  revealParent = false
-): Promise<void> {
-  if (!hasTauriRuntime()) {
-    return;
-  }
-
-  return maybeInvoke<void>("open_in_file_manager", { path, revealParent });
-}
-
-export async function removeDownloadTask(taskId: string): Promise<void> {
-  if (!hasTauriRuntime()) {
-    return;
-  }
-
-  return maybeInvoke<void>("remove_download_task", { taskId });
-}
-
-export async function clearFinishedTasks(): Promise<DownloadTask[]> {
-  if (!hasTauriRuntime()) {
-    return mockState.tasks.filter(
-      (task) =>
-        task.status !== "completed" &&
-        task.status !== "failed" &&
-        task.status !== "cancelled"
-    );
-  }
-
-  return maybeInvoke<DownloadTask[]>("clear_finished_tasks");
-}
-
-export async function installDownloadEngine(): Promise<void> {
-  if (!hasTauriRuntime()) {
-    return;
-  }
-
-  return maybeInvoke<void>("install_download_engine");
-}
-
-export async function checkDownloadHistory(
-  platform: string,
-  assetIds: string[]
-): Promise<string[]> {
-  if (!hasTauriRuntime()) {
-    return [];
-  }
-
-  return maybeInvoke<string[]>("check_download_history", { platform, assetIds });
-}
-
-import type { DownloadHistoryEntry } from "./types";
-
-export async function listDownloadHistory(
-  limit?: number,
-  platform?: string
-): Promise<DownloadHistoryEntry[]> {
-  if (!hasTauriRuntime()) {
-    return [];
-  }
-
-  return maybeInvoke<DownloadHistoryEntry[]>("list_download_history", { limit, platform });
-}
-
-export async function searchDownloadHistory(
-  query: string,
-  limit?: number
-): Promise<DownloadHistoryEntry[]> {
-  if (!hasTauriRuntime()) {
-    return [];
-  }
-
-  return maybeInvoke<DownloadHistoryEntry[]>("search_download_history", { query, limit });
-}
-
-export async function getDownloadHistoryCount(): Promise<number> {
-  if (!hasTauriRuntime()) {
-    return 0;
-  }
-
-  return maybeInvoke<number>("get_download_history_count");
+  if (hasTauriRuntime()) await invoke("clear_analysis_progress", { sessionId });
 }
 
 export async function fetchThumbnail(url: string): Promise<string> {
-  if (!hasTauriRuntime()) {
-    return url;
-  }
-
-  return maybeInvoke<string>("fetch_thumbnail", { url });
+  return hasTauriRuntime() ? invoke("fetch_thumbnail", { url }) : url;
 }
 
-export async function pauseDownloadTask(taskId: string): Promise<DownloadTask> {
-  if (!hasTauriRuntime()) {
-    throw new Error("当前环境不支持暂停任务。");
-  }
-
-  return maybeInvoke<DownloadTask>("pause_download_task", { taskId });
+export async function createDownloadTask(request: DownloadRequest): Promise<DownloadTask> {
+  if (hasTauriRuntime()) return invoke("create_download_task", { request });
+  return desktopRuntimeRequired();
 }
 
-export async function resumeDownloadTask(taskId: string): Promise<DownloadTask> {
-  if (!hasTauriRuntime()) {
-    throw new Error("当前环境不支持继续任务。");
-  }
-
-  return maybeInvoke<DownloadTask>("resume_download_task", { taskId });
+export async function createProfileDownloadTasks(payload: {
+  profileTitle: string;
+  sourceUrl: string;
+  items: BatchItemSelection[];
+  saveDirectoryOverride?: string | null;
+  downloadOptions: DownloadRequest["downloadOptions"];
+}): Promise<BatchDownloadResult> {
+  if (hasTauriRuntime()) return invoke("create_profile_download_tasks", { request: payload });
+  return desktopRuntimeRequired();
 }
 
-export async function cancelDownloadTask(taskId: string): Promise<DownloadTask> {
-  if (!hasTauriRuntime()) {
-    throw new Error("当前环境不支持取消任务。");
-  }
-
-  return maybeInvoke<DownloadTask>("cancel_download_task", { taskId });
+export async function subscribeTaskEvents(onEvent: (event: TaskEvent) => void) {
+  if (!hasTauriRuntime()) return () => undefined;
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<TaskEvent>("task-event", ({ payload }) => onEvent(payload));
 }
 
-export async function retryDownloadTask(taskId: string): Promise<DownloadTask> {
-  if (!hasTauriRuntime()) {
-    return {
-      id: taskId,
-      platform: "douyin",
-      title: "重试任务",
-      progress: 0,
-      speedText: "-",
-      formatLabel: "视频",
-      status: "queued",
-      etaText: "等待中",
-      message: "任务已重新加入队列",
-      outputPath: undefined,
-      supportsPause: false,
-      supportsCancel: false,
-      canRetry: true
-    };
-  }
+export async function controlTask(taskId: string, action: "pause" | "resume" | "cancel" | "retry") {
+  return invoke<DownloadTask>(`${action}_download_task`, { taskId });
+}
 
-  return maybeInvoke<DownloadTask>("retry_download_task", { taskId });
+export async function clearFinishedTasks(): Promise<DownloadTask[]> {
+  return hasTauriRuntime() ? invoke("clear_finished_tasks") : [];
+}
+
+export async function removeDownloadTask(taskId: string): Promise<void> {
+  if (hasTauriRuntime()) await invoke("remove_download_task", { taskId });
+}
+
+export async function saveSettings(payload: SaveSettingsPayload): Promise<SettingsProfile> {
+  if (hasTauriRuntime()) return invoke("save_settings", { request: payload });
+  return { ...mockState, ...payload };
+}
+
+export async function pickSaveDirectory(currentDirectory: string): Promise<string | null> {
+  return hasTauriRuntime()
+    ? invoke("pick_save_directory", { currentDirectory })
+    : currentDirectory;
+}
+
+export async function listBrowserSources(): Promise<BrowserSource[]> {
+  if (hasTauriRuntime()) return invoke("list_browser_sources");
+  return [
+    {
+      id: "edge",
+      label: "Microsoft Edge",
+      isDefault: true,
+      profiles: [{ id: "edge-default", label: "Default", isDefault: true }]
+    },
+    {
+      id: "chrome",
+      label: "Google Chrome",
+      isDefault: false,
+      profiles: [{ id: "chrome-default", label: "Personal", isDefault: true }]
+    }
+  ];
+}
+
+export async function importBrowserCookies(request: CookieImportRequest): Promise<CookieImportResult> {
+  if (hasTauriRuntime()) return invoke("import_browser_cookies", { request });
+  return {
+    platform: request.platform,
+    browserId: request.browserId,
+    profileId: request.profileId,
+    status: "active",
+    importedCount: 12,
+    requiresElevation: false,
+    message: "Browser session imported"
+  };
+}
+
+export async function pickCookieFile(): Promise<string | null> {
+  return hasTauriRuntime() ? invoke("pick_cookie_file", { currentFile: null }) : null;
+}
+
+export async function saveManualCookies(
+  platform: PlatformId,
+  source: { cookieText?: string; cookieFile?: string }
+) {
+  return hasTauriRuntime()
+    ? invoke<CookieImportResult>("save_manual_cookies", {
+        platform,
+        cookieText: source.cookieText ?? null,
+        cookieFile: source.cookieFile ?? null
+      })
+    : ({
+        platform,
+        browserId: "manual",
+        status: "active",
+        importedCount: 3,
+        requiresElevation: false,
+        message: "Manual session saved"
+      } satisfies CookieImportResult);
+}
+
+export async function clearPlatformAuth(platform: PlatformId): Promise<void> {
+  if (hasTauriRuntime()) await invoke("clear_platform_auth", { platform });
+}
+
+export async function openInFileManager(path: string, revealParent = false): Promise<void> {
+  if (hasTauriRuntime()) await invoke("open_in_file_manager", { path, revealParent });
+}
+
+export async function listDownloadHistory(limit = 100, platform?: PlatformId): Promise<DownloadHistoryEntry[]> {
+  return hasTauriRuntime() ? invoke("list_download_history", { limit, platform }) : [];
 }

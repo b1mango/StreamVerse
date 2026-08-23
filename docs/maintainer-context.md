@@ -1,106 +1,76 @@
 # StreamVerse 维护上下文
 
-这份文档用于跨会话恢复项目状态，避免重要信息只存在于临时对话中。
+## 当前基线
 
-## 项目定位
+- 产品版本：`2.0.0`
+- 发布分支：`codex/streamverse-2.0`，基于远端 `main` 的 `a294ca2`
+- 桌面壳：Tauri 2
+- 前端：Svelte 5 + TypeScript
+- 后端：Rust
+- 构建时 helper：Python 3.11 + PyInstaller；用户机器不需要 Python 或 pip
+- 支持范围：抖音、Bilibili、YouTube 单视频；抖音和 Bilibili 主页批量；YouTube 频道与合集批量
 
-`StreamVerse` 是一个桌面端多平台视频下载器，当前已经接入 `抖音 / Bilibili / YouTube` 单视频下载，并提供 `抖音 / Bilibili` 的主页批量读取与批量下载流程。
+2.0 是破坏性版本。设置、任务、历史与认证都使用 v2 文件，不读取或迁移 0.1 数据。
 
-## 当前技术栈
+## 运行架构
 
-- 桌面壳：`Tauri 2`
-- 后端：`Rust`
-- 前端：`Svelte 5 + TypeScript`
-- 平台模块：`douyin-pack`、`bilibili-pack`、`youtube-pack`
-- 共享依赖包：`browser-bridge`、`media-engine`
-- 抖音解析：Python bridge + 浏览器 Cookie + 直链下载 + `yt-dlp fallback`
-- 批量读取：Python Playwright 浏览器窗口读取 + 会话 Cookie 导出
-- Bilibili / YouTube 解析：`yt-dlp + 浏览器 Cookie + FFmpeg 合并高质量 DASH`
+三个平台 provider 内置在主程序中。项目没有动态 pack、远程 registry、模块安装器或首次启动依赖下载。
 
-## 当前工作流
+发布包包含四个 Tauri sidecar：
 
-### 平台首页
+- `yt-dlp`：Bilibili / YouTube 解析与通用下载回退
+- `deno`：yt-dlp 的 YouTube JavaScript 挑战求解
+- `ffmpeg`：DASH 合流与音频提取
+- `streamverse-helper`：抖音、Bilibili 主页和浏览器批量桥接
 
-- 首屏先选择 `抖音`、`Bilibili` 或 `YouTube`
-- 平台切换后再进入对应工作区，避免不同站点规则混杂
-
-### 单视频下载
-
-- 输入分享文案、短链或作品链接
-- 解析作品信息与可选格式
-- 勾选视频 / 封面 / 文案 / 元数据
-- 创建单任务并显示实时进度
-
-### 主页批量下载
-
-- 输入抖音主页链接或 Bilibili UP 主空间页链接
-- 打开浏览器窗口读取完整作品列表
-- 勾选要下载的作品
-- 统一入队下载
-- 批量页支持筛选、全选、逐项勾选
-- 如果所选作品已经带格式信息，可继续逐条修改清晰度
+`sidecars.lock.json` 固定版本和 SHA-256。Deno 同时校验下载压缩包与解压后的可执行文件；`scripts/prepare-sidecars.mjs` 按目标 triple 校验并复制到 `src-tauri/binaries/`。
 
 ## 关键模块
 
-- 前端入口：[src/App.svelte](../src/App.svelte)
-- 组件目录：[src/lib/components/](../src/lib/components/)
-- 前端选项常量：[src/lib/options.ts](../src/lib/options.ts)
-- 前端格式工具：[src/lib/media.ts](../src/lib/media.ts)
-- 前端类型：[src/lib/types.ts](../src/lib/types.ts)
-- Tauri 命令入口：[src-tauri/src/main.rs](../src-tauri/src/main.rs)
-- 共享契约：[src-tauri/src/media_contract.rs](../src-tauri/src/media_contract.rs)
-- 平台入口：[src-tauri/src/providers.rs](../src-tauri/src/providers.rs)
-- pack 调度：[src-tauri/src/pack_host.rs](../src-tauri/src/pack_host.rs)
-- pack 安装器：[src-tauri/src/pack_manager.rs](../src-tauri/src/pack_manager.rs)
-- pack 映射表：[src-tauri/src/pack_registry.rs](../src-tauri/src/pack_registry.rs)
-- pack 公共运行时：[src-tauri/src/pack_common.rs](../src-tauri/src/pack_common.rs)
-- 平台 pack 二进制：[src-tauri/src/bin/](../src-tauri/src/bin/)
-- 浏览器批量脚本：[scripts/profile_browser_scan.py](../scripts/profile_browser_scan.py)
-- 抖音桥接脚本：[scripts/douyin_bridge.py](../scripts/douyin_bridge.py)
-- Bilibili 主页桥接脚本：[scripts/bilibili_profile_bridge.py](../scripts/bilibili_profile_bridge.py)
-- 下载执行与任务控制：[src-tauri/src/ytdlp.rs](../src-tauri/src/ytdlp.rs)
-- 格式去重与默认格式策略：[src-tauri/src/formats.rs](../src-tauri/src/formats.rs)
-- 设置持久化：[src-tauri/src/settings.rs](../src-tauri/src/settings.rs)
+- 前端壳层与工作流：[src/App.svelte](../src/App.svelte)
+- 设置与 Cookie 授权：[src/lib/components/SettingsSheet.svelte](../src/lib/components/SettingsSheet.svelte)
+- 虚拟化批量列表：[src/lib/components/BatchList.svelte](../src/lib/components/BatchList.svelte)
+- 任务事件同步：[src/lib/backend.ts](../src/lib/backend.ts)
+- Tauri 启动入口：[src-tauri/src/main.rs](../src-tauri/src/main.rs)
+- IPC 与应用状态：[src-tauri/src/app.rs](../src-tauri/src/app.rs)
+- 浏览器 Cookie：[src-tauri/src/auth.rs](../src-tauri/src/auth.rs)
+- 内置 provider：[src-tauri/src/providers.rs](../src-tauri/src/providers.rs)
+- sidecar 执行：[src-tauri/src/provider_runtime.rs](../src-tauri/src/provider_runtime.rs)
+- 下载 facade：[src-tauri/src/ytdlp/mod.rs](../src-tauri/src/ytdlp/mod.rs)
+- 任务控制：[src-tauri/src/ytdlp/controller.rs](../src-tauri/src/ytdlp/controller.rs)
+- 传输与进程执行：[src-tauri/src/ytdlp/engine.rs](../src-tauri/src/ytdlp/engine.rs)
+- 产物保存：[src-tauri/src/ytdlp/artifact.rs](../src-tauri/src/ytdlp/artifact.rs)
 
-## 当前已完成
+## Cookie 安全边界
 
-- 单视频下载与主页批量下载已拆成独立页面
-- 平台首页已经接入，进入应用先选平台
-- `App.svelte` 已拆分出多个可复用组件
-- 可选下载内容已经接入：视频、封面、文案、元数据 JSON
-- 多内容下载时会创建标题文件夹，单内容下载时直接落盘
-- 队列支持暂停、继续、取消、定位文件
-- 格式列表已做前后端双重去重
-- 最近任务会持久化到本地，应用重启后仍可见
-- 失败和取消任务支持一键重试
-- YouTube 单视频下载已接入
-- 仓库已有 `macOS + Windows` 双平台 GitHub Actions 构建工作流
-- README 已补真实界面截图
-- Bilibili 单视频下载与 `UP 主批量下载` 已接入，未检测到 FFmpeg 时会对高质量格式给出提示
-- README 已更新为面向开源展示的版本
-- 抖音 / Bilibili 批量页已切到浏览器窗口读取完整列表
-- 批量入队时会为所选作品补解析，而不是在列表阶段逐条慢速解析
-- 首页已切换为模块中心，支持安装、卸载、停用、更新
-- 平台主路径已经通过本地 pack 调度
-- pack 注册表、已安装 manifest、远程 zip bundle 安装链路已接通
-- `browser-bridge` 会在主页批量模块安装时自动补齐
-- `media-engine` 会在高质量 `Bilibili / YouTube` 下载时按需安装
+- 首次浏览器读取前显示浏览器、Profile、平台域名和保存位置。
+- `rookie-cookies` 只查询当前平台域名白名单。
+- Chromium App-Bound Encryption 错误只允许二次确认后启动一次独立 UAC helper，主应用不提权。
+- 不关闭用户浏览器，不调用 `cookies-from-browser`，不导出全站 Cookie。
+- 手动 Header 和 `cookies.txt` 都由后端解析、过滤并原子写入应用认证目录。
+- 前端不接收 Cookie 值或内部认证文件路径；日志不得记录 Cookie 值。
 
-## 当前限制
+## 构建门禁
 
-- 当前最稳定的是抖音
-- 部分抖音链接在游客态下不稳定，依赖浏览器 Cookie
-- 主页批量下载当前不包含喜欢、收藏、合集和直播
-- 浏览器批量读取依赖本机可用的 Chromium 浏览器
-- Bilibili 高质量 DASH 依赖 FFmpeg 合并
-- YouTube 当前仍只支持单视频下载
-- Windows 仍需补实机打包与运行验证
-- pack 远程发布流程已接好，但还没跑过真实 GitHub Release 首次发版
+```powershell
+npm ci
+python -m pip install -r requirements-douyin-helper.txt pyinstaller==6.22.0
+npm run build:helper
+npm run prepare:sidecars
+npm run check
+npm test
+npm run test:helper
+cd src-tauri
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+```
 
-## 当前建议优先级
+GitHub Actions 在 Windows 生成 NSIS，在 macOS 生成 app/DMG。流水线只上传构建产物，不创建 Release。
 
-1. 做 Windows 实机验证
-2. 跑一次真实 GitHub Release 发版，验证 pack 远程安装与更新
-3. 做 `YouTube` 频道批量下载
-4. 继续设计站点适配层，为更多平台预留统一接口
-5. 继续优化浏览器批量读取的恢复与异常提示
+## 待实机验证
+
+- Windows Chrome / Edge / Firefox 的真实登录受限链接解析与下载
+- Chromium App-Bound Encryption 的 UAC 取消、成功和失败路径
+- macOS Chrome / Safari Cookie 读取与 DMG 启动 smoke test
+- 三个平台对真实链接的长期稳定性与平台规则变动

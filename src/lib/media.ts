@@ -1,5 +1,5 @@
 import type {
-  AuthState,
+  AuthStatus,
   DownloadContentSelection,
   DownloadTask,
   QualityPreference,
@@ -12,8 +12,7 @@ export function createDefaultDownloadOptions(): DownloadContentSelection {
     downloadVideo: true,
     downloadAudio: false,
     downloadCover: false,
-    downloadCaption: false,
-    downloadMetadata: false
+    downloadCaption: false
   };
 }
 
@@ -22,8 +21,7 @@ export function hasSelectedDownloadOptions(options: DownloadContentSelection) {
     options.downloadVideo ||
     options.downloadAudio ||
     options.downloadCover ||
-    options.downloadCaption ||
-    options.downloadMetadata
+    options.downloadCaption
   );
 }
 
@@ -32,27 +30,23 @@ export function summarizeDownloadOptions(options: DownloadContentSelection) {
     options.downloadVideo ? "视频" : null,
     options.downloadAudio ? "MP3" : null,
     options.downloadCover ? "封面" : null,
-    options.downloadCaption ? "文案" : null,
-    options.downloadMetadata ? "元数据" : null
+    options.downloadCaption ? "文案" : null
   ]
     .filter(Boolean)
     .join(" / ");
 }
 
-export function visibleFormats(asset: VideoAsset | null, authState: AuthState) {
-  const formats = dedupeVisibleFormats(asset?.formats ?? []);
-  if (authState === "active") {
-    return formats;
-  }
-
+export function visibleFormats(asset: VideoAsset | null, authState: AuthStatus) {
+  const formats = asset?.formats ?? [];
   const publicFormats = formats.filter((item) => !item.requiresLogin);
-  return publicFormats.length ? publicFormats : formats;
+  const available = authState === "active" || publicFormats.length === 0 ? formats : publicFormats;
+  return dedupeVisibleFormats(available);
 }
 
 export function pickPreferredFormat(
   asset: VideoAsset | null,
   qualityPreference: QualityPreference,
-  authState: AuthState
+  authState: AuthStatus
 ) {
   const candidateFormats = visibleFormats(asset, authState);
   const rankedFormats = [...candidateFormats].sort((left, right) => {
@@ -86,7 +80,7 @@ export function pickPreferredFormat(
 export function selectedFormat(
   asset: VideoAsset | null,
   selectedFormatId: string,
-  authState: AuthState
+  authState: AuthStatus
 ): VideoFormat | undefined {
   return visibleFormats(asset, authState).find((item) => item.id === selectedFormatId);
 }
@@ -166,7 +160,14 @@ export function resolveErrorMessage(error: unknown) {
 }
 
 function formatHeight(format: VideoFormat) {
-  return Number.parseInt(format.resolution.split("x")[1] ?? "0", 10) || 0;
+  const labelHeight = format.label.match(/(\d{3,4})\s*[pP]/)?.[1];
+  if (labelHeight) return Number.parseInt(labelHeight, 10);
+
+  const dimensions = format.resolution
+    .split("x")
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return dimensions.length >= 2 ? Math.min(...dimensions) : dimensions[0] ?? 0;
 }
 
 function normalizeFormatKey(value: string) {
@@ -178,18 +179,20 @@ function normalizeFormatKey(value: string) {
 
 function formatQualityKey(format: VideoFormat) {
   const height = formatHeight(format);
-  if (height > 0) {
-    return `H${height}`;
-  }
-
-  return [normalizeFormatKey(format.label), normalizeFormatKey(format.resolution)].join("|");
+  return height > 0
+    ? `H${height}`
+    : [normalizeFormatKey(format.label), normalizeFormatKey(format.resolution)].join("|");
 }
 
 function dedupeVisibleFormats(formats: VideoFormat[]) {
   const deduped = new Map<string, VideoFormat>();
 
   for (const format of formats) {
-    const key = [formatQualityKey(format), format.requiresLogin ? "LOGIN" : "PUBLIC"].join("|");
+    const key = [
+      formatQualityKey(format),
+      normalizeFormatKey(format.codec),
+      normalizeFormatKey(format.container)
+    ].join("|");
     const existing = deduped.get(key);
 
     if (!existing) {
@@ -198,20 +201,22 @@ function dedupeVisibleFormats(formats: VideoFormat[]) {
     }
 
     const shouldReplace =
-      (format.recommended && !existing.recommended) ||
-      (format.noWatermark && !existing.noWatermark) ||
       (Boolean(format.directUrl) && !existing.directUrl) ||
       (Boolean(format.audioDirectUrl) && !existing.audioDirectUrl) ||
       format.bitrateKbps > existing.bitrateKbps ||
-      (format.bitrateKbps === existing.bitrateKbps &&
-        codecPriority(format.codec) < codecPriority(existing.codec));
+      (format.bitrateKbps === existing.bitrateKbps && format.recommended && !existing.recommended) ||
+      (format.bitrateKbps === existing.bitrateKbps && format.noWatermark && !existing.noWatermark);
 
     if (shouldReplace) {
       deduped.set(key, format);
     }
   }
 
-  return Array.from(deduped.values());
+  return Array.from(deduped.values()).sort((left, right) =>
+    formatHeight(right) - formatHeight(left) ||
+    codecPriority(left.codec) - codecPriority(right.codec) ||
+    right.bitrateKbps - left.bitrateKbps
+  );
 }
 
 function codecPriority(value: string) {

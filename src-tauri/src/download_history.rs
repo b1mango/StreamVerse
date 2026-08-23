@@ -85,7 +85,7 @@ impl DownloadHistory {
     pub fn list_recent(&self, limit: usize, platform: Option<&str>) -> Vec<DownloadHistoryEntry> {
         self.entries
             .iter()
-            .filter(|e| platform.map_or(true, |p| e.platform == p))
+            .filter(|e| platform.is_none_or(|p| e.platform == p))
             .take(limit)
             .cloned()
             .collect()
@@ -96,8 +96,7 @@ impl DownloadHistory {
         self.entries
             .iter()
             .filter(|e| {
-                e.title.to_lowercase().contains(&q)
-                    || e.platform.to_lowercase().contains(&q)
+                e.title.to_lowercase().contains(&q) || e.platform.to_lowercase().contains(&q)
             })
             .take(limit)
             .cloned()
@@ -170,7 +169,5 @@ fn save_history(entries: &[DownloadHistoryEntry]) {
 }
 
 fn history_path() -> PathBuf {
-    PathBuf::from(crate::settings::home_dir())
-        .join(".streamverse")
-        .join("download-history.json")
+    crate::settings::app_data_root().join("download-history-v2.json")
 }

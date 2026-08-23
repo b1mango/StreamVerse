@@ -1,67 +1,72 @@
-/* ─── StreamVerse Design Tokens ─── */
 :root {
   color-scheme: dark;
-  font-family: "Inter", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei",
-    "Noto Sans SC", sans-serif;
-
-  /* Surface */
-  --bg: #0d1117;
-  --surface: #161b22;
-  --stroke: rgba(255, 255, 255, 0.08);
-
-  /* Text */
-  --text: #e6edf3;
-  --muted: rgba(230, 237, 243, 0.65);
-
-  /* Accent — original StreamVerse teal */
-  --accent: #30ccb0;
-  --accent-soft: rgba(48, 204, 176, 0.14);
-  --accent-emphasis: #67eed0;
-
-  /* Platform accents */
-  --douyin: #fe2c55;
-  --douyin-soft: rgba(254, 44, 85, 0.12);
-  --bilibili: #fb7299;
-  --bilibili-soft: rgba(251, 114, 153, 0.12);
-  --youtube: #ff0000;
-  --youtube-soft: rgba(255, 0, 0, 0.10);
-
-  /* Success / Error */
-  --success: #3fb950;
-  --success-soft: rgba(63, 185, 80, 0.12);
-  --error: #f85149;
-  --error-soft: rgba(248, 81, 73, 0.12);
-
-  /* Shadows */
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.24), 0 4px 12px rgba(0, 0, 0, 0.16);
-
-  /* Radius */
-  --radius-xl: 8px;
-  --radius-lg: 8px;
-  --radius-md: 6px;
-  --radius-sm: 4px;
+  --font-sans: Inter, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: "Arial Narrow", "Segoe UI Variable Display", "PingFang SC", sans-serif;
+  --font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  --bg: #0c0d0f;
+  --app-wash: rgba(13, 15, 17, .94);
+  --rail: rgba(10, 11, 13, .94);
+  --header: rgba(15, 17, 19, .86);
+  --panel: rgba(16, 18, 21, .94);
+  --sheet: #121417;
+  --dialog: #171a1e;
+  --surface: rgba(24, 27, 31, .84);
+  --surface-faint: rgba(20, 23, 26, .64);
+  --control: #191c20;
+  --input: #0f1114;
+  --hover: rgba(255, 255, 255, .055);
+  --selected: rgba(255, 255, 255, .075);
+  --line: rgba(235, 241, 246, .09);
+  --line-strong: rgba(235, 241, 246, .18);
+  --text: #eef2f3;
+  --muted: #90999f;
+  --faint: #596269;
+  --ink-inverse: #07110e;
+  --signal: #45d6ae;
+  --signal-strong: #72e5c3;
+  --signal-soft: rgba(69, 214, 174, .11);
+  --focus: #79aaff;
+  --success: #72d88c;
+  --error: #ff6b77;
+  --douyin: #ff5575;
+  --bilibili: #ff91b0;
+  --youtube: #ff4d45;
+  --scroll: rgba(215, 224, 229, .28);
 }
 
-/* ─── Light Theme Tokens ─── */
 [data-theme="light"] {
   color-scheme: light;
-  --bg: #ffffff;
-  --surface: #f6f8fa;
-  --stroke: rgba(0, 0, 0, 0.08);
-  --text: #1f2328;
-  --muted: rgba(31, 35, 40, 0.55);
-  --accent: #0d9b7a;
-  --accent-soft: rgba(13, 155, 122, 0.10);
-  --accent-emphasis: #0aad84;
-  --douyin: #cf1d42;
-  --douyin-soft: rgba(207, 29, 66, 0.08);
-  --bilibili: #d44c6e;
-  --bilibili-soft: rgba(212, 76, 110, 0.08);
-  --youtube: #cc0000;
-  --youtube-soft: rgba(204, 0, 0, 0.08);
-  --success: #1a7f37;
-  --success-soft: rgba(26, 127, 55, 0.10);
-  --error: #cf222e;
-  --error-soft: rgba(207, 34, 46, 0.10);
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.06);
+  --bg: #eef0f1;
+  --app-wash: rgba(241, 243, 244, .96);
+  --rail: rgba(249, 250, 250, .94);
+  --header: rgba(247, 248, 248, .9);
+  --panel: rgba(247, 248, 248, .96);
+  --sheet: #f8f9f9;
+  --dialog: #ffffff;
+  --surface: rgba(255, 255, 255, .82);
+  --surface-faint: rgba(255, 255, 255, .58);
+  --control: #e7eaeb;
+  --input: #ffffff;
+  --hover: rgba(24, 31, 35, .05);
+  --selected: rgba(24, 31, 35, .075);
+  --line: rgba(24, 31, 35, .1);
+  --line-strong: rgba(24, 31, 35, .2);
+  --text: #171b1d;
+  --muted: #626b70;
+  --faint: #90999e;
+  --ink-inverse: #06110d;
+  --signal: #23b88f;
+  --signal-strong: #159a76;
+  --signal-soft: rgba(35, 184, 143, .1);
+  --focus: #286bc9;
+  --success: #198743;
+  --error: #cf3042;
+  --douyin: #d92d52;
+  --bilibili: #c64d79;
+  --youtube: #cc2e2a;
+  --scroll: rgba(20, 28, 32, .24);
 }
+
+[data-platform="douyin"] { --platform-accent: var(--douyin); }
+[data-platform="bilibili"] { --platform-accent: var(--bilibili); }
+[data-platform="youtube"] { --platform-accent: var(--youtube); }

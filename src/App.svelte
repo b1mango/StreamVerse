@@ -1,1693 +1,607 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
-  import PlatformHome from "./lib/components/PlatformHome.svelte";
-  import ProfileBatchWorkspace from "./lib/components/ProfileBatchWorkspace.svelte";
-  import HistoryPanel from "./lib/components/HistoryPanel.svelte";
-  import SettingsPanel from "./lib/components/SettingsPanel.svelte";
-  import SharedDirectoryBar from "./lib/components/SharedDirectoryBar.svelte";
-  import SingleVideoWorkspace from "./lib/components/SingleVideoWorkspace.svelte";
-  import TaskQueuePanel from "./lib/components/TaskQueuePanel.svelte";
-  import { setLanguage, t, tRaw } from "./lib/i18n";
+  import { onMount } from "svelte";
   import {
+    Check,
+    ClipboardPaste,
+    Download,
+    FolderOpen,
+    History,
+    ListVideo,
+    LoaderCircle,
+    Menu,
+    PanelRightClose,
+    PanelRightOpen,
+    Search,
+    Settings,
+    SlidersHorizontal,
+    Sparkles,
+    SquareStack,
+    Trash2
+  } from "@lucide/svelte";
+  import AnalysisProgress from "./lib/components/AnalysisProgress.svelte";
+  import BatchList from "./lib/components/BatchList.svelte";
+  import ContentOptions from "./lib/components/ContentOptions.svelte";
+  import PlatformIcon from "./lib/components/PlatformIcon.svelte";
+  import SettingsSheet from "./lib/components/SettingsSheet.svelte";
+  import SignalField from "./lib/components/SignalField.svelte";
+  import SingleFormatList from "./lib/components/SingleFormatList.svelte";
+  import TaskPanel from "./lib/components/TaskPanel.svelte";
+  import {
+    analyzeBatchItem,
     analyzeInput,
     analyzeProfileInput,
-    cancelDownloadTask,
-    checkDownloadHistory,
     clearAnalysisProgress,
-    collectProfileBrowser,
     clearFinishedTasks,
+    clearPlatformAuth,
+    controlTask,
     createDownloadTask,
     createProfileDownloadTasks,
+    fetchThumbnail,
     getAnalysisProgress,
     getBootstrapState,
-    listDownloadTasks,
+    importBrowserCookies,
+    listBrowserSources,
+    listDownloadHistory,
     openInFileManager,
-    openProfileBrowser,
-    pauseDownloadTask,
     pickCookieFile,
     pickSaveDirectory,
-    retryDownloadTask,
-    resumeDownloadTask,
+    removeDownloadTask,
+    saveManualCookies,
     saveSettings,
-    detectBrowserCookies
+    subscribeTaskEvents
   } from "./lib/backend";
-  import {
-    clampBatchLimit,
-    createDefaultDownloadOptions,
-    hasSelectedDownloadOptions,
-    pickPreferredFormat,
-    resolveErrorMessage,
-    selectedFormat
-  } from "./lib/media";
-  import {
-    authMap,
-    browserOptions,
-    moduleCatalog,
-    moduleOrder,
-    platformMeta,
-    qualityOptions
-  } from "./lib/options";
+  import { setLanguage, t } from "./lib/i18n";
+  import { createDefaultDownloadOptions, formatDuration, hasSelectedDownloadOptions, resolveErrorMessage, visibleFormats } from "./lib/media";
+  import { validateInputTarget, type WorkflowMode } from "./lib/input-validation";
+  import { platformMeta } from "./lib/options";
   import type {
-    AnalysisProgress,
+    AnalysisProgress as AnalysisProgressState,
     BootstrapState,
-    DownloadContentSelection,
-    DownloadMode,
+    BrowserSource,
+    CookieImportResult,
+    DownloadHistoryEntry,
     DownloadTask,
-    LanguageCode,
-    ModuleId,
-    ModuleRuntimeState,
-    PlatformAuthDraft,
-    PlatformAuthProfile,
     PlatformId,
     ProfileBatch,
-    BrowserLaunchResult,
-    QualityPreference,
-    SettingsProfile,
-    ThemeMode,
-    VideoAsset,
-    VideoFormat
+    SaveSettingsPayload,
+    TaskEvent,
+    VideoAsset
   } from "./lib/types";
 
-  let loading = true;
-  let historyOpen = false;
-  let settingsOpen = false;
-  let settingsSaving = false;
-  let pickingDirectory = false;
-  let pickingCookieFilePlatform: PlatformId | null = null;
-  let detectingCookiePlatform: PlatformId | null = null;
-  let pickingTargetDirectory = false;
-  let openingFolder = false;
-  let clearingFinished = false;
-  let activeModule: ModuleId | null = null;
-  let bootstrap: BootstrapState | null = null;
-  let moduleStates: ModuleRuntimeState[] = [];
-  let tasks: DownloadTask[] = [];
-  let pollTimer: number | undefined;
-  let pollingTasks = false;
-  let unlistenTasks: (() => void) | undefined;
+  type View = "download" | "history";
+  let bootstrap = $state<BootstrapState | null>(null);
+  let view = $state<View>("download");
+  let platform = $state<PlatformId>("douyin");
+  let workflowMode = $state<WorkflowMode>("single");
+  let rawInput = $state("");
+  let analyzing = $state(false);
+  let analysisProgress = $state<AnalysisProgressState | null>(null);
+  let operationBusy = $state(false);
+  let notice = $state("");
+  let errorMessage = $state("");
+  let preview = $state<VideoAsset | null>(null);
+  let previewCoverUrl = $state<string | null>(null);
+  let previewCoverFailed = $state(false);
+  let profile = $state<ProfileBatch | null>(null);
+  let selectedFormatId = $state("");
+  let formatsExpanded = $state(false);
+  let selectedProfileIds = $state<Set<string>>(new Set());
+  let selectedProfileFormats = $state<Record<string, string>>({});
+  let lastSelectionIndex = $state<number | null>(null);
+  let downloadOptions = $state(createDefaultDownloadOptions());
+  let settingsOpen = $state(false);
+  let queueCollapsed = $state(false);
+  let browserSources = $state<BrowserSource[]>([]);
+  let history = $state<DownloadHistoryEntry[]>([]);
+  let historyLoading = $state(false);
+  let analysisGeneration = 0;
 
-  let analysisModalOpen = false;
-  let analysisModalProgress: AnalysisProgress | null = null;
-  let analysisModalLabel = "";
-  $: analysisRingPercent = analysisModalProgress
-    ? Math.min(100, Math.round((analysisModalProgress.current / Math.max(analysisModalProgress.total, 1)) * 100))
-    : 0;
-  $: analysisRingOffset = (2 * Math.PI * 42) * (1 - analysisRingPercent / 100);
-
-  let douyinSingleInput = "";
-  let douyinSinglePreview: VideoAsset | null = null;
-  let douyinSelectedFormatId = "";
-  let douyinSingleOptions: DownloadContentSelection = createDefaultDownloadOptions();
-  let analyzingDouyinSingle = false;
-  let douyinSingleAnalysisProgress: AnalysisProgress | null = null;
-  let downloadingDouyinSingle = false;
-  let pastingDouyinSingle = false;
-
-  let douyinProfileInput = "";
-  let douyinProfilePreview: ProfileBatch | null = null;
-  let douyinSelectedProfileIds: string[] = [];
-  let douyinSelectedProfileFormatIds: Record<string, string> = {};
-  let douyinProfileOptions: DownloadContentSelection = createDefaultDownloadOptions();
-  let analyzingDouyinProfile = false;
-  let douyinProfileAnalysisProgress: AnalysisProgress | null = null;
-  let openingDouyinProfileBrowser = false;
-  let enqueuingDouyinProfile = false;
-  let pastingDouyinProfile = false;
-  let douyinProfileBrowserSession: BrowserLaunchResult | null = null;
-  let douyinDownloadedAssetIds: string[] = [];
-
-  let bilibiliInput = "";
-  let bilibiliPreview: VideoAsset | null = null;
-  let bilibiliSelectedFormatId = "";
-  let bilibiliOptions: DownloadContentSelection = createDefaultDownloadOptions();
-  let analyzingBilibili = false;
-  let bilibiliAnalysisProgress: AnalysisProgress | null = null;
-  let downloadingBilibili = false;
-  let pastingBilibili = false;
-  let bilibiliProfileInput = "";
-  let bilibiliProfilePreview: ProfileBatch | null = null;
-  let bilibiliSelectedProfileIds: string[] = [];
-  let bilibiliSelectedProfileFormatIds: Record<string, string> = {};
-  let bilibiliProfileOptions: DownloadContentSelection = createDefaultDownloadOptions();
-  let analyzingBilibiliProfile = false;
-  let bilibiliProfileAnalysisProgress: AnalysisProgress | null = null;
-  let enqueuingBilibiliProfile = false;
-  let pastingBilibiliProfile = false;
-  let bilibiliDownloadedAssetIds: string[] = [];
-
-  let youtubeInput = "";
-  let youtubePreview: VideoAsset | null = null;
-  let youtubeSelectedFormatId = "";
-  let youtubeOptions: DownloadContentSelection = createDefaultDownloadOptions();
-  let analyzingYoutube = false;
-  let youtubeAnalysisProgress: AnalysisProgress | null = null;
-  let downloadingYoutube = false;
-  let pastingYoutube = false;
-
-  let errorMessage = "";
-  let successMessage = "";
-  let platformAuthDrafts: Record<PlatformId, PlatformAuthDraft> = createEmptyPlatformAuthDrafts();
-  let isWindowsPlatform =
-    typeof navigator !== "undefined" && navigator.userAgent.toLowerCase().includes("windows");
-  let saveDirectoryDraft = "";
-  let targetDirectory = "";
-  let downloadMode: DownloadMode = "manual";
-  let qualityPreference: QualityPreference = "recommended";
-  let autoRevealInFinder = false;
-  let maxConcurrentDownloads = 3;
-  let proxyUrl = "";
-  let speedLimit = "";
-  let autoUpdate = false;
-  let theme: ThemeMode = "dark";
-  let notifyOnComplete = true;
-  let language: LanguageCode = "zh-CN";
-  let taskActionPendingIds: string[] = [];
-
-  function createEmptyPlatformAuthDrafts(): Record<PlatformId, PlatformAuthDraft> {
-    return {
-      douyin: { cookieBrowser: null, cookieFile: null, cookieText: null },
-      bilibili: { cookieBrowser: null, cookieFile: null, cookieText: null },
-      youtube: { cookieBrowser: null, cookieFile: null, cookieText: null }
-    };
-  }
-
-  function clonePlatformAuthDrafts(
-    platformAuth?: Record<PlatformId, PlatformAuthProfile>
-  ): Record<PlatformId, PlatformAuthDraft> {
-    return {
-      douyin: {
-        cookieBrowser: platformAuth?.douyin?.cookieBrowser ?? null,
-        cookieFile: platformAuth?.douyin?.cookieFile ?? null,
-        cookieText: null
-      },
-      bilibili: {
-        cookieBrowser: platformAuth?.bilibili?.cookieBrowser ?? null,
-        cookieFile: platformAuth?.bilibili?.cookieFile ?? null,
-        cookieText: null
-      },
-      youtube: {
-        cookieBrowser: platformAuth?.youtube?.cookieBrowser ?? null,
-        cookieFile: platformAuth?.youtube?.cookieFile ?? null,
-        cookieText: null
-      }
-    };
-  }
-
-  function authProfileFor(platform: PlatformId): PlatformAuthProfile {
-    return (
-      bootstrap?.platformAuth?.[platform] ?? {
-        authState: "guest",
-        accountLabel: "未登录",
-        cookieBrowser: null,
-        cookieFile: null
-      }
-    );
-  }
-
-  function authStateFor(platform: PlatformId) {
-    return authProfileFor(platform).authState;
-  }
-
-  function cookieFileFor(platform: PlatformId) {
-    return authProfileFor(platform).cookieFile;
-  }
-
-  function hasCookieFor(platform: PlatformId) {
-    const profile = authProfileFor(platform);
-    return Boolean(profile.cookieFile || profile.cookieBrowser);
-  }
-
-  function getPageScrollElement(): HTMLElement {
-    const body = document.body;
-    const html = document.documentElement;
-    const candidates = [document.scrollingElement, body, html].filter(
-      (target): target is HTMLElement => Boolean(target)
-    );
-
-    const scrollables = candidates.filter(
-      (target) => target.scrollHeight > target.clientHeight + 1
-    );
-
-    if (scrollables.length > 0) {
-      return scrollables.sort(
-        (left, right) =>
-          right.scrollHeight - right.clientHeight - (left.scrollHeight - left.clientHeight)
-      )[0];
-    }
-
-    return body;
-  }
-
-  let _scrollRafId = 0;
-
-  function scrollPageTo(top: number) {
-    if (typeof window === "undefined") return;
-
-    const scrollElement = getPageScrollElement();
-    const maxTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
-    const targetTop = Math.max(0, Math.min(top, maxTop));
-    const startTop = scrollElement.scrollTop;
-    const distance = targetTop - startTop;
-
-    if (Math.abs(distance) < 1) return;
-
-    // Cancel any in-progress animation
-    if (_scrollRafId) cancelAnimationFrame(_scrollRafId);
-
-    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-      scrollElement.scrollTop = targetTop;
-      return;
-    }
-
-    // Longer duration for larger distances, with a nice curve feel
-    const duration = Math.min(300, Math.max(150, Math.abs(distance) * 0.2 + 100));
-    const startTime = performance.now();
-
-    // ease-in-out quart: accelerates then decelerates smoothly
-    function easeInOutQuart(t: number): number {
-      return t < 0.5
-        ? 8 * t * t * t * t
-        : 1 - Math.pow(-2 * t + 2, 4) / 2;
-    }
-
-    function step(now: number) {
-      const elapsed = now - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      scrollElement.scrollTop = startTop + distance * easeInOutQuart(progress);
-      if (progress < 1) {
-        _scrollRafId = requestAnimationFrame(step);
-      } else {
-        _scrollRafId = 0;
-      }
-    }
-
-    _scrollRafId = requestAnimationFrame(step);
-  }
-
-  function scrollToTop() {
-    scrollPageTo(0);
-  }
-
-  function scrollToBottom() {
-    scrollPageTo(Number.MAX_SAFE_INTEGER);
-  }
-
-  import {
-    isPermissionGranted,
-    requestPermission,
-    sendNotification
-  } from "@tauri-apps/plugin-notification";
-
-  const isDesktopRuntime =
-    typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-  let completedTaskIds = new Set<string>();
-  let revealedBatchDirs = new Set<string>();
-
-  function detectNewCompletions(newTasks: DownloadTask[]): DownloadTask[] {
-    const newlyCompleted = newTasks.filter(
-      (t) => t.status === "completed" && !completedTaskIds.has(t.id)
-    );
-    for (const t of newlyCompleted) {
-      completedTaskIds.add(t.id);
-    }
-    return newlyCompleted;
-  }
-
-  async function revealIfNewCompletions(newlyCompleted: DownloadTask[]) {
-    if (!autoRevealInFinder || !isDesktopRuntime || !newlyCompleted.length) return;
-    try {
-      if (newlyCompleted.length === 1 && newlyCompleted[0].outputPath) {
-        // Single file: reveal the specific file
-        await openInFileManager(newlyCompleted[0].outputPath, true);
-      } else {
-        // Batch: reveal the download directory root once
-        const dir = resolvedTargetDirectory();
-        if (dir && !revealedBatchDirs.has(dir)) {
-          revealedBatchDirs.add(dir);
-          await openInFileManager(dir, false);
-          // Reset after 5s so future batches can reveal again
-          setTimeout(() => revealedBatchDirs.delete(dir), 5000);
-        }
-      }
-    } catch (err) {
-      console.warn("[StreamVerse] Auto-reveal failed:", err);
-    }
-  }
-
-  async function notifyIfNewCompletions(newlyCompleted: DownloadTask[]) {
-    if (!notifyOnComplete || !isDesktopRuntime || !newlyCompleted.length) return;
-
-    try {
-      let permOk = await isPermissionGranted();
-      if (!permOk) {
-        const result = await requestPermission();
-        permOk = result === "granted" || result === "default";
-      }
-      if (!permOk) return;
-
-      const title = tRaw("notify.downloadComplete");
-      const body = newlyCompleted.length === 1
-        ? (newlyCompleted[0].title ?? tRaw("notify.taskCompleted"))
-        : `${newlyCompleted.length} ${tRaw("notify.tasksCompleted")}`;
-
-      await sendNotification({ title, body });
-    } catch (err) {
-      console.warn("[StreamVerse] Notification failed:", err);
-    }
-  }
-
-  async function handleNewCompletions(newTasks: DownloadTask[]) {
-    const newlyCompleted = detectNewCompletions(newTasks);
-    if (!newlyCompleted.length) return;
-    void revealIfNewCompletions(newlyCompleted);
-    void notifyIfNewCompletions(newlyCompleted);
-  }
+  let authStatus = $derived(bootstrap?.platformAuth[platform]?.status ?? "guest");
+  let previewFormats = $derived(visibleFormats(preview, authStatus));
+  let selectedFormat = $derived(previewFormats.find((format) => format.id === selectedFormatId));
+  let previewIsAlbum = $derived(Boolean(preview?.imageUrls?.length));
+  let canDownloadSingle = $derived(
+    Boolean(preview) &&
+    hasSelectedDownloadOptions(downloadOptions) &&
+    (!downloadOptions.downloadVideo || previewIsAlbum || Boolean(selectedFormatId))
+  );
+  let selectedCount = $derived(selectedProfileIds.size);
+  let activeTaskCount = $derived(bootstrap?.tasks.filter((task) => ["queued", "downloading", "paused"].includes(task.status)).length ?? 0);
 
   onMount(() => {
-    void initialize();
-
-    return () => {
-      if (pollTimer) {
-        window.clearInterval(pollTimer);
-      }
-      if (unlistenTasks) {
-        unlistenTasks();
-      }
-    };
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      bootstrap = await getBootstrapState();
+      document.documentElement.dataset.theme = bootstrap.theme;
+      document.documentElement.lang = bootstrap.language;
+      setLanguage(bootstrap.language);
+      preview = null;
+      unlisten = await subscribeTaskEvents(applyTaskEvent);
+    })().catch((error) => (errorMessage = resolveErrorMessage(error)));
+    return () => unlisten?.();
   });
 
-  async function initialize() {
-    bootstrap = await getBootstrapState();
-    tasks = bootstrap.tasks;
-    moduleStates = bootstrap.modules;
-    syncSettings(bootstrap);
-
-    // Seed completed IDs so we don't notify for already-completed tasks on load
-    for (const t of tasks) {
-      if (t.status === "completed") {
-        completedTaskIds.add(t.id);
-      }
+  function applyTaskEvent(event: TaskEvent) {
+    if (!bootstrap) return;
+    if (event.type === "reset") {
+      bootstrap.tasks = event.tasks;
+      return;
     }
-
-    if (!isDesktopRuntime) {
-      douyinSinglePreview = bootstrap.preview;
-      douyinSingleInput = bootstrap.preview.sourceUrl;
-      douyinSelectedFormatId =
-        pickPreferredFormat(
-          bootstrap.preview,
-          bootstrap.qualityPreference,
-          authStateFor(bootstrap.preview.platform as PlatformId)
-        )?.id ?? "";
+    if (event.type === "delete") {
+      bootstrap.tasks = bootstrap.tasks.filter((task) => task.id !== event.taskId);
+      return;
     }
-
-    if (isDesktopRuntime) {
-      // Event-driven updates from backend
-      import("@tauri-apps/api/event").then(({ listen }) => {
-        listen<void>("tasks-changed", async () => {
-          if (pollingTasks) return;
-          pollingTasks = true;
-          try {
-            const freshTasks = await listDownloadTasks();
-            void handleNewCompletions(freshTasks);
-            tasks = freshTasks;
-          } finally {
-            pollingTasks = false;
-          }
-        }).then((unlisten) => {
-          unlistenTasks = unlisten;
-        });
-      });
-
-      // Fallback slow poll for any edge cases where event is missed
-      pollTimer = window.setInterval(async () => {
-        if (pollingTasks) {
-          return;
-        }
-
-        pollingTasks = true;
-        try {
-          const freshTasks = await listDownloadTasks();
-          void handleNewCompletions(freshTasks);
-          tasks = freshTasks;
-        } finally {
-          pollingTasks = false;
-        }
-      }, 10000);
-    }
-
-    loading = false;
+    const existing = bootstrap.tasks.findIndex((task) => task.id === event.task.id);
+    bootstrap.tasks = existing === -1
+      ? [event.task, ...bootstrap.tasks]
+      : bootstrap.tasks.map((task) => (task.id === event.task.id ? event.task : task));
   }
 
-  function syncSettings(next: BootstrapState | SettingsProfile) {
-    if ("isWindows" in next) {
-      isWindowsPlatform = next.isWindows;
-    }
-    platformAuthDrafts = clonePlatformAuthDrafts(next.platformAuth);
-    saveDirectoryDraft = next.saveDirectory;
-    targetDirectory = next.saveDirectory;
-    downloadMode = next.downloadMode;
-    qualityPreference = next.qualityPreference;
-    autoRevealInFinder = next.autoRevealInFinder;
-    maxConcurrentDownloads = next.maxConcurrentDownloads;
-    proxyUrl = next.proxyUrl ?? "";
-    speedLimit = next.speedLimit ?? "";
-    autoUpdate = next.autoUpdate;
-    theme = next.theme;
-    notifyOnComplete = next.notifyOnComplete;
-    language = next.language;
-    applyTheme(next.theme);
-    setLanguage(next.language);
+  function selectPlatform(next: PlatformId) {
+    if (next === platform) return;
+    platform = next;
+    if (next !== "youtube" && workflowMode === "playlist") workflowMode = "single";
+    resetWorkspace();
   }
 
-  function applyTheme(mode: ThemeMode) {
-    const root = document.documentElement;
-    root.classList.add("no-transition");
-    root.setAttribute("data-theme", mode);
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        root.classList.remove("no-transition");
-      });
-    });
+  function selectWorkflowMode(next: WorkflowMode) {
+    if (next === workflowMode) return;
+    workflowMode = next;
+    resetWorkspace();
   }
 
-  function clearNotices() {
+  function resetWorkspace() {
+    analysisGeneration += 1;
+    rawInput = "";
+    preview = null;
+    previewCoverUrl = null;
+    previewCoverFailed = false;
+    profile = null;
+    selectedProfileIds = new Set();
+    selectedProfileFormats = {};
+    selectedFormatId = "";
+    formatsExpanded = false;
+    analysisProgress = null;
     errorMessage = "";
-    successMessage = "";
+    notice = "";
   }
 
-  function backToPlatformHome() {
-    activeModule = null;
-    clearNotices();
-  }
-
-  function openModule(moduleId: ModuleId) {
-    activeModule = moduleId;
-    clearNotices();
-  }
-
-  function moduleEnabled(moduleId: ModuleId) {
-    return moduleStates.find((module) => module.id === moduleId)?.installed ?? true;
-  }
-
-  function buildBatchFormatSelections(items: VideoAsset[]) {
-    return Object.fromEntries(
-      items.map((item) => [
-        item.assetId,
-        pickPreferredFormat(item, qualityPreference, authStateFor(item.platform as PlatformId))?.id ?? ""
-      ])
-    );
-  }
-
-  async function analyzeSinglePreview(
-    platform: PlatformId,
-    rawInput: string,
-    sessionId?: string
-  ): Promise<VideoAsset> {
-    const preview = await analyzeInput({ rawInput, sessionId });
-    if (preview.platform !== platform) {
-      throw new Error(`请使用 ${platformMeta[platform].label} 链接。`);
-    }
-
-    return preview;
-  }
-
-  function detectUrlPlatform(rawInput: string): PlatformId | null {
-    const lower = rawInput.toLowerCase();
-    if (lower.includes("douyin.com") || lower.includes("iesdouyin.com")) return "douyin";
-    if (lower.includes("bilibili.com") || lower.includes("b23.tv")) return "bilibili";
-    if (lower.includes("youtube.com") || lower.includes("youtu.be")) return "youtube";
-    return null;
-  }
-
-  function validateProfileUrl(rawInput: string, expectedPlatform: PlatformId): void {
-    const detected = detectUrlPlatform(rawInput);
-    if (detected && detected !== expectedPlatform) {
-      const detectedLabel = platformMeta[detected].label;
-      const expectedLabel = platformMeta[expectedPlatform].label;
-      throw new Error(
-        `当前链接属于 ${detectedLabel}，请切换到「${detectedLabel} 主页批量下载」模块解析，或在此处粘贴 ${expectedLabel} 的主页链接。`
-      );
-    }
-  }
-
-  function createAnalysisSessionId() {
-    return `analysis-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  }
-
-  function normalizeAnalysisProgress(progress: AnalysisProgress): AnalysisProgress {
-    const current = Math.max(0, Math.round(progress.current || 0));
-    const total = Math.max(current, Math.round(progress.total || 0));
-    return {
-      current,
-      total,
-      message: progress.message?.trim() || "正在解析…"
+  function startProgressPolling(sessionId: string) {
+    let stopped = false;
+    let reading = false;
+    const read = async () => {
+      if (stopped || reading) return;
+      reading = true;
+      try {
+        const next = await getAnalysisProgress(sessionId);
+        if (!stopped && next) analysisProgress = next;
+      } catch {
+        // A progress read is advisory; the parser result remains authoritative.
+      } finally {
+        reading = false;
+      }
+    };
+    void read();
+    const timer = window.setInterval(read, 350);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
     };
   }
 
-  async function withAnalysisProgress<T>(
-    setProgress: (progress: AnalysisProgress | null) => void,
-    runner: (sessionId: string) => Promise<T>,
-    modalLabel?: string,
-    onResult?: (result: T) => void | Promise<void>
-  ): Promise<T> {
-    const sessionId = createAnalysisSessionId();
-    let pollId: number | undefined;
-    const initialProgress: AnalysisProgress = { current: 0, total: 0, message: "准备解析…" };
-    setProgress(initialProgress);
-
-    if (modalLabel) {
-      analysisModalLabel = modalLabel;
-      analysisModalProgress = initialProgress;
-      analysisModalOpen = true;
+  async function pasteInput() {
+    try {
+      rawInput = await navigator.clipboard.readText();
+    } catch {
+      errorMessage = "无法读取剪贴板。";
     }
+  }
 
-    if (isDesktopRuntime) {
-      pollId = window.setInterval(async () => {
+  async function thumbnailIsBlank(dataUrl: string) {
+    const image = new Image();
+    image.src = dataUrl;
+    try {
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = 32;
+      canvas.height = 18;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return false;
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let sum = 0;
+      let squareSum = 0;
+      const count = pixels.length / 4;
+      for (let index = 0; index < pixels.length; index += 4) {
+        const luminance = (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
+        sum += luminance;
+        squareSum += luminance * luminance;
+      }
+      const mean = sum / count;
+      const variance = squareSum / count - mean * mean;
+      return mean < 4 && variance < 8;
+    } catch {
+      return false;
+    }
+  }
+
+  async function loadPreviewCover(asset: VideoAsset) {
+    const candidates = Array.from(
+      new Set([...(asset.coverUrls ?? []), asset.coverUrl].filter((value): value is string => Boolean(value)))
+    );
+    if (candidates.length === 0) return;
+
+    let lastError = "没有可用封面。";
+    for (const candidate of candidates) {
+      try {
+        const thumbnail = await fetchThumbnail(candidate);
+        if (asset.platform === "douyin" && await thumbnailIsBlank(thumbnail)) {
+          lastError = "候选封面是空白图片。";
+          continue;
+        }
+        if (preview?.assetId === asset.assetId && preview.sourceUrl === asset.sourceUrl) {
+          preview = { ...preview, coverUrl: candidate };
+          previewCoverUrl = thumbnail;
+          previewCoverFailed = false;
+        }
+        return;
+      } catch (error) {
+        lastError = resolveErrorMessage(error);
+      }
+    }
+    if (preview?.assetId === asset.assetId && preview.sourceUrl === asset.sourceUrl) {
+      previewCoverFailed = true;
+      notice = `作品已解析，但缩略图加载失败：${lastError}`;
+    }
+  }
+
+  async function hydrateYouTubeBatchFormats(batch: ProfileBatch, generation: number) {
+    const pendingItems = batch.items.map((item) => ({ ...item, formatStatus: "pending" as const }));
+    if (generation !== analysisGeneration) return 0;
+
+    profile = { ...batch, items: pendingItems };
+    selectedProfileFormats = {};
+    analysisProgress = {
+      current: 0,
+      total: pendingItems.length,
+      message: `正在读取真实清晰度（0/${pendingItems.length}）…`
+    };
+
+    let cursor = 0;
+    let completed = 0;
+    let failed = 0;
+    const worker = async () => {
+      while (generation === analysisGeneration) {
+        const index = cursor;
+        cursor += 1;
+        const item = pendingItems[index];
+        if (!item) return;
+
+        let nextItem: VideoAsset;
         try {
-          const next = await getAnalysisProgress(sessionId);
-          if (next) {
-            const normalized = normalizeAnalysisProgress(next);
-            setProgress(normalized);
-            if (modalLabel) analysisModalProgress = normalized;
-          }
-        } catch {}
-      }, 300);
-    }
-
-    let result: T;
-    try {
-      result = await runner(sessionId);
-    } catch (error) {
-      if (pollId) window.clearInterval(pollId);
-      if (isDesktopRuntime) {
-        try { await clearAnalysisProgress(sessionId); } catch {}
-      }
-      if (modalLabel) {
-        analysisModalOpen = false;
-        analysisModalProgress = null;
-      }
-      throw error;
-    }
-
-    if (pollId) {
-      window.clearInterval(pollId);
-    }
-    if (isDesktopRuntime) {
-      try {
-        const finalProgress = await getAnalysisProgress(sessionId);
-        if (finalProgress) {
-          const normalized = normalizeAnalysisProgress(finalProgress);
-          setProgress(normalized);
-          if (modalLabel) analysisModalProgress = normalized;
+          const resolved = await analyzeBatchItem(item.sourceUrl);
+          const loaded = resolved.formats.length > 0;
+          if (!loaded) failed += 1;
+          nextItem = {
+            ...item,
+            ...resolved,
+            categoryLabel: item.categoryLabel,
+            groupTitle: item.groupTitle,
+            formatStatus: loaded ? "loaded" : "failed"
+          };
+        } catch {
+          failed += 1;
+          nextItem = { ...item, formatStatus: "failed" };
         }
-      } catch {}
-    }
 
-    if (onResult) {
-      try {
-        await onResult(result);
-      } catch (resultError) {
-        if (modalLabel) {
-          analysisModalOpen = false;
-          analysisModalProgress = null;
+        if (generation !== analysisGeneration || !profile) return;
+        completed += 1;
+        profile = {
+          ...profile,
+          items: profile.items.map((candidate, candidateIndex) => candidateIndex === index ? nextItem : candidate)
+        };
+        const formats = visibleFormats(nextItem, "active");
+        const selected = formats.find((format) => format.recommended)?.id ?? formats[0]?.id;
+        if (selected) {
+          selectedProfileFormats = { ...selectedProfileFormats, [nextItem.assetId]: selected };
         }
-        throw resultError;
-      }
-    }
-
-    if (isDesktopRuntime) {
-      try { await clearAnalysisProgress(sessionId); } catch {}
-    }
-    if (modalLabel) {
-      analysisModalOpen = false;
-      analysisModalProgress = null;
-    }
-
-    return result;
-  }
-
-  async function handleAnalyzeDouyinSingle() {
-    analyzingDouyinSingle = true;
-    clearNotices();
-
-    try {
-      const preview = await withAnalysisProgress(
-        (progress) => (douyinSingleAnalysisProgress = progress),
-        (sessionId) => analyzeSinglePreview("douyin", douyinSingleInput, sessionId)
-      );
-      douyinSinglePreview = preview;
-      douyinSelectedFormatId =
-        pickPreferredFormat(preview, qualityPreference, authStateFor("douyin"))?.id ?? "";
-
-      successMessage = "抖音链接已解析。";
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      analyzingDouyinSingle = false;
-    }
-  }
-
-  async function handleAnalyzeBilibiliSingle() {
-    analyzingBilibili = true;
-    clearNotices();
-
-    try {
-      const preview = await withAnalysisProgress(
-        (progress) => (bilibiliAnalysisProgress = progress),
-        (sessionId) => analyzeSinglePreview("bilibili", bilibiliInput, sessionId)
-      );
-      bilibiliPreview = preview;
-      bilibiliSelectedFormatId =
-        pickPreferredFormat(preview, qualityPreference, authStateFor("bilibili"))?.id ?? "";
-
-      successMessage = "Bilibili 链接已解析。";
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      analyzingBilibili = false;
-    }
-  }
-
-  async function handleAnalyzeYoutubeSingle() {
-    analyzingYoutube = true;
-    clearNotices();
-
-    try {
-      const preview = await withAnalysisProgress(
-        (progress) => (youtubeAnalysisProgress = progress),
-        (sessionId) => analyzeSinglePreview("youtube", youtubeInput, sessionId)
-      );
-      youtubePreview = preview;
-      youtubeSelectedFormatId =
-        pickPreferredFormat(preview, qualityPreference, authStateFor("youtube"))?.id ?? "";
-
-      successMessage = "YouTube 链接已解析。";
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      analyzingYoutube = false;
-    }
-  }
-
-  async function handleAnalyzeDouyinProfile() {
-    analyzingDouyinProfile = true;
-    clearNotices();
-
-    try {
-      douyinProfilePreview = null;
-      douyinSelectedProfileIds = [];
-      douyinSelectedProfileFormatIds = {};
-
-      validateProfileUrl(douyinProfileInput, "douyin");
-
-      if (!hasCookieFor("douyin")) {
-        throw new Error("请先在设置中导入抖音 Cookie 后再读取主页视频。");
-      }
-
-      await withAnalysisProgress(
-        (progress) => (douyinProfileAnalysisProgress = progress),
-        (sessionId) => {
-          return analyzeProfileInput({
-            rawInput: douyinProfileInput,
-            sessionId
-          });
-        },
-        "正在读取抖音主页作品…",
-        async (r) => {
-          douyinProfilePreview = r;
-          douyinSelectedProfileIds = r.items.map((item) => item.assetId);
-          douyinSelectedProfileFormatIds = buildBatchFormatSelections(r.items);
-          successMessage = `已读取 ${r.fetchedCount} 个作品。`;
-          try {
-            douyinDownloadedAssetIds = await checkDownloadHistory(
-              "douyin",
-              r.items.map((item) => item.assetId)
-            );
-          } catch {
-            douyinDownloadedAssetIds = [];
-          }
-        }
-      );
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      analyzingDouyinProfile = false;
-    }
-  }
-
-  async function handleOpenDouyinProfileBrowser() {
-    openingDouyinProfileBrowser = true;
-    clearNotices();
-
-    try {
-      douyinProfilePreview = null;
-      douyinSelectedProfileIds = [];
-      douyinSelectedProfileFormatIds = {};
-      douyinProfileBrowserSession = await openProfileBrowser({
-        rawInput: douyinProfileInput
-      });
-      successMessage = "浏览器已打开。登录后回到这里点“读取完整列表”。";
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      openingDouyinProfileBrowser = false;
-    }
-  }
-
-  async function handleAnalyzeBilibiliProfile() {
-    analyzingBilibiliProfile = true;
-    clearNotices();
-
-    try {
-      bilibiliProfilePreview = null;
-      bilibiliSelectedProfileIds = [];
-      bilibiliSelectedProfileFormatIds = {};
-
-      validateProfileUrl(bilibiliProfileInput, "bilibili");
-
-      await withAnalysisProgress(
-        (progress) => (bilibiliProfileAnalysisProgress = progress),
-        (sessionId) =>
-          analyzeProfileInput({
-            rawInput: bilibiliProfileInput,
-            sessionId
-          }),
-        "正在读取 Bilibili 主页视频…",
-        async (r) => {
-          bilibiliProfilePreview = r;
-          bilibiliSelectedProfileIds = r.items.map((item) => item.assetId);
-          bilibiliSelectedProfileFormatIds = buildBatchFormatSelections(r.items);
-          successMessage = `已读取 ${r.fetchedCount} 个视频。`;
-          try {
-            bilibiliDownloadedAssetIds = await checkDownloadHistory(
-              "bilibili",
-              r.items.map((item) => item.assetId)
-            );
-          } catch {
-            bilibiliDownloadedAssetIds = [];
-          }
-        }
-      );
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      analyzingBilibiliProfile = false;
-    }
-  }
-
-  async function pasteAndAnalyze(platform: PlatformId, kind: "single" | "profile") {
-    if (platform === "douyin" && kind === "single") {
-      pastingDouyinSingle = true;
-    } else if (platform === "douyin") {
-      pastingDouyinProfile = true;
-    } else if (platform === "bilibili" && kind === "single") {
-      pastingBilibili = true;
-    } else if (platform === "youtube") {
-      pastingYoutube = true;
-    } else {
-      pastingBilibiliProfile = true;
-    }
-
-    clearNotices();
-
-    try {
-      if (typeof navigator === "undefined" || !navigator.clipboard?.readText) {
-        throw new Error("当前环境不支持直接读取剪贴板。");
-      }
-
-      const text = (await navigator.clipboard.readText()).trim();
-      if (!text) {
-        throw new Error("剪贴板里没有可解析的内容。");
-      }
-
-      if (platform === "douyin" && kind === "single") {
-        douyinSingleInput = text;
-        await handleAnalyzeDouyinSingle();
-      } else if (platform === "douyin") {
-        douyinProfileInput = text;
-        await handleAnalyzeDouyinProfile();
-      } else if (platform === "bilibili" && kind === "single") {
-        bilibiliInput = text;
-        await handleAnalyzeBilibiliSingle();
-      } else if (platform === "youtube") {
-        youtubeInput = text;
-        await handleAnalyzeYoutubeSingle();
-      } else {
-        bilibiliProfileInput = text;
-        await handleAnalyzeBilibiliProfile();
-      }
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      if (platform === "douyin" && kind === "single") {
-        pastingDouyinSingle = false;
-      } else if (platform === "douyin") {
-        pastingDouyinProfile = false;
-      } else if (platform === "bilibili" && kind === "single") {
-        pastingBilibili = false;
-      } else if (platform === "youtube") {
-        pastingYoutube = false;
-      } else {
-        pastingBilibiliProfile = false;
-      }
-    }
-  }
-
-  async function handlePasteDouyinProfileInput() {
-    pastingDouyinProfile = true;
-    clearNotices();
-
-    try {
-      if (typeof navigator === "undefined" || !navigator.clipboard?.readText) {
-        throw new Error("当前环境不支持直接读取剪贴板。");
-      }
-
-      const text = (await navigator.clipboard.readText()).trim();
-      if (!text) {
-        throw new Error("剪贴板里没有可解析的内容。");
-      }
-
-      douyinProfileInput = text;
-      douyinProfilePreview = null;
-      douyinSelectedProfileIds = [];
-      douyinSelectedProfileFormatIds = {};
-      douyinProfileBrowserSession = null;
-      successMessage = "主页链接已填入。";
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      pastingDouyinProfile = false;
-    }
-  }
-
-  async function startSingleDownload(
-    platform: PlatformId,
-    asset: VideoAsset,
-    selectedFormatId: string,
-    downloadOptions: DownloadContentSelection,
-    launchedBySmartMode: boolean
-  ) {
-    const setLoading = (value: boolean) => {
-      if (platform === "douyin") {
-        downloadingDouyinSingle = value;
-      } else if (platform === "bilibili") {
-        downloadingBilibili = value;
-      } else {
-        downloadingYoutube = value;
+        analysisProgress = {
+          current: completed,
+          total: pendingItems.length,
+          message: `正在读取真实清晰度（${completed}/${pendingItems.length}）…`
+        };
       }
     };
 
-    setLoading(true);
-    clearNotices();
+    const workers = Math.min(4, pendingItems.length);
+    await Promise.all(Array.from({ length: workers }, worker));
+    return failed;
+  }
 
+  async function analyze() {
+    if (!rawInput.trim()) return;
+    const validationError = validateInputTarget(rawInput, platform, workflowMode);
+    if (validationError) {
+      errorMessage = validationError;
+      notice = "";
+      return;
+    }
+
+    const generation = ++analysisGeneration;
+    const sessionId = crypto.randomUUID();
+    const stopProgressPolling = startProgressPolling(sessionId);
+    analyzing = true;
+    analysisProgress = {
+      current: 0,
+      total: 0,
+      message: workflowMode === "profile"
+        ? "正在建立频道作品索引…"
+        : workflowMode === "playlist"
+          ? "正在建立合集作品索引…"
+          : "正在解析作品链接…"
+    };
+    errorMessage = "";
+    notice = "";
     try {
-      if (!hasSelectedDownloadOptions(downloadOptions)) {
-        throw new Error("至少要选择一种要保存的内容。");
+      if (workflowMode === "single") {
+        const asset = await analyzeInput(rawInput.trim(), sessionId);
+        const assetAuthStatus = bootstrap?.platformAuth[asset.platform]?.status ?? "guest";
+        const formats = visibleFormats(asset, assetAuthStatus);
+        preview = asset;
+        previewCoverUrl = null;
+        previewCoverFailed = false;
+        platform = asset.platform;
+        formatsExpanded = false;
+        selectedFormatId = formats.find((format) => format.recommended)?.id ?? formats[0]?.id ?? "";
+        void loadPreviewCover(asset);
+      } else {
+        const batch = await analyzeProfileInput(rawInput.trim(), sessionId);
+        if (generation !== analysisGeneration) return;
+        selectedProfileIds = new Set();
+        if (batch.items[0]?.platform === "youtube") {
+          stopProgressPolling();
+          const failed = await hydrateYouTubeBatchFormats(batch, generation);
+          if (generation === analysisGeneration && failed > 0) {
+            notice = `${batch.items.length - failed} 个视频已读取真实清晰度，${failed} 个读取失败，可重新解析后再试。`;
+          }
+        } else {
+          profile = batch;
+          selectedProfileFormats = Object.fromEntries(batch.items.map((item) => {
+            const formats = visibleFormats(item, "active");
+            return [item.assetId, formats.find((format) => format.recommended)?.id ?? formats[0]?.id ?? ""];
+          }));
+        }
       }
-
-      const format = downloadOptions.downloadVideo
-        ? selectedFormat(asset, selectedFormatId, authStateFor(platform))
-        : undefined;
-
-      if (downloadOptions.downloadVideo && !format) {
-        throw new Error("请先选择一个可用清晰度。");
-      }
-
-      const task = await createDownloadTask({
-        assetId: asset.assetId,
-        platform: asset.platform,
-        sourceUrl: asset.sourceUrl,
-        title: asset.title,
-        author: asset.author,
-        publishDate: asset.publishDate,
-        caption: asset.caption,
-        coverUrl: asset.coverUrl ?? null,
-        formatId: format?.id ?? null,
-        formatLabel: format?.label ?? null,
-        saveDirectoryOverride: resolvedTargetDirectory(),
-        downloadOptions,
-        directUrl: format?.directUrl ?? null,
-        referer: format?.referer ?? null,
-        userAgent: format?.userAgent ?? null,
-        audioDirectUrl: format?.audioDirectUrl ?? null,
-        audioReferer: format?.audioReferer ?? null,
-        audioUserAgent: format?.audioUserAgent ?? null
-      });
-
-      upsertTask(task);
-      successMessage = launchedBySmartMode
-        ? "已创建下载任务。"
-        : task.message ?? "下载任务已开始。";
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
-      setLoading(false);
+      stopProgressPolling();
+      await clearAnalysisProgress(sessionId).catch(() => undefined);
+      analysisProgress = null;
+      analyzing = false;
     }
   }
 
-  async function enqueueProfileTasks({
-    preview,
-    selectedIds,
-    selectedFormatIdsByAssetId,
-    downloadOptions,
-    emptySelectionMessage,
-    setEnqueuing
-  }: {
-    preview: ProfileBatch | null;
-    selectedIds: string[];
-    selectedFormatIdsByAssetId: Record<string, string>;
-    downloadOptions: DownloadContentSelection;
-    emptySelectionMessage: string;
-    setEnqueuing: (value: boolean) => void;
-  }) {
-    if (!preview) {
-      return;
+  async function downloadSingle() {
+    if (!bootstrap || !preview) return;
+    operationBusy = true;
+    errorMessage = "";
+    try {
+      const format = selectedFormat;
+      const task = await createDownloadTask({
+        assetId: preview.assetId,
+        platform: preview.platform,
+        sourceUrl: preview.sourceUrl,
+        title: preview.title,
+        author: preview.author,
+        publishDate: preview.publishDate,
+        caption: preview.caption,
+        coverUrl: preview.coverUrl,
+        imageUrls: preview.imageUrls,
+        formatId: format?.id,
+        formatLabel: format?.label,
+        saveDirectory: bootstrap.saveDirectory,
+        downloadOptions,
+        autoRevealInFileManager: bootstrap.autoRevealInFinder,
+        directUrl: format?.directUrl,
+        referer: format?.referer,
+        userAgent: format?.userAgent,
+        audioDirectUrl: format?.audioDirectUrl,
+        audioReferer: format?.audioReferer,
+        audioUserAgent: format?.audioUserAgent
+      });
+      applyTaskEvent({ type: "upsert", task });
+      notice = "任务已加入队列。";
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    } finally {
+      operationBusy = false;
     }
+  }
 
-    const items = preview.items.filter((item) =>
-      selectedIds.includes(item.assetId)
-    );
-
-    if (!items.length) {
-      errorMessage = emptySelectionMessage;
-      return;
-    }
-
-    if (!hasSelectedDownloadOptions(downloadOptions)) {
-      errorMessage = "至少要选择一种要保存的内容。";
-      return;
-    }
-
-    setEnqueuing(true);
-    clearNotices();
-
+  async function downloadBatch() {
+    if (!bootstrap || !profile || selectedProfileIds.size === 0) return;
+    operationBusy = true;
+    errorMessage = "";
     try {
       const result = await createProfileDownloadTasks({
-        profileTitle: preview.profileTitle,
-        sourceUrl: preview.sourceUrl,
-        items: items.map((asset) => ({
-          asset,
-          selectedFormatId: selectedFormatIdsByAssetId[asset.assetId] ?? null
-        })),
-        sessionCookieFile: preview.sessionCookieFile ?? null,
-        saveDirectoryOverride: resolvedTargetDirectory(),
+        profileTitle: profile.profileTitle,
+        sourceUrl: profile.sourceUrl,
+        items: profile.items
+          .filter((item) => selectedProfileIds.has(item.assetId))
+          .map((asset) => ({ asset, selectedFormatId: selectedProfileFormats[asset.assetId] || null })),
+        saveDirectoryOverride: bootstrap.saveDirectory,
         downloadOptions
       });
-      successMessage = result.message;
+      notice = result.message;
     } catch (error) {
       errorMessage = resolveErrorMessage(error);
     } finally {
-      setEnqueuing(false);
+      operationBusy = false;
     }
   }
 
-  async function handleEnqueueDouyinProfileTasks() {
-    await enqueueProfileTasks({
-      preview: douyinProfilePreview,
-      selectedIds: douyinSelectedProfileIds,
-      selectedFormatIdsByAssetId: douyinSelectedProfileFormatIds,
-      downloadOptions: douyinProfileOptions,
-      emptySelectionMessage: "请至少勾选一个主页作品。",
-      setEnqueuing: (value) => {
-        enqueuingDouyinProfile = value;
+  function toggleProfileItem(id: string, index: number, shift: boolean) {
+    const next = new Set(selectedProfileIds);
+    if (shift && lastSelectionIndex !== null && profile) {
+      const start = Math.min(lastSelectionIndex, index);
+      const end = Math.max(lastSelectionIndex, index);
+      const shouldSelect = !next.has(id);
+      for (let cursor = start; cursor <= end; cursor += 1) {
+        const candidate = profile.items[cursor]?.assetId;
+        if (candidate) shouldSelect ? next.add(candidate) : next.delete(candidate);
       }
-    });
-  }
-
-  async function handleEnqueueBilibiliProfileTasks() {
-    await enqueueProfileTasks({
-      preview: bilibiliProfilePreview,
-      selectedIds: bilibiliSelectedProfileIds,
-      selectedFormatIdsByAssetId: bilibiliSelectedProfileFormatIds,
-      downloadOptions: bilibiliProfileOptions,
-      emptySelectionMessage: "请至少勾选一个 UP 主视频。",
-      setEnqueuing: (value) => {
-        enqueuingBilibiliProfile = value;
-      }
-    });
-  }
-
-  async function handleTaskControl(
-    task: DownloadTask,
-    action: "pause" | "resume" | "cancel" | "retry"
-  ) {
-    taskActionPendingIds = [...taskActionPendingIds, task.id];
-    errorMessage = "";
-
-    try {
-      const nextTask =
-        action === "pause"
-          ? await pauseDownloadTask(task.id)
-          : action === "resume"
-            ? await resumeDownloadTask(task.id)
-            : action === "retry"
-              ? await retryDownloadTask(task.id)
-              : await cancelDownloadTask(task.id);
-      upsertTask(nextTask);
-      if (action === "retry") {
-        successMessage = "任务已重新加入队列。";
-      }
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      taskActionPendingIds = taskActionPendingIds.filter((id) => id !== task.id);
-    }
-  }
-
-  async function handlePickSaveDirectory() {
-    if (!bootstrap) {
-      return;
-    }
-
-    pickingDirectory = true;
-    errorMessage = "";
-
-    try {
-      const pickedDirectory = await pickSaveDirectory(
-        saveDirectoryDraft || bootstrap.saveDirectory
-      );
-      if (pickedDirectory) {
-        saveDirectoryDraft = pickedDirectory;
-      }
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      pickingDirectory = false;
-    }
-  }
-
-  async function handlePickTargetDirectory() {
-    if (!bootstrap) {
-      return;
-    }
-
-    pickingTargetDirectory = true;
-    errorMessage = "";
-
-    try {
-      const pickedDirectory = await pickSaveDirectory(resolvedTargetDirectory());
-      if (pickedDirectory) {
-        targetDirectory = pickedDirectory;
-      }
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      pickingTargetDirectory = false;
-    }
-  }
-
-  async function handlePickCookieFile(platform: PlatformId) {
-    pickingCookieFilePlatform = platform;
-    errorMessage = "";
-
-    try {
-      const pickedFile = await pickCookieFile(platformAuthDrafts[platform].cookieFile || null);
-      if (pickedFile) {
-        platformAuthDrafts = {
-          ...platformAuthDrafts,
-          [platform]: {
-            ...platformAuthDrafts[platform],
-            cookieFile: pickedFile
-          }
-        };
-      }
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      pickingCookieFilePlatform = null;
-    }
-  }
-
-  async function handleDetectCookie(platform: PlatformId) {
-    let browser = platformAuthDrafts[platform].cookieBrowser;
-    if (!browser) {
-      // Auto-select a default browser based on platform
-      const isMac = !isWindowsPlatform;
-      browser = isMac ? "chrome" : "edge";
-      platformAuthDrafts = {
-        ...platformAuthDrafts,
-        [platform]: {
-          ...platformAuthDrafts[platform],
-          cookieBrowser: browser
-        }
-      };
-    }
-    detectingCookiePlatform = platform;
-    errorMessage = "";
-    successMessage = "";
-
-    try {
-      const cookieFile = await detectBrowserCookies(platform, browser);
-      if (cookieFile) {
-        platformAuthDrafts = {
-          ...platformAuthDrafts,
-          [platform]: {
-            ...platformAuthDrafts[platform],
-            cookieFile: cookieFile
-          }
-        };
-        successMessage = `已成功获取 ${platform} 的 Cookie（来自 ${browser}）。请点击「保存设置」生效。`;
-      }
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      detectingCookiePlatform = null;
-    }
-  }
-
-  async function handleOpenCurrentDirectory() {
-    const path = resolvedTargetDirectory();
-    if (!path) {
-      return;
-    }
-
-    openingFolder = true;
-    errorMessage = "";
-
-    try {
-      await openInFileManager(path, false);
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      openingFolder = false;
-    }
-  }
-
-  async function handleRevealTask(task: DownloadTask) {
-    if (!task.outputPath) {
-      return;
-    }
-
-    errorMessage = "";
-
-    try {
-      await openInFileManager(task.outputPath, true);
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    }
-  }
-
-  async function handleClearFinished() {
-    clearingFinished = true;
-    errorMessage = "";
-
-    try {
-      tasks = await clearFinishedTasks();
-    } catch (error) {
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      clearingFinished = false;
-    }
-  }
-
-  async function handleSaveSettings() {
-    if (!bootstrap) {
-      return;
-    }
-
-    clearNotices();
-    settingsSaving = true;
-
-    // Close panel immediately — visual settings (theme, language) are already previewed
-    settingsOpen = false;
-
-    try {
-      const nextSettings = await saveSettings({
-        platformAuth: platformAuthDrafts,
-        saveDirectory: saveDirectoryDraft,
-        downloadMode,
-        qualityPreference,
-        autoRevealInFinder,
-        maxConcurrentDownloads,
-        proxyUrl: proxyUrl || null,
-        speedLimit: speedLimit || null,
-        autoUpdate,
-        theme,
-        notifyOnComplete,
-        language
-      });
-
-      bootstrap = {
-        ...bootstrap,
-        authState: nextSettings.authState,
-        accountLabel: nextSettings.accountLabel,
-        platformAuth: nextSettings.platformAuth,
-        saveDirectory: nextSettings.saveDirectory,
-        downloadMode: nextSettings.downloadMode,
-        qualityPreference: nextSettings.qualityPreference,
-        autoRevealInFinder: nextSettings.autoRevealInFinder,
-        maxConcurrentDownloads: nextSettings.maxConcurrentDownloads,
-        proxyUrl: nextSettings.proxyUrl,
-        speedLimit: nextSettings.speedLimit,
-        autoUpdate: nextSettings.autoUpdate,
-        theme: nextSettings.theme,
-        notifyOnComplete: nextSettings.notifyOnComplete,
-        language: nextSettings.language,
-        ffmpegAvailable: nextSettings.ffmpegAvailable
-      };
-      targetDirectory = "";
-      platformAuthDrafts = clonePlatformAuthDrafts(nextSettings.platformAuth);
-      successMessage = $t("app.settingsSaved");
-    } catch (error) {
-      bootstrap = await getBootstrapState();
-      syncSettings(bootstrap);
-      errorMessage = resolveErrorMessage(error);
-    } finally {
-      settingsSaving = false;
-    }
-  }
-
-  function handleOpenSettings() {
-    if (!bootstrap) {
-      return;
-    }
-
-    syncSettings(bootstrap);
-    settingsOpen = true;
-  }
-
-  function upsertTask(task: DownloadTask) {
-    const index = tasks.findIndex((item) => item.id === task.id);
-    if (index >= 0) {
-      tasks = tasks.map((item) => (item.id === task.id ? task : item));
-      return;
-    }
-
-    tasks = [task, ...tasks];
-  }
-
-  function resolvedTargetDirectory() {
-    return targetDirectory.trim() || bootstrap?.saveDirectory || "";
+    } else if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedProfileIds = next;
+    lastSelectionIndex = index;
   }
 
   function selectAllProfileItems() {
-    douyinSelectedProfileIds = douyinProfilePreview?.items.map((item) => item.assetId) ?? [];
+    if (!profile) return;
+    selectedProfileIds = selectedProfileIds.size === profile.items.length
+      ? new Set()
+      : new Set(profile.items.map((item) => item.assetId));
   }
 
-  function clearProfileSelection() {
-    douyinSelectedProfileIds = [];
+  function invertProfileSelection() {
+    if (!profile) return;
+    selectedProfileIds = new Set(profile.items.filter((item) => !selectedProfileIds.has(item.assetId)).map((item) => item.assetId));
   }
 
-  function selectAllBilibiliProfileItems() {
-    bilibiliSelectedProfileIds =
-      bilibiliProfilePreview?.items.map((item) => item.assetId) ?? [];
+  async function handleTaskControl(task: DownloadTask, action: "pause" | "resume" | "cancel" | "retry") {
+    try {
+      applyTaskEvent({ type: "upsert", task: await controlTask(task.id, action) });
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    }
   }
 
-  function clearBilibiliProfileSelection() {
-    bilibiliSelectedProfileIds = [];
+  async function openSettings() {
+    settingsOpen = true;
+    try {
+      browserSources = await listBrowserSources();
+    } catch (error) {
+      errorMessage = resolveErrorMessage(error);
+    }
   }
 
-  function closeProfileSelection() {
-    douyinProfilePreview = null;
-    douyinSelectedProfileIds = [];
-    douyinSelectedProfileFormatIds = {};
-    douyinProfileBrowserSession = null;
+  async function handleSaveSettings(payload: SaveSettingsPayload) {
+    if (!bootstrap) return;
+    operationBusy = true;
+    try {
+      const saved = await saveSettings(payload);
+      bootstrap = { ...bootstrap, ...saved };
+      document.documentElement.dataset.theme = bootstrap.theme;
+      document.documentElement.lang = bootstrap.language;
+      setLanguage(bootstrap.language);
+      settingsOpen = false;
+    } finally {
+      operationBusy = false;
+    }
   }
 
-  function closeBilibiliProfileSelection() {
-    bilibiliProfilePreview = null;
-    bilibiliSelectedProfileIds = [];
-    bilibiliSelectedProfileFormatIds = {};
+  async function handleImportBrowser(platformId: PlatformId, browserId: string, profileId: string | null, consent: "once" | "always", allowElevation: boolean): Promise<CookieImportResult> {
+    operationBusy = true;
+    try {
+      const result = await importBrowserCookies({ platform: platformId, browserId, profileId, consent, allowElevation });
+      if (bootstrap && result.status === "active") {
+        bootstrap.platformAuth[platformId] = { mode: "browser", browserId, profileId, status: "active", consentedAt: consent === "always" ? Math.floor(Date.now() / 1000) : null };
+      }
+      return result;
+    } finally {
+      operationBusy = false;
+    }
   }
 
-  function setDouyinProfileFormat(assetId: string, formatId: string) {
-    douyinSelectedProfileFormatIds = {
-      ...douyinSelectedProfileFormatIds,
-      [assetId]: formatId
-    };
-  }
-
-  function setBilibiliProfileFormat(assetId: string, formatId: string) {
-    bilibiliSelectedProfileFormatIds = {
-      ...bilibiliSelectedProfileFormatIds,
-      [assetId]: formatId
-    };
-  }
-
-  function currentQualityLabel() {
-    return tRaw("quality." + qualityPreference) || "推荐优先";
-  }
-
-  function activeModuleTitle() {
-    return activeModule ? tRaw("module." + activeModule + ".label") : "StreamVerse";
-  }
-
-  async function windowToggleMaximize() {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    getCurrentWindow().toggleMaximize();
-  }
-
-  async function startDrag(event: MouseEvent) {
-    // Tauri 2 WKWebView on macOS ignores -webkit-app-region:drag;
-    // call the native startDragging API instead.
-    if (event.button !== 0) return;
-    // Prevent text selection during drag
-    event.preventDefault();
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    getCurrentWindow().startDragging();
-  }
-
-  function handleDragRegionDblClick() {
-    // macOS: double-click title bar = zoom (maximize/restore)
-    // Windows: double-click title bar = maximize/restore
-    windowToggleMaximize();
+  async function loadHistory() {
+    view = "history";
+    historyLoading = true;
+    try { history = await listDownloadHistory(200); }
+    finally { historyLoading = false; }
   }
 </script>
 
-{#if loading}
-  <main class="loading-shell">
-    {#if !isWindowsPlatform}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="drag-region macos-drag" onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
-    {/if}
-    <div class="pulse-card">
-      <span class="pulse-dot"></span>
-      {$t("app.loading")}
-    </div>
-  </main>
-{:else if bootstrap}
-  <main class="app-shell">
-    {#if !isWindowsPlatform}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="drag-region macos-drag" onmousedown={startDrag} ondblclick={handleDragRegionDblClick}></div>
-    {/if}
-    <section class="workspace">
-      <header class="topbar">
-        <div class="brand">
-          <p class="section-label">StreamVerse</p>
-          <h1>{activeModuleTitle()}</h1>
-          <p class="status-copy">
-            {$t("auth." + bootstrap.authState)}
-          </p>
-        </div>
+<svelte:head><meta name="theme-color" content="#101113" /></svelte:head>
 
-        <div class="topbar-actions">
-          {#if activeModule}
-            <button class="ghost-button" onclick={backToPlatformHome}>{$t("app.backToHome")}</button>
-          {/if}
-          <button class="ghost-button" onclick={() => (historyOpen = true)}>历史</button>
-          <button class="ghost-button" onclick={handleOpenSettings}>{$t("app.settings")}</button>
-        </div>
+<svelte:boundary onerror={(error) => (errorMessage = resolveErrorMessage(error))}>
+  <div class="app-shell" data-platform={platform}>
+    <SignalField paused={settingsOpen} />
+    <aside class="nav-rail" aria-label={$t("app.mainNavigation")}>
+      <button class="brand-mark" type="button" title="StreamVerse" aria-label={`StreamVerse ${$t("workspace.title")}`} onclick={() => (view = "download")}><Sparkles size={21} /></button>
+      <nav>
+        <button class:active={view === "download"} class="rail-button" type="button" title={$t("common.download")} aria-label={$t("common.download")} onclick={() => (view = "download")}><Download size={19} /></button>
+        <button class:active={view === "history"} class="rail-button" type="button" title={$t("history.title")} aria-label={$t("history.title")} onclick={loadHistory}><History size={19} /></button>
+      </nav>
+      <button class="rail-button" type="button" title={$t("app.settings")} aria-label={$t("app.settings")} onclick={openSettings}><Settings size={19} /></button>
+    </aside>
+
+    <main class="main-stage">
+      <header class="stage-header">
+        <div class="wordmark"><span>STREAM</span><strong>VERSE</strong><small>2.0</small></div>
+        <div class="stage-status"><span class:online={activeTaskCount > 0}></span><b>{activeTaskCount > 0 ? `${activeTaskCount} ACTIVE` : $t("app.systemReady")}</b></div>
+        <button class="queue-toggle icon-button" type="button" title={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} aria-label={queueCollapsed ? $t("task.expandQueue") : $t("task.collapseQueue")} onclick={() => (queueCollapsed = !queueCollapsed)}>{#if queueCollapsed}<PanelRightOpen size={18} />{:else}<PanelRightClose size={18} />{/if}</button>
       </header>
 
-      {#if activeModule}
-        <div class="workspace-switch">
-          {#each moduleOrder.filter((moduleId) => moduleEnabled(moduleId)) as moduleId}
-            {@const meta = moduleCatalog[moduleId]}
-            <button
-              class:active={activeModule === moduleId}
-              class="workspace-tab"
-              onclick={() => openModule(moduleId)}
-              type="button"
-            >
-              <strong>{$t("module." + moduleId + ".label")}</strong>
-              <span>{meta.badge}</span>
-            </button>
-          {/each}
-        </div>
-      {/if}
-
-      {#if activeModule}
-        <SharedDirectoryBar
-          currentDirectory={resolvedTargetDirectory()}
-          defaultDirectory={bootstrap.saveDirectory}
-          disabled={
-            pickingTargetDirectory ||
-            enqueuingDouyinProfile ||
-            enqueuingBilibiliProfile ||
-            downloadingDouyinSingle ||
-            downloadingBilibili ||
-            downloadingYoutube ||
-            openingFolder
-          }
-          picking={pickingTargetDirectory}
-          on:open={handleOpenCurrentDirectory}
-          on:pick={handlePickTargetDirectory}
-          on:reset={() => (targetDirectory = bootstrap!.saveDirectory)}
-        />
-      {/if}
-
-      {#if errorMessage}
-        <div class="notice error notice-stack">
-          <span>{errorMessage}</span>
-        </div>
-      {/if}
-
-      {#if successMessage}
-        <p class="notice success">{successMessage}</p>
-      {/if}
-
-      {#if !activeModule}
-        <PlatformHome
-          modules={moduleStates}
-          on:open={(event) => openModule(event.detail.moduleId)}
-        />
-      {:else if activeModule === "douyin-single"}
-        <section class="platform-workspace">
-          <SingleVideoWorkspace
-            authState={authStateFor("douyin")}
-            bind:downloadOptions={douyinSingleOptions}
-            bind:inputValue={douyinSingleInput}
-            bind:selectedFormatId={douyinSelectedFormatId}
-            description=""
-            downloading={downloadingDouyinSingle}
-            formatNote="抖音默认优先推荐兼容性更高的视频格式；如果本地播放器异常，可切换列表中的其他清晰度重试。"
-            heading={$t("douyin.heading")}
-            parserLabel=""
-            pasting={pastingDouyinSingle}
-            platformLabel={$t("module.douyin-single.label")}
-            placeholder={$t("douyin.placeholder")}
-            preview={douyinSinglePreview}
-            qualityLabel={currentQualityLabel()}
-            qualityPreference={qualityPreference}
-            analyzing={analyzingDouyinSingle}
-            analysisProgress={douyinSingleAnalysisProgress}
-            on:analyze={handleAnalyzeDouyinSingle}
-            on:download={() =>
-              douyinSinglePreview &&
-              startSingleDownload(
-                "douyin",
-                douyinSinglePreview,
-                douyinSelectedFormatId,
-                douyinSingleOptions,
-                false
-              )}
-            on:paste={() => pasteAndAnalyze("douyin", "single")}
-          />
-        </section>
-      {:else if activeModule === "douyin-profile"}
-        <section class="platform-workspace">
-          <ProfileBatchWorkspace
-            bind:downloadOptions={douyinProfileOptions}
-            bind:inputValue={douyinProfileInput}
-            authState={authStateFor("douyin")}
-            description=""
-            downloadedAssetIds={douyinDownloadedAssetIds}
-            heading={$t("douyin.profileHeading")}
-            heroEyebrow="Profile Batch"
-            itemLabel={$t("douyin.itemLabel")}
-            placeholder={$t("douyin.profilePlaceholder")}
-            analyzing={analyzingDouyinProfile}
-            analysisProgress={douyinProfileAnalysisProgress}
-            analyzeDisabled={!hasCookieFor("douyin")}
-            enqueuing={enqueuingDouyinProfile}
-            enqueueLabel="下载所选作品"
-            enqueuingLabel="下载中…"
-            pasting={pastingDouyinProfile}
-            preview={douyinProfilePreview}
-            selectedIds={douyinSelectedProfileIds}
-            selectedFormatIdsByAssetId={douyinSelectedProfileFormatIds}
-            showPrepareAction={false}
-            analyzeLabel="读取主页视频"
-            analyzeLoadingLabel={$t("douyin.analyzeLoading")}
-            on:analyze={handleAnalyzeDouyinProfile}
-            on:clearSelection={clearProfileSelection}
-            on:close={closeProfileSelection}
-            on:enqueue={handleEnqueueDouyinProfileTasks}
-            on:formatChange={(event) =>
-              setDouyinProfileFormat(event.detail.assetId, event.detail.formatId)}
-            on:paste={handlePasteDouyinProfileInput}
-            on:selectionChange={(event) => (douyinSelectedProfileIds = event.detail.ids)}
-            on:selectAll={selectAllProfileItems}
-          />
-        </section>
-      {:else if activeModule === "bilibili-single"}
-        <section class="platform-workspace">
-          <SingleVideoWorkspace
-            authState={authStateFor("bilibili")}
-            bind:downloadOptions={bilibiliOptions}
-            bind:inputValue={bilibiliInput}
-            bind:selectedFormatId={bilibiliSelectedFormatId}
-            description=""
-            downloading={downloadingBilibili}
-            formatNote=""
-            heading={$t("bilibili.heading")}
-            parserLabel=""
-            pasting={pastingBilibili}
-            platformLabel="Bilibili"
-            placeholder={$t("bilibili.placeholder")}
-            preview={bilibiliPreview}
-            qualityLabel={currentQualityLabel()}
-            qualityPreference={qualityPreference}
-            analyzing={analyzingBilibili}
-            analysisProgress={bilibiliAnalysisProgress}
-            on:analyze={handleAnalyzeBilibiliSingle}
-            on:download={() =>
-              bilibiliPreview &&
-              startSingleDownload(
-                "bilibili",
-                bilibiliPreview,
-                bilibiliSelectedFormatId,
-                bilibiliOptions,
-                false
-              )}
-            on:paste={() => pasteAndAnalyze("bilibili", "single")}
-          />
-        </section>
-      {:else if activeModule === "bilibili-profile"}
-        <section class="platform-workspace">
-          <ProfileBatchWorkspace
-            bind:downloadOptions={bilibiliProfileOptions}
-            bind:inputValue={bilibiliProfileInput}
-            authState={authStateFor("bilibili")}
-            analyzing={analyzingBilibiliProfile}
-            analysisProgress={bilibiliProfileAnalysisProgress}
-            analyzeLabel={$t("bilibili.analyzeLabel")}
-            analyzeLoadingLabel={$t("bilibili.analyzeLoading")}
-            description=""
-            downloadedAssetIds={bilibiliDownloadedAssetIds}
-            enqueuing={enqueuingBilibiliProfile}
-            enqueueLabel={$t("bilibili.enqueueLabel")}
-            enqueuingLabel={$t("bilibili.enqueuingLabel")}
-            heading={$t("bilibili.profileHeading")}
-            heroEyebrow="Creator Batch"
-            itemLabel={$t("bilibili.itemLabel")}
-            pasting={pastingBilibiliProfile}
-            placeholder={$t("bilibili.profilePlaceholder")}
-            preview={bilibiliProfilePreview}
-            selectedIds={bilibiliSelectedProfileIds}
-            selectedFormatIdsByAssetId={bilibiliSelectedProfileFormatIds}
-            resultEyebrow="Creator Result"
-            on:analyze={handleAnalyzeBilibiliProfile}
-            on:clearSelection={clearBilibiliProfileSelection}
-            on:close={closeBilibiliProfileSelection}
-            on:enqueue={handleEnqueueBilibiliProfileTasks}
-            on:formatChange={(event) =>
-              setBilibiliProfileFormat(event.detail.assetId, event.detail.formatId)}
-            on:paste={() => pasteAndAnalyze("bilibili", "profile")}
-            on:selectionChange={(event) => (bilibiliSelectedProfileIds = event.detail.ids)}
-            on:selectAll={selectAllBilibiliProfileItems}
-          />
+      {#if view === "history"}
+        <section class="history-workspace">
+          <header><div><span class="eyebrow">ARCHIVE INDEX</span><h1>{$t("history.title")}</h1></div><strong>{history.length.toString().padStart(3, "0")}</strong></header>
+          {#if historyLoading}<div class="center-loader"><LoaderCircle class="spin" size={22} /></div>{:else}
+            <div class="history-list">
+              {#each history as entry, index (entry.platform + entry.assetId)}
+                <article><span>{String(index + 1).padStart(3, "0")}</span><b style:--platform-color={platformMeta[entry.platform].color}>{platformMeta[entry.platform].code}</b><strong>{entry.title}</strong><time>{entry.downloadedAt}</time></article>
+              {:else}<div class="empty-state">{$t("history.empty")}</div>{/each}
+            </div>
+          {/if}
         </section>
       {:else}
-        <section class="platform-workspace">
-          <SingleVideoWorkspace
-            authState={authStateFor("youtube")}
-            bind:downloadOptions={youtubeOptions}
-            bind:inputValue={youtubeInput}
-            bind:selectedFormatId={youtubeSelectedFormatId}
-            description=""
-            downloading={downloadingYoutube}
-            formatNote=""
-            heading={$t("youtube.heading")}
-            parserLabel=""
-            pasting={pastingYoutube}
-            platformLabel="YouTube"
-            placeholder={$t("youtube.placeholder")}
-            preview={youtubePreview}
-            qualityLabel={currentQualityLabel()}
-            qualityPreference={qualityPreference}
-            analyzing={analyzingYoutube}
-            analysisProgress={youtubeAnalysisProgress}
-            on:analyze={handleAnalyzeYoutubeSingle}
-            on:download={() =>
-              youtubePreview &&
-              startSingleDownload(
-                "youtube",
-                youtubePreview,
-                youtubeSelectedFormatId,
-                youtubeOptions,
-                false
-              )}
-            on:paste={() => pasteAndAnalyze("youtube", "single")}
-          />
+        <section class="download-workspace">
+          <div class="workspace-heading">
+            <div><span class="eyebrow">SIGNAL IN / FILE OUT</span><h1>{$t("workspace.title")}</h1></div>
+            <div class="platform-switch" role="tablist" aria-label="平台">
+              {#each Object.keys(platformMeta) as id}
+                <button class:active={platform === id} style:--platform-color={platformMeta[id as PlatformId].color} type="button" role="tab" aria-selected={platform === id} onclick={() => selectPlatform(id as PlatformId)}><PlatformIcon platform={id as PlatformId} size={14} />{platformMeta[id as PlatformId].label}</button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="input-console">
+            <div class="mode-switch" role="tablist" aria-label={$t("workspace.mode")}><button class:active={workflowMode === "single"} type="button" role="tab" onclick={() => selectWorkflowMode("single")}><Download size={15} />{$t("workspace.single")}</button><button class:active={workflowMode === "profile"} type="button" role="tab" onclick={() => selectWorkflowMode("profile")}><SquareStack size={15} />{platform === "youtube" ? $t("workspace.youtubeChannel") : $t("workspace.profile")}</button>{#if platform === "youtube"}<button class:active={workflowMode === "playlist"} type="button" role="tab" onclick={() => selectWorkflowMode("playlist")}><ListVideo size={15} />{$t("workspace.youtubePlaylist")}</button>{/if}</div>
+            <div class="signal-input"><textarea bind:value={rawInput} rows="3" aria-label={$t("workspace.inputLabel")} placeholder={$t("workspace.placeholder")} onkeydown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") analyze(); }}></textarea><button class="icon-button paste-button" type="button" title={$t("workspace.paste")} aria-label={$t("workspace.paste")} onclick={pasteInput}><ClipboardPaste size={18} /></button><button class="analyze-button" type="button" disabled={analyzing || !rawInput.trim()} onclick={analyze}>{#if analyzing}<LoaderCircle class="spin" size={18} />{:else}<Search size={18} />{/if}<span>{analyzing ? $t("common.analyzing") : $t("common.analyze")}</span></button></div>
+            <div class="console-meta"><span style:--platform-color={platformMeta[platform].color}>{platformMeta[platform].code} / {workflowMode === "single" ? "SINGLE" : workflowMode === "playlist" ? "PLAYLIST" : "CHANNEL"}</span><span class:active-auth={authStatus === "active"}>{authStatus === "active" ? "AUTH ACTIVE" : "GUEST MODE"}</span><button type="button" onclick={openSettings}><SlidersHorizontal size={14} />{bootstrap?.saveDirectory ?? "--"}</button></div>
+          </div>
+
+          {#if analyzing && analysisProgress}<AnalysisProgress progress={analysisProgress} />{/if}
+
+          {#if errorMessage}<div class="message-strip error" role="alert">{errorMessage}</div>{/if}
+          {#if notice}<div class="message-strip success" aria-live="polite">{notice}</div>{/if}
+
+          {#if workflowMode === "single"}
+            {#if preview}
+              <div class="single-result">
+                <figure>{#if previewCoverUrl && !previewCoverFailed}<img src={previewCoverUrl} alt={preview.title} width="960" height="540" decoding="async" onerror={() => (previewCoverFailed = true)} />{:else}<div class="cover-placeholder"><PlatformIcon platform={preview.platform} size={52} /></div>{/if}<figcaption><span>{formatDuration(preview.durationSeconds)}</span></figcaption></figure>
+                <div class="result-detail"><span class="eyebrow">{platformMeta[preview.platform].label} / {preview.author}</span><h2>{preview.title}</h2><p>{preview.publishDate || "--"}</p>{#if previewIsAlbum}<div class="album-summary"><strong>{$t("content.album")}</strong><span>{preview.imageUrls?.length ?? 0} {$t("content.images")}</span></div>{:else}<SingleFormatList formats={previewFormats} selectedId={selectedFormatId} expanded={formatsExpanded} durationSeconds={preview.durationSeconds} onSelect={(formatId) => (selectedFormatId = formatId)} onExpandedChange={(expanded) => (formatsExpanded = expanded)} />{/if}<ContentOptions options={downloadOptions} onChange={(next) => (downloadOptions = next)} label={$t("single.downloadContent")} /><button class="download-button" type="button" disabled={operationBusy || !canDownloadSingle} onclick={downloadSingle}>{#if operationBusy}<LoaderCircle class="spin" size={18} />{:else}<Download size={18} />{/if}{$t("workspace.enqueue")}</button></div>
+              </div>
+            {:else}<div class="idle-stage"><span>01</span><strong>AWAITING SIGNAL</strong></div>{/if}
+          {:else}
+            <div class="batch-workspace">
+              <header><div><span class="eyebrow">{profile?.profileTitle ?? "BATCH SELECTOR"}</span><strong>{profile?.items.length ?? 0} ITEMS / {selectedCount} SELECTED</strong></div><div><button class="quiet-button" type="button" disabled={!profile} onclick={selectAllProfileItems}><Check size={15} />全选</button><button class="quiet-button" type="button" disabled={!profile} onclick={invertProfileSelection}><Menu size={15} />反选</button><button class="primary-button" type="button" disabled={!profile || selectedCount === 0 || operationBusy || !hasSelectedDownloadOptions(downloadOptions)} onclick={downloadBatch}><Download size={16} />下载 {selectedCount}</button></div></header>
+              {#if profile}<ContentOptions options={downloadOptions} onChange={(next) => (downloadOptions = next)} label={$t("batch.downloadContent")} />{/if}
+              <BatchList items={profile?.items ?? []} selectedIds={selectedProfileIds} selectedFormats={selectedProfileFormats} onToggle={toggleProfileItem} onFormat={(id, formatId) => (selectedProfileFormats = { ...selectedProfileFormats, [id]: formatId })} />
+            </div>
+          {/if}
         </section>
       {/if}
+    </main>
 
-      <TaskQueuePanel
-        tasks={tasks}
-        pendingTaskIds={taskActionPendingIds}
-        {clearingFinished}
-        on:cancel={(event) => handleTaskControl(event.detail.task, "cancel")}
-        on:clearFinished={handleClearFinished}
-        on:pause={(event) => handleTaskControl(event.detail.task, "pause")}
-        on:resume={(event) => handleTaskControl(event.detail.task, "resume")}
-        on:retry={(event) => handleTaskControl(event.detail.task, "retry")}
-        on:reveal={(event) => handleRevealTask(event.detail.task)}
-      />
+    <TaskPanel tasks={bootstrap?.tasks ?? []} collapsed={queueCollapsed} onControl={handleTaskControl} onReveal={(task) => task.outputPath && openInFileManager(task.outputPath, true)} onRemove={async (task) => { await removeDownloadTask(task.id); applyTaskEvent({ type: "delete", taskId: task.id }); }} onClear={async () => { if (!bootstrap) return; bootstrap.tasks = await clearFinishedTasks(); }} />
 
-      <SettingsPanel
-        open={settingsOpen}
-        bind:autoRevealInFinder
-        bind:platformAuthDrafts
-        bind:qualityPreference
-        bind:saveDirectoryDraft
-        bind:maxConcurrentDownloads
-        bind:proxyUrl
-        bind:speedLimit
-        bind:autoUpdate
-        bind:theme
-        bind:notifyOnComplete
-        bind:language
-        browserOptions={browserOptions}
-        ffmpegAvailable={bootstrap.ffmpegAvailable}
-        pickingDirectory={pickingDirectory}
-        detectingCookiePlatform={detectingCookiePlatform}
-        platformAuthProfiles={bootstrap.platformAuth}
-        qualityOptions={qualityOptions}
-        settingsSaving={settingsSaving}
-        settingsErrorMessage={errorMessage}
-        settingsSuccessMessage={successMessage}
-        on:close={() => { if (bootstrap) syncSettings(bootstrap); settingsOpen = false; }}
-        on:pickCookieFile={(event) => handlePickCookieFile(event.detail.platform)}
-        on:detectCookie={(event) => handleDetectCookie(event.detail.platform)}
-        on:pickDirectory={handlePickSaveDirectory}
-        on:save={handleSaveSettings}
-      />
-
-      <HistoryPanel
-        open={historyOpen}
-        on:close={() => (historyOpen = false)}
-      />
-    </section>
-
-    <!-- Global floating scroll buttons -->
-    <div class="fab-scroll-group">
-      <button class="fab-scroll" onclick={scrollToTop} title={$t("task.scrollToTop")} type="button">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
-      </button>
-      <button class="fab-scroll" onclick={scrollToBottom} title={$t("task.scrollToBottom")} type="button">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-      </button>
-    </div>
-
-    {#if analysisModalOpen && analysisModalProgress}
-      <div class="analysis-overlay">
-        <div class="analysis-ring">
-          <svg class="ring-svg" viewBox="0 0 96 96">
-            <circle class="ring-track" cx="48" cy="48" r="42" />
-            <circle
-              class="ring-fill"
-              cx="48" cy="48" r="42"
-              stroke-dasharray={2 * Math.PI * 42}
-              stroke-dashoffset={analysisRingOffset}
-            />
-          </svg>
-          <span class="ring-percent">{analysisRingPercent}%</span>
-          <span class="ring-message">{analysisModalProgress.message || analysisModalLabel}</span>
-        </div>
-      </div>
+    {#if bootstrap}
+      <SettingsSheet open={settingsOpen} {bootstrap} {browserSources} busy={operationBusy} onClose={() => (settingsOpen = false)} onSave={handleSaveSettings} onPickDirectory={() => pickSaveDirectory(bootstrap!.saveDirectory)} onPickCookieFile={pickCookieFile} onImportBrowser={handleImportBrowser} onSaveManual={async (platformId, value) => { const result = await saveManualCookies(platformId, { cookieText: value }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onImportCookieFile={async (platformId, path) => { const result = await saveManualCookies(platformId, { cookieFile: path }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onClearAuth={async (platformId) => { await clearPlatformAuth(platformId); bootstrap!.platformAuth[platformId] = { mode: "none", status: "guest" }; }} />
     {/if}
-  </main>
-{/if}
+  </div>
+
+  {#snippet failed(error, reset)}
+    <div class="fatal-boundary"><strong>界面渲染失败</strong><p>{resolveErrorMessage(error)}</p><button class="primary-button" type="button" onclick={reset}>重新加载</button></div>
+  {/snippet}
+</svelte:boundary>

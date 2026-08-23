@@ -1,6 +1,4 @@
-use crate::{
-    pack_host, parser, platforms, settings, BrowserLaunchResult, ProfileBatch, VideoAsset,
-};
+use crate::{parser, platforms, provider_runtime, settings, ProfileBatch, VideoAsset};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -8,6 +6,7 @@ pub fn analyze_input(
     raw_input: &str,
     platform_auth: &BTreeMap<String, settings::PlatformAuthSettings>,
     progress_file: Option<&Path>,
+    proxy_url: Option<&str>,
 ) -> Result<VideoAsset, String> {
     let source_url = extract_source_url(
         raw_input,
@@ -26,15 +25,6 @@ pub fn analyze_input(
 
     preflight_auth(platform, selected_browser, selected_cookie_file)?;
 
-    if platform == "youtube" {
-        return pack_host::analyze_single(
-            &source_url,
-            selected_browser,
-            selected_cookie_file,
-            progress_file,
-        );
-    }
-
     if platform == "douyin" {
         if selected_browser.is_none() && selected_cookie_file.is_none() {
             return Err(
@@ -43,28 +33,37 @@ pub fn analyze_input(
             );
         }
 
-        return pack_host::analyze_single(
+        return provider_runtime::run_helper_json(
+            "douyin-analyze",
             &source_url,
-            selected_browser,
             selected_cookie_file,
+            selected_browser,
+            None,
             progress_file,
         )
+        .or_else(|_| {
+            provider_runtime::analyze_generic_url(
+                platform,
+                &source_url,
+                None,
+                selected_cookie_file,
+                None,
+            )
+        })
         .map_err(normalize_douyin_error);
     }
 
-    match pack_host::analyze_single(&source_url, None, None, progress_file) {
-        Ok(asset) => Ok(asset),
-        Err(error) if selected_browser.is_some() || selected_cookie_file.is_some() => {
-            pack_host::analyze_single(
-                &source_url,
-                selected_browser,
-                selected_cookie_file,
-                progress_file,
-            )
-            .or(Err(error))
-        }
-        Err(error) => Err(error),
-    }
+    provider_runtime::analyze_generic_url(
+        platform,
+        &source_url,
+        selected_browser,
+        selected_cookie_file,
+        if platform == "youtube" {
+            proxy_url
+        } else {
+            None
+        },
+    )
 }
 
 fn normalize_douyin_error(error: String) -> String {
@@ -120,6 +119,7 @@ pub fn analyze_profile_input(
     raw_input: &str,
     platform_auth: &BTreeMap<String, settings::PlatformAuthSettings>,
     progress_file: Option<&Path>,
+    proxy_url: Option<&str>,
 ) -> Result<ProfileBatch, String> {
     let source_url = extract_source_url(
         raw_input,
@@ -148,8 +148,15 @@ pub fn analyze_profile_input(
                     .filter(|value| !value.trim().is_empty())
                     .is_some()
             {
-                pack_host::analyze_profile(&source_url, cookie_browser, cookie_file, progress_file)
-                    .map_err(normalize_douyin_error)
+                provider_runtime::run_helper_json(
+                    "douyin-profile",
+                    &source_url,
+                    cookie_file,
+                    cookie_browser,
+                    None,
+                    progress_file,
+                )
+                .map_err(normalize_douyin_error)
             } else {
                 Err(
                     "抖音主页批量下载需要登录态。请先在设置中选择浏览器或导入 Cookie 后再试。"
@@ -157,42 +164,19 @@ pub fn analyze_profile_input(
                 )
             }
         }
-        _ => pack_host::analyze_profile(&source_url, cookie_browser, cookie_file, progress_file),
+        "bilibili" => provider_runtime::run_helper_json(
+            "bilibili-profile",
+            &source_url,
+            cookie_file,
+            cookie_browser,
+            None,
+            progress_file,
+        ),
+        "youtube" => {
+            provider_runtime::analyze_youtube_collection(&source_url, cookie_file, proxy_url)
+        }
+        _ => Err("当前平台不支持主页批量下载。".to_string()),
     }
-}
-
-pub fn open_profile_browser(
-    raw_input: &str,
-    platform_auth: &BTreeMap<String, settings::PlatformAuthSettings>,
-) -> Result<BrowserLaunchResult, String> {
-    let source_url = extract_source_url(
-        raw_input,
-        "未在输入内容里找到可用主页链接，请粘贴完整主页分享文案或主页链接。",
-    )?;
-    let platform = platforms::detect_platform(&source_url);
-    let auth = settings::platform_auth_for(platform_auth, platform);
-    pack_host::open_profile_browser(&source_url, auth.cookie_browser.as_deref())
-}
-
-pub fn collect_profile_browser(
-    raw_input: &str,
-    port: u16,
-    platform_auth: &BTreeMap<String, settings::PlatformAuthSettings>,
-    progress_file: Option<&Path>,
-) -> Result<ProfileBatch, String> {
-    let source_url = extract_source_url(
-        raw_input,
-        "未在输入内容里找到可用主页链接，请粘贴完整主页分享文案或主页链接。",
-    )?;
-    let platform = platforms::detect_platform(&source_url);
-    let auth = settings::platform_auth_for(platform_auth, platform);
-    pack_host::collect_profile_browser(
-        &source_url,
-        port,
-        auth.cookie_browser.as_deref(),
-        auth.cookie_file.as_deref(),
-        progress_file,
-    )
 }
 
 fn preflight_auth(
@@ -227,11 +211,17 @@ mod tests {
     }
 
     #[test]
-    fn douyin_profile_requires_manual_browser_flow() {
+    fn douyin_profile_requires_auth() {
+        use crate::settings;
         use std::collections::BTreeMap;
         let empty_auth = BTreeMap::new();
-        let error = analyze_profile_input("https://www.douyin.com/user/test", &empty_auth, None)
-            .unwrap_err();
+        let hydrated = settings::platform_auth_for(&empty_auth, "douyin");
+        if hydrated.cookie_browser.is_some() || hydrated.cookie_file.is_some() {
+            return;
+        }
+        let error =
+            analyze_profile_input("https://www.douyin.com/user/test", &empty_auth, None, None)
+                .unwrap_err();
         assert!(error.contains("打开浏览器") || error.contains("Cookie") || error.contains("登录"));
     }
 

@@ -2,6 +2,53 @@
 
 All notable changes to `StreamVerse` will be documented in this file.
 
+## [2.0.0] - 2026-08-23
+
+### 新增
+
+- “Signal Cinema”全窗口下载工作区、可折叠实时队列和设置侧边 sheet。
+- 基于 `rookie-cookies` 的浏览器/Profile 枚举与按平台域名白名单导入。
+- Cookie 首次授权、仅本次/始终允许、撤销删除、关键 Cookie 校验和 Windows 独立 UAC helper。
+- 手动 Cookie Header 与 `cookies.txt` 导入，两者都重新过滤后原子写入应用认证目录。
+- 固定版本且校验 SHA-256 的 yt-dlp、FFmpeg 和单文件 `streamverse-helper` sidecar。
+- YouTube 频道与合集批量解析、虚拟化选择和批量入队。
+- 固定 Deno sidecar，为 yt-dlp 提供不依赖用户环境的 YouTube JavaScript 挑战求解。
+
+### 变更
+
+- 三个平台改为进程内 provider；删除动态 pack、registry、安装/卸载与 pack Release 流程。
+- 下载 IPC 收敛为 `DownloadRequest`；重试复用同一请求结构。
+- 任务同步改为初始加载一次后接收增量 `TaskEvent`，删除前端轮询。
+- 下载后端拆为启动、IPC、provider runtime、任务控制、传输执行和产物保存模块。
+- 前端迁移到 Svelte 5 runes、callback props、Lucide 图标和 TanStack Virtual。
+- 设置、任务、历史和认证使用 v2 数据文件，不迁移 0.1 数据。
+
+### 修复
+
+- 修复批量列表更新 virtualizer options 时订阅自身 store，导致所有主页批量模块触发 `effect_update_depth_exceeded` 的问题。
+- 移除浏览器 UI 预览中的虚构解析结果和任务；真实解析只允许通过 Tauri 桌面运行时调用。
+- 修复 Cookie 授权失败后弹窗无反馈且可重复提交的问题，并为浏览器数据库占用提供可执行提示。
+- 修复 Windows UAC Cookie helper 经 PowerShell 转发时丢失参数和结果的问题，改用原生进程启动与退出状态检查。
+- 修复 UAC helper 使用未限定用户名设置 Cookie 文件 ACL，导致主程序导入成功后仍被拒绝访问的问题。
+- 修复解析结果缩略图未经过本地代理而被平台防盗链拦截的问题。
+- 视频格式按清晰度、编码和容器保留最高码率唯一项，并改为单列列表展示。
+- 修复竖版封面在固定预览框内被裁剪，改为完整比例显示。
+- 修复 YouTube 下载误用失效产物路径导致视频黑屏、MP3 提取找不到输入文件的问题。
+- YouTube 默认使用可并发的 HLS 格式与 32 路分片下载，并在完成后验证最终文件存在。
+- YouTube 封面下载增加 JPEG 多级回退，避免 `vi_webp` 直链不可达时保存失败。
+- 抖音单视频优先使用主页 `cover_original_scale` 原比例封面，缺失时再回退动态封面与视频帧。
+- YouTube 频道主页与播放列表拆分为独立解析模式；频道根链接和 `/featured` 自动归一化到 `/videos`。
+- YouTube 批量下载逐条重新解析真实格式，删除会制造失效地址的 `best` 占位格式。
+- YouTube 下载固定 IPv4，低于 512 KiB/s 时自动重取播放地址并提示在设置中填写或切换代理。
+- YouTube 下载前在 2 秒内检测本地代理端口；代理客户端未启动或端口错误时立即给出通用提示，不再长时间停留在“准备中”。
+- Windows 取消 YouTube 下载时终止 yt-dlp、Deno 与 FFmpeg 整个进程树，并正确释放下载并发槽。
+
+### 移除
+
+- 运行时 Python、venv、pip 安装及首次启动依赖下载。
+- `cookies-from-browser` 全站导出路径和会强制关闭 Chrome 的解锁插件。
+- 动态模块中心、pack 二进制、pack registry 和旧界面组件。
+
 ## [0.1.5] — 2026-05-26
 
 ### 新增

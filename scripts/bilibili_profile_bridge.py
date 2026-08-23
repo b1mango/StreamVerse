@@ -118,7 +118,8 @@ def write_progress(current: int, total: int, message: str) -> None:
 
     path = Path(PROGRESS_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
         json.dumps(
             {
                 "current": max(0, int(current)),
@@ -129,6 +130,7 @@ def write_progress(current: int, total: int, message: str) -> None:
         ),
         "utf-8",
     )
+    os.replace(temporary, path)
 
 
 class ProgressTracker:
@@ -720,7 +722,6 @@ async def main_async(args: argparse.Namespace) -> int:
         "totalAvailable": len(merged),
         "fetchedCount": len(merged),
         "skippedCount": 0,
-        "sessionCookieFile": args.cookie_file,
         "items": [to_asset(item, profile_title) for item in merged],
     }
     print(json.dumps(payload, ensure_ascii=False))

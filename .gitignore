@@ -3,11 +3,16 @@ dist/
 .venv/
 logs/
 releases/
+.tmp/
 .DS_Store
 npm-debug.log*
 
 src-tauri/target/
 src-tauri/gen/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+scripts/dist/
+scripts/build/
 
 vendor/douyin_api/**/__pycache__/
 vendor/douyin_api/**/*.pyc

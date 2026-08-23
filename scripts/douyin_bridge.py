@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 VENDOR_ROOT = REPO_ROOT / "vendor" / "douyin_api"
 DESKTOP_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -83,7 +83,8 @@ def write_progress(current: int, total: int, message: str) -> None:
 
     path = Path(PROGRESS_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
         json.dumps(
             {
                 "current": max(0, int(current)),
@@ -94,6 +95,7 @@ def write_progress(current: int, total: int, message: str) -> None:
         ),
         "utf-8",
     )
+    os.replace(temporary, path)
 
 
 def build_cookie_header(cookie_file: Path | None) -> str:
@@ -160,6 +162,9 @@ def choose_direct_url(url_list: list[str]) -> str | None:
 
 
 def first_url_from_candidate(candidate: Any) -> str | None:
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate
+
     if isinstance(candidate, dict):
         url_list = candidate.get("url_list") or candidate.get("urlList") or []
         if isinstance(url_list, list):
@@ -175,28 +180,63 @@ def first_url_from_candidate(candidate: Any) -> str | None:
     return None
 
 
-def extract_cover_url(detail: dict[str, Any]) -> str | None:
-    top_video = detail.get("video") or {}
-    for key in ("origin_cover", "cover", "dynamic_cover", "animated_cover"):
-        cover_url = first_url_from_candidate(top_video.get(key))
-        if cover_url:
-            return cover_url
+def is_known_watermarked_image_url(url: str) -> bool:
+    normalized = url.lower()
+    return "tplv-dy-water" in normalized or "owner_watermark" in normalized
 
+
+def extract_cover_urls(detail: dict[str, Any]) -> list[str]:
+    if int(detail.get("aweme_type") or 0) in IMAGE_AWEME_TYPES:
+        image_urls = extract_image_urls(detail)
+        if image_urls:
+            return [image_urls[0]]
+
+    urls: list[str] = []
+    top_video = detail.get("video") or {}
+    # `cover` is the feed artwork. The other fields frequently expose the original
+    # portrait canvas or a generated video frame, so only use them as fallbacks.
+    for key in ("cover", "cover_original_scale", "dynamic_cover", "origin_cover"):
+        cover_url = first_url_from_candidate(top_video.get(key))
+        if cover_url and cover_url not in urls:
+            urls.append(cover_url)
+
+    for cover_url in extract_image_urls(detail):
+        if cover_url not in urls:
+            urls.append(cover_url)
+
+    return urls
+
+
+def extract_cover_url(detail: dict[str, Any]) -> str | None:
+    return next(iter(extract_cover_urls(detail)), None)
+
+
+def extract_image_urls(detail: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
     for image in detail.get("images") or []:
         if not isinstance(image, dict):
             continue
 
-        for key in ("url_list", "download_url_list"):
-            cover_url = first_url_from_candidate(image.get(key))
-            if cover_url:
-                return cover_url
-
-        display_image = image.get("display_image") or {}
-        cover_url = first_url_from_candidate(display_image)
-        if cover_url:
-            return cover_url
-
-    return None
+        candidates = (
+            image.get("watermark_free_download_url_list"),
+            image.get("origin_image"),
+            image.get("display_image"),
+            image.get("url_list"),
+        )
+        selected = next(
+            (
+                url
+                for candidate in candidates
+                if (url := first_url_from_candidate(candidate))
+                and not is_known_watermarked_image_url(url)
+            ),
+            None,
+        )
+        if selected and selected not in seen:
+            seen.add(selected)
+            urls.append(selected)
+    return urls
 
 
 def pick_display_height(width: int, height: int, gear_name: str) -> int:
@@ -241,7 +281,7 @@ def collect_video_sources(detail: dict[str, Any]) -> list[tuple[str, dict[str, A
 
 
 def collect_formats(detail: dict[str, Any], using_login: bool) -> list[dict[str, Any]]:
-    formats: list[dict[str, Any]] = []
+    best_formats: dict[tuple[str, str, str], dict[str, Any]] = {}
     seen_urls: set[str] = set()
 
     for source_key, video in collect_video_sources(detail):
@@ -260,23 +300,33 @@ def collect_formats(detail: dict[str, Any], using_login: bool) -> list[dict[str,
             bitrate_kbps = int(round((bit_rate.get("bit_rate") or 0) / 1000))
             codec = "H.265" if bit_rate.get("is_h265") or video.get("is_h265") else "H.264"
 
-            formats.append(
-                {
-                    "id": f"{source_key}:{gear_name or pick_display_height(width, height, '')}:{index}",
-                    "label": build_format_label(width, height, gear_name),
-                    "resolution": build_resolution(width, height),
-                    "bitrateKbps": bitrate_kbps,
-                    "codec": codec,
-                    "container": "MP4",
-                    "noWatermark": True,
-                    "requiresLogin": using_login,
-                    "requiresProcessing": False,
-                    "recommended": False,
-                    "directUrl": direct_url,
-                    "referer": DOUYIN_REFERER,
-                    "userAgent": DESKTOP_UA,
-                }
-            )
+            format_item = {
+                "id": f"{source_key}:{gear_name or pick_display_height(width, height, '')}:{index}",
+                "label": build_format_label(width, height, gear_name),
+                "resolution": build_resolution(width, height),
+                "bitrateKbps": bitrate_kbps,
+                "codec": codec,
+                "container": "MP4",
+                "noWatermark": True,
+                "requiresLogin": using_login,
+                "requiresProcessing": False,
+                "recommended": False,
+                "directUrl": direct_url,
+                "referer": DOUYIN_REFERER,
+                "userAgent": DESKTOP_UA,
+                "fileSizeBytes": int(
+                    play_addr.get("data_size")
+                    or bit_rate.get("data_size")
+                    or video.get("data_size")
+                    or 0
+                ) or None,
+            }
+            unique_key = (format_item["label"].upper(), codec, "MP4")
+            existing = best_formats.get(unique_key)
+            if existing is None or bitrate_kbps > int(existing["bitrateKbps"]):
+                best_formats[unique_key] = format_item
+
+    formats = list(best_formats.values())
 
     formats.sort(
         key=lambda item: (
@@ -323,7 +373,8 @@ def build_asset_from_detail(
         return None
 
     formats = collect_formats(detail, using_login=using_login)
-    if not formats:
+    image_urls = extract_image_urls(detail)
+    if not formats and not image_urls:
         return None
 
     author = (detail.get("author") or {}).get("nickname") or "未知作者"
@@ -341,7 +392,9 @@ def build_asset_from_detail(
         "categoryLabel": "图文笔记" if int(detail.get("aweme_type") or 0) in IMAGE_AWEME_TYPES else "普通视频",
         "groupTitle": None,
         "coverUrl": extract_cover_url(detail),
+        "coverUrls": extract_cover_urls(detail),
         "coverGradient": "linear-gradient(135deg, rgba(13, 190, 165, 0.95), rgba(97, 87, 255, 0.8))",
+        "imageUrls": image_urls,
         "formats": formats,
     }
 
@@ -361,11 +414,9 @@ def build_caption(detail: dict[str, Any], using_login: bool, has_video_formats: 
     prefix = "已通过浏览器 Cookie 完成解析。" if using_login else "已通过网页接口完成解析。"
     aweme_type = int(detail.get("aweme_type") or 0)
 
-    if aweme_type in IMAGE_AWEME_TYPES and has_video_formats:
-        return f"{prefix} 该复制链接实际指向笔记作品，已提取其中可下载的动态内容。"
-
     if aweme_type in IMAGE_AWEME_TYPES:
-        return f"{prefix} 当前链接是图文笔记，暂不支持纯图片下载。"
+        detail = "，并保留可用动态内容" if has_video_formats else ""
+        return f"{prefix} 当前作品是图文笔记，已提取全部可下载图片{detail}。"
 
     return f"{prefix} 可以直接选择清晰度开始下载。"
 
@@ -407,7 +458,7 @@ async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:
     )
     write_progress(3, 4, "正在生成抖音预览结果…")
     if not asset:
-        raise RuntimeError("当前链接是图文笔记或受限内容，暂时没有可下载的视频格式。")
+        raise RuntimeError("当前作品未返回可下载的视频或图片资源。")
 
     write_progress(4, 4, "抖音作品解析完成。")
     return asset
@@ -456,7 +507,7 @@ async def analyze_profile(
     )
     total_available = int(user.get("aweme_count") or 0)
     progress_total = max(1, min(total_available or normalized_limit, normalized_limit))
-    write_progress(0, progress_total, "正在读取抖音主页作品…")
+    write_progress(0, progress_total, "正在读取抖音主页作品（含视频与图册）…")
 
     items: list[dict[str, Any]] = []
     seen_aweme_ids: set[str] = set()
@@ -496,7 +547,7 @@ async def analyze_profile(
                 )
                 if asset:
                     items.append(asset)
-                    write_progress(len(items), progress_total, f"已解析 {len(items)} 个抖音作品。")
+                    write_progress(len(items), progress_total, f"已解析 {len(items)} 个抖音作品（含视频与图册）。")
                 else:
                     skipped_count += 1
 
@@ -505,7 +556,7 @@ async def analyze_profile(
             max_cursor = next_cursor
 
     if not items:
-        raise RuntimeError("当前主页暂时没有可批量下载的视频作品，或需要更新登录状态后重试。")
+        raise RuntimeError("当前主页暂时没有可批量下载的作品，或需要更新登录状态后重试。")
 
     write_progress(len(items), progress_total, "抖音主页解析完成。")
 
@@ -516,7 +567,6 @@ async def analyze_profile(
         "totalAvailable": max(total_available, len(items) + skipped_count),
         "fetchedCount": len(items),
         "skippedCount": skipped_count,
-        "sessionCookieFile": str(cookie_file) if cookie_file else None,
         "items": items,
     }
 
