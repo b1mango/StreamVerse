@@ -77,7 +77,6 @@
   let bootstrap = $state<BootstrapState | null>(null);
   let view = $state<View>("download");
   let platform = $state<PlatformId>("douyin");
-  let windowMaximized = $state(false);
   let workflowMode = $state<WorkflowMode>("single");
   let rawInput = $state("");
   let analyzing = $state(false);
@@ -156,7 +155,6 @@
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
-    let unlistenResize: (() => void) | undefined;
     void (async () => {
       bootstrap = await getBootstrapState();
       document.documentElement.dataset.theme = bootstrap.theme;
@@ -164,17 +162,8 @@
       setLanguage(bootstrap.language);
       preview = null;
       unlisten = await subscribeTaskEvents(applyTaskEvent);
-      if (isFramelessWindows()) {
-        // 透明窗口下监听最大化：最大化时容器退化为直角满屏
-        const api = await import("@tauri-apps/api/window");
-        const win = api.getCurrentWindow();
-        windowMaximized = await win.isMaximized();
-        unlistenResize = await win.onResized(async () => {
-          windowMaximized = await win.isMaximized();
-        });
-      }
     })().catch((error) => (errorMessage = resolveErrorMessage(error)));
-    return () => { unlisten?.(); unlistenResize?.(); };
+    return () => unlisten?.();
   });
 
   function applyTaskEvent(event: TaskEvent) {
@@ -675,7 +664,7 @@
 <svelte:head><meta name="theme-color" content="#08070a" /></svelte:head>
 
 <svelte:boundary onerror={(error) => (errorMessage = resolveErrorMessage(error))}>
-  <div class="app-shell" class:has-titlebar={isFramelessWindows()} class:maximized={windowMaximized} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>
+  <div class="app-shell" class:has-titlebar={isFramelessWindows()} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>
     <div class="app-frame">
     <TitleBar />
     <aside class="nav-rail" aria-label={$t("app.mainNavigation")}>

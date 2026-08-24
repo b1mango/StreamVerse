@@ -7,7 +7,7 @@
 <p align="center">抖音、Bilibili、YouTube 桌面视频下载器</p>
 
 <p align="center">
-  <a href="https://github.com/b1mango/StreamVerse/releases"><img src="https://img.shields.io/badge/release-1.0.0-2ea043" alt="release 1.0.0" /></a>
+  <a href="https://github.com/b1mango/StreamVerse/releases"><img src="https://img.shields.io/badge/release-1.0.1-2ea043" alt="release 1.0.1" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-1f6feb" alt="Windows and macOS" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5c542" alt="MIT" /></a>
 </p>
@@ -25,11 +25,11 @@
 
 ## 界面
 
-![下载工作区](docs/screenshots/workspace.png)
+![下载工作区](docs/screenshots/home.png)
 
-| YouTube 批量解析 | 设置面板 |
+| 下载历史 | 设置 |
 | :---: | :---: |
-| ![YouTube 批量解析](docs/screenshots/youtube-batch.png) | ![设置面板](docs/screenshots/settings-queue.png) |
+| ![下载历史](docs/screenshots/history.png) | ![设置](docs/screenshots/settings.png) |
 
 ## 安装
 

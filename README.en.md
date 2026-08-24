@@ -7,7 +7,7 @@
 <p align="center">Desktop video downloader for Douyin, Bilibili, and YouTube</p>
 
 <p align="center">
-  <a href="https://github.com/b1mango/StreamVerse/releases"><img src="https://img.shields.io/badge/release-1.0.0-2ea043" alt="release 1.0.0" /></a>
+  <a href="https://github.com/b1mango/StreamVerse/releases"><img src="https://img.shields.io/badge/release-1.0.1-2ea043" alt="release 1.0.1" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-1f6feb" alt="Windows and macOS" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5c542" alt="MIT" /></a>
 </p>
@@ -25,11 +25,11 @@
 
 ## Interface
 
-![Download workspace](docs/screenshots/workspace.png)
+![Download workspace](docs/screenshots/home.png)
 
-| YouTube batch | Settings |
+| Download history | Settings |
 | :---: | :---: |
-| ![YouTube batch](docs/screenshots/youtube-batch.png) | ![Settings](docs/screenshots/settings-queue.png) |
+| ![Download history](docs/screenshots/history.png) | ![Settings](docs/screenshots/settings.png) |
 
 ## Install
 
