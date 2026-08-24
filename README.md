@@ -25,11 +25,11 @@
 
 ## 界面
 
-![下载工作区](docs/screenshots/home.png)
+![下载工作区](docs/screenshots/home.webp)
 
 | 下载历史 | 设置 |
 | :---: | :---: |
-| ![下载历史](docs/screenshots/history.png) | ![设置](docs/screenshots/settings.png) |
+| ![下载历史](docs/screenshots/history.webp) | ![设置](docs/screenshots/settings.webp) |
 
 ## 安装
 

@@ -25,11 +25,11 @@
 
 ## Interface
 
-![Download workspace](docs/screenshots/home.png)
+![Download workspace](docs/screenshots/home.webp)
 
 | Download history | Settings |
 | :---: | :---: |
-| ![Download history](docs/screenshots/history.png) | ![Settings](docs/screenshots/settings.png) |
+| ![Download history](docs/screenshots/history.webp) | ![Settings](docs/screenshots/settings.webp) |
 
 ## Install
 
