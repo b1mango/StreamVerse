@@ -217,17 +217,47 @@ pub fn normalize_max_concurrent(input: u32) -> u32 {
     input.clamp(1, 8)
 }
 
-pub fn normalize_proxy_url(input: Option<String>) -> Option<String> {
-    input
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+pub fn normalize_proxy_url(input: Option<String>) -> Result<Option<String>, String> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    normalize_proxy_address(trimmed).map(Some)
+}
+
+/// 容忍常见笔误（`http:/127.0.0.1:1082` 少一个斜杠、省略 scheme 的 `127.0.0.1:1082`），
+/// 并按 scheme/host 校验，避免把无法解析的地址透传给 yt-dlp / reqwest
+fn normalize_proxy_address(value: &str) -> Result<String, String> {
+    let candidate = if value.contains("://") {
+        value.to_string()
+    } else if value.contains(":/") {
+        value.replacen(":/", "://", 1)
+    } else {
+        format!("http://{value}")
+    };
+    let parsed = reqwest::Url::parse(&candidate).map_err(|_| {
+        "代理地址格式不正确，示例：http://127.0.0.1:7890 或 socks5://127.0.0.1:1080".to_string()
+    })?;
+    if !matches!(
+        parsed.scheme(),
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+    ) {
+        return Err("代理协议仅支持 http / https / socks5。".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("代理地址缺少主机名。".to_string());
+    }
+    Ok(candidate)
 }
 
 pub fn effective_proxy_url(configured: Option<&str>) -> Option<String> {
     configured
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .and_then(|value| normalize_proxy_address(value).ok())
         .or_else(system_proxy_url)
 }
 
@@ -236,11 +266,51 @@ fn system_proxy_url() -> Option<String> {
     if let Some(proxy) = windows_system_proxy_url() {
         return Some(proxy);
     }
+    #[cfg(target_os = "macos")]
+    if let Some(proxy) = macos_system_proxy_url() {
+        return Some(proxy);
+    }
 
     env::var("HTTPS_PROXY")
         .ok()
         .or_else(|| env::var("HTTP_PROXY").ok())
         .and_then(|value| normalize_proxy_server(&value))
+}
+
+/// macOS 系统代理（Shadowrocket/Clash 等「设置为系统代理」后生效），通过 scutil 读取
+#[cfg(target_os = "macos")]
+fn macos_system_proxy_url() -> Option<String> {
+    let output = std::process::Command::new("scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let entry = |key: &str| {
+        text.lines()
+            .filter_map(|line| line.trim().split_once(" : "))
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.trim().to_string())
+    };
+    for (enabled, host_key, port_key) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+        ("SOCKSEnable", "SOCKSProxy", "SOCKSPort"),
+    ] {
+        if entry(enabled).as_deref() != Some("1") {
+            continue;
+        }
+        let host = entry(host_key)?;
+        let scheme = if enabled == "SOCKSEnable" { "socks5" } else { "http" };
+        let port = entry(port_key).and_then(|value| value.parse::<u16>().ok());
+        return Some(match port {
+            Some(port) => format!("{scheme}://{host}:{port}"),
+            None => format!("{scheme}://{host}"),
+        });
+    }
+    None
 }
 
 fn normalize_proxy_server(value: &str) -> Option<String> {
@@ -442,7 +512,7 @@ fn expand_home(input: &str) -> String {
 mod tests {
     use super::{
         normalize_download_mode, normalize_max_concurrent, normalize_proxy_server,
-        normalize_quality_preference,
+        normalize_proxy_url, normalize_quality_preference,
     };
 
     #[test]
@@ -462,5 +532,25 @@ mod tests {
             normalize_proxy_server("http=127.0.0.1:80;https=127.0.0.1:443").as_deref(),
             Some("http://127.0.0.1:443")
         );
+    }
+
+    #[test]
+    fn normalizes_and_validates_configured_proxy_values() {
+        // 常见笔误：少一个斜杠
+        assert_eq!(
+            normalize_proxy_url(Some("http:/127.0.0.1:1082".to_string())).unwrap().as_deref(),
+            Some("http://127.0.0.1:1082")
+        );
+        // 省略 scheme
+        assert_eq!(
+            normalize_proxy_url(Some("127.0.0.1:7897".to_string())).unwrap().as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        // 空值与空白视为不设置
+        assert_eq!(normalize_proxy_url(Some("   ".to_string())).unwrap(), None);
+        assert_eq!(normalize_proxy_url(None).unwrap(), None);
+        // 无法解析的地址直接拒绝，不再透传给下载器
+        assert!(normalize_proxy_url(Some("http://".to_string())).is_err());
+        assert!(normalize_proxy_url(Some("ftp://127.0.0.1:21".to_string())).is_err());
     }
 }

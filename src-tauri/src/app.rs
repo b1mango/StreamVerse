@@ -69,6 +69,9 @@ pub(crate) struct DownloadRequest {
     pub(crate) audio_direct_url: Option<String>,
     pub(crate) audio_referer: Option<String>,
     pub(crate) audio_user_agent: Option<String>,
+    /// 仅后端内部使用：重试任务时复用原有输出目录，让 yt-dlp 的 .part 分片可以断点续传
+    #[serde(skip)]
+    pub(crate) is_retry: bool,
 }
 
 #[derive(Serialize)]
@@ -733,16 +736,22 @@ fn create_profile_download_tasks(
         let mut first_item = true;
 
         for item in items {
-            if !first_item {
-                std::thread::sleep(std::time::Duration::from_millis(800));
-            }
-            first_item = false;
             let is_album = !item.asset.image_urls.is_empty();
             let fallback_format = if download_options.download_video && !is_album {
                 fallback_profile_format(&item.asset, item.selected_format_id.as_deref())
             } else {
                 None
             };
+            // 只有需要逐项重新解析的条目（抖音/YouTube 无格式条目）才限速，
+            // B 站等自带格式的批次不再在入队阶段白等 800ms/条
+            let needs_reparse = download_options.download_video
+                && !is_album
+                && item.asset.formats.is_empty()
+                && fallback_format.is_none();
+            if !first_item && needs_reparse {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+            }
+            first_item = false;
 
             let resolved_asset = if download_options.download_video
                 && !is_album
@@ -934,6 +943,7 @@ fn create_profile_download_tasks(
                     audio_user_agent: selected_format
                         .as_ref()
                         .and_then(|format| format.audio_user_agent.clone()),
+                    is_retry: false,
                 },
             ) {
                 skipped_count += 1;
@@ -1072,6 +1082,7 @@ fn retry_download_task(
     replay.cookie_browser = auth.cookie_browser;
     replay.cookie_file = auth.cookie_file;
     replay.ffmpeg_path = ffmpeg_path;
+    replay.is_retry = true;
     ytdlp::download_video(
         Arc::clone(&state.tasks),
         Arc::clone(&state.controllers),
@@ -1192,7 +1203,7 @@ async fn save_settings(
     let normalized_mode = settings::normalize_download_mode(download_mode)?;
     let normalized_quality = settings::normalize_quality_preference(quality_preference)?;
     let normalized_max_concurrent = settings::normalize_max_concurrent(max_concurrent_downloads);
-    let normalized_proxy = settings::normalize_proxy_url(proxy_url);
+    let normalized_proxy = settings::normalize_proxy_url(proxy_url)?;
     let normalized_speed_limit = settings::normalize_speed_limit(speed_limit);
     let normalized_theme = settings::normalize_theme(theme);
     let normalized_language = settings::normalize_language(language);

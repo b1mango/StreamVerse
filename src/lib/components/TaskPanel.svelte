@@ -37,9 +37,9 @@
           <span>{$t(`task.${task.status}`)}{task.status === "downloading" ? ` · ${task.speedText}` : ""}</span>
           {#if task.etaText && task.status === "downloading"}<span>{task.etaText}</span>{/if}
         </div>
-        {#if task.message}<p class="task-error" class:task-note={task.status !== "failed"}>{task.message}</p>{/if}
       </div>
       <span class="task-percent">{task.progress}%</span>
+      {#if task.message}<p class="task-error" class:task-note={task.status !== "failed"}>{task.message}</p>{/if}
     </div>
     <div class="progress-track"><i style:width={`${task.progress}%`}></i></div>
     <div class="task-actions">

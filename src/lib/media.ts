@@ -1,7 +1,6 @@
 import type {
   AuthStatus,
   DownloadContentSelection,
-  DownloadTask,
   QualityPreference,
   VideoAsset,
   VideoFormat
@@ -23,17 +22,6 @@ export function hasSelectedDownloadOptions(options: DownloadContentSelection) {
     options.downloadCover ||
     options.downloadCaption
   );
-}
-
-export function summarizeDownloadOptions(options: DownloadContentSelection) {
-  return [
-    options.downloadVideo ? "视频" : null,
-    options.downloadAudio ? "MP3" : null,
-    options.downloadCover ? "封面" : null,
-    options.downloadCaption ? "文案" : null
-  ]
-    .filter(Boolean)
-    .join(" / ");
 }
 
 export function visibleFormats(asset: VideoAsset | null, authState: AuthStatus) {
@@ -77,14 +65,6 @@ export function pickPreferredFormat(
   }
 }
 
-export function selectedFormat(
-  asset: VideoAsset | null,
-  selectedFormatId: string,
-  authState: AuthStatus
-): VideoFormat | undefined {
-  return visibleFormats(asset, authState).find((item) => item.id === selectedFormatId);
-}
-
 export function formatDuration(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -106,20 +86,6 @@ export function formatFileSize(bytes: number): string {
 export function estimateFileSize(bitrateKbps: number, durationSeconds: number): number | null {
   if (!bitrateKbps || !durationSeconds) return null;
   return Math.round((bitrateKbps * 1000 * durationSeconds) / 8);
-}
-
-export function finishedTaskCount(items: DownloadTask[]) {
-  return items.filter((task) =>
-    ["completed", "failed", "cancelled"].includes(task.status)
-  ).length;
-}
-
-export function clampBatchLimit(value: number) {
-  if (!Number.isFinite(value)) {
-    return 24;
-  }
-
-  return Math.max(1, Math.min(100, Math.round(value)));
 }
 
 export function resolveErrorMessage(error: unknown) {

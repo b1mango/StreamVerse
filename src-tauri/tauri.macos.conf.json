@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "StreamVerse",
+        "width": 1480,
+        "height": 980,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "shadow": true,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay"
+      }
+    ]
+  },
+  "bundle": {
+    "externalBin": [
+      "binaries/deno",
+      "binaries/ffmpeg"
+    ],
+    "resources": {
+      "binaries/yt-dlp-onedir": "yt-dlp-onedir",
+      "binaries/streamverse-helper-onedir": "streamverse-helper-onedir"
+    }
+  }
+}

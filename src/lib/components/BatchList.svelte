@@ -26,7 +26,7 @@
   const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: 0,
     getScrollElement: () => viewport,
-    estimateSize: () => 72,
+    estimateSize: () => 64,
     overscan: 8
   });
 
@@ -40,11 +40,12 @@
   });
 
   function formatOptionLabel(item: VideoAsset, format: VideoFormat) {
-    // B 站批量条目 codec 固定为「自适应」（DASH 流），此时显示封装容器更直观
+    // 无编码信息（如早期的「自适应」占位）时显示封装容器更直观
     const codec = format.codec && format.codec !== "自适应" ? format.codec : format.container;
     const size = format.fileSizeBytes && format.fileSizeBytes > 0
       ? formatFileSize(format.fileSizeBytes)
       : (() => {
+          // 无真实大小时按标称码率估算
           const estimate = estimateFileSize(format.bitrateKbps, item.durationSeconds);
           return estimate ? formatFileSize(estimate) : "--";
         })();

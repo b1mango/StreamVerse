@@ -3,6 +3,8 @@
   import {
     Check,
     CheckCircle2,
+    ChevronDown,
+    ChevronUp,
     CircleAlert,
     ClipboardPaste,
     Download,
@@ -14,6 +16,7 @@
     Menu,
     PanelRightClose,
     PanelRightOpen,
+    RefreshCw,
     Search,
     Settings,
     SquareStack,
@@ -56,9 +59,11 @@
     subscribeTaskEvents
   } from "./lib/backend";
   import { setLanguage, t } from "./lib/i18n";
-  import { createDefaultDownloadOptions, formatDuration, hasSelectedDownloadOptions, resolveErrorMessage, visibleFormats } from "./lib/media";
+  import { createDefaultDownloadOptions, formatDuration, hasSelectedDownloadOptions, pickPreferredFormat, resolveErrorMessage, visibleFormats } from "./lib/media";
   import { validateInputTarget, type WorkflowMode } from "./lib/input-validation";
   import { platformMeta } from "./lib/options";
+  import { createMacShellDrag } from "./lib/mac-shell";
+  import { createYouTubeBatchHydration } from "./lib/youtube-hydration";
   import type {
     AnalysisProgress as AnalysisProgressState,
     BootstrapState,
@@ -79,8 +84,6 @@
   let platform = $state<PlatformId>("douyin");
   let workflowMode = $state<WorkflowMode>("single");
   let rawInput = $state("");
-  let analyzing = $state(false);
-  let analysisProgress = $state<AnalysisProgressState | null>(null);
   let operationBusy = $state(false);
   let toasts = $state<{ id: number; kind: "success" | "error"; text: string }[]>([]);
   let errorMessage = $state("");
@@ -92,6 +95,7 @@
   let formatsExpanded = $state(false);
   let selectedProfileIds = $state<Set<string>>(new Set());
   let selectedProfileFormats = $state<Record<string, string>>({});
+  let batchFilter = $state("");
   let lastSelectionIndex = $state<number | null>(null);
   let downloadOptions = $state(createDefaultDownloadOptions());
   let settingsOpen = $state(false);
@@ -99,12 +103,32 @@
   let browserSources = $state<BrowserSource[]>([]);
   let history = $state<DownloadHistoryEntry[]>([]);
   let historyLoading = $state(false);
-  let analysisGeneration = 0;
-  // YouTube 清晰度补全用独立的代际与登记表：切换模式不打断，重新解析/切平台才中止
-  let hydrationGeneration = 0;
+  // 每个「平台 × 模式」一份解析运行时：三平台的主页/合集/单视频可同时解析，
+  // 进度与报错互不覆盖，切换平台或模式后再切回也能看到原进度
+  type ModeAnalysis = {
+    analyzing: boolean;
+    progress: AnalysisProgressState | null;
+    error: string;
+    generation: number;
+  };
+  const freshModeAnalysis = (): ModeAnalysis => ({ analyzing: false, progress: null, error: "", generation: 0 });
+  const WORKFLOW_MODES: WorkflowMode[] = ["single", "profile", "playlist"];
+  const scopeOf = (platformId: PlatformId, mode: WorkflowMode) => `${platformId}:${mode}`;
+  let modeAnalysis = $state<Record<string, ModeAnalysis>>(
+    Object.fromEntries(
+      Object.keys(platformMeta).flatMap((platformId) =>
+        WORKFLOW_MODES.map((mode) => [`${platformId}:${mode}`, freshModeAnalysis()])
+      )
+    )
+  );
+  const scopeAnalysis = (mode: WorkflowMode) => modeAnalysis[scopeOf(platform, mode)];
+  const platformBusy = (platformId: string) =>
+    WORKFLOW_MODES.some((mode) => modeAnalysis[`${platformId}:${mode}`]?.analyzing);
+  // YouTube 清晰度补全按批次 hydrationKey 认领工作区：主页/合集、
+  // 不同平台的补全会话互不干扰，靠 hydrationKey 失配自动终止孤儿会话
   const youtubeHydrations = new Map<string, Promise<number>>();
 
-  // 每个模式一份解析结果快照：切换 单视频/主页/合集 时不丢弃已解析内容
+  // 每个「平台 × 模式」一份解析结果快照：切换平台或模式时不丢弃已解析内容
   type WorkspaceSnapshot = {
     rawInput: string;
     preview: VideoAsset | null;
@@ -117,9 +141,10 @@
     selectedProfileFormats: Record<string, string>;
     lastSelectionIndex: number | null;
   };
-  const workspaceSnapshots = new Map<WorkflowMode, WorkspaceSnapshot>();
+  const workspaceSnapshots = new Map<string, WorkspaceSnapshot>();
 
   let authStatus = $derived(bootstrap?.platformAuth[platform]?.status ?? "guest");
+  let qualityPreference = $derived(bootstrap?.qualityPreference ?? "recommended");
   let previewFormats = $derived(visibleFormats(preview, authStatus));
   let selectedFormat = $derived(previewFormats.find((format) => format.id === selectedFormatId));
   let previewIsAlbum = $derived(Boolean(preview?.imageUrls?.length));
@@ -129,7 +154,23 @@
     (!downloadOptions.downloadVideo || previewIsAlbum || Boolean(selectedFormatId))
   );
   let selectedCount = $derived(selectedProfileIds.size);
+  // 清晰度补全失败的条目数与补全进行中状态，用于「重读失败清晰度」按钮
+  let failedFormatCount = $derived(profile?.items.filter((item) => item.formatStatus === "failed").length ?? 0);
+  let profileHydrating = $derived(profile?.items.some((item) => item.formatStatus === "pending") ?? false);
+  // 批量列表按标题/作者过滤；shift 连选也基于过滤后的可见顺序
+  let visibleProfileItems = $derived.by(() => {
+    const items = profile?.items ?? [];
+    const query = batchFilter.trim().toLowerCase();
+    if (!query) return items;
+    return items.filter((item) =>
+      item.title.toLowerCase().includes(query) || item.author.toLowerCase().includes(query)
+    );
+  });
+  // 批量解析有结果后控制台折叠为细条，把垂直空间让给列表；用户可手动展开改链接
+  let batchConsoleExpanded = $state(false);
+  let consoleCollapsed = $derived(workflowMode !== "single" && !!profile && !batchConsoleExpanded);
   let activeTaskCount = $derived(bootstrap?.tasks.filter((task) => ["queued", "downloading", "paused"].includes(task.status)).length ?? 0);
+  let currentAnalysis = $derived(modeAnalysis[scopeOf(platform, workflowMode)]);
 
   let toastSequence = 0;
 
@@ -182,17 +223,8 @@
       : bootstrap.tasks.map((task) => (task.id === event.task.id ? event.task : task));
   }
 
-  function selectPlatform(next: PlatformId) {
-    if (next === platform) return;
-    platform = next;
-    if (next !== "youtube" && workflowMode === "playlist") workflowMode = "single";
-    workspaceSnapshots.clear();
-    resetWorkspace();
-  }
-
-  function selectWorkflowMode(next: WorkflowMode) {
-    if (next === workflowMode) return;
-    workspaceSnapshots.set(workflowMode, {
+  function saveCurrentSnapshot() {
+    workspaceSnapshots.set(scopeOf(platform, workflowMode), {
       rawInput,
       preview,
       previewCoverUrl,
@@ -204,11 +236,12 @@
       selectedProfileFormats,
       lastSelectionIndex
     });
-    workflowMode = next;
-    const snapshot = workspaceSnapshots.get(next);
-    analysisGeneration += 1;
-    analysisProgress = null;
+  }
+
+  function restoreScopeSnapshot(scope: string) {
+    const snapshot = workspaceSnapshots.get(scope);
     errorMessage = "";
+    batchFilter = "";
     if (snapshot) {
       rawInput = snapshot.rawInput;
       preview = snapshot.preview;
@@ -223,7 +256,7 @@
       // YouTube 清晰度补全在后台持续进行；若会话已结束且有残留待读条目，则补齐
       if (profile && profile.items.some((item) => item.formatStatus === "pending")) {
         const batch = profile;
-        void hydrateYouTubeBatchFormats(batch, next).catch(() => 0);
+        void hydrateYouTubeBatchFormats(batch, scope).catch(() => 0);
       }
     } else {
       rawInput = "";
@@ -239,24 +272,25 @@
     }
   }
 
-  function resetWorkspace() {
-    analysisGeneration += 1;
-    hydrationGeneration += 1;
-    youtubeHydrations.clear();
-    rawInput = "";
-    preview = null;
-    previewCoverUrl = null;
-    previewCoverFailed = false;
-    profile = null;
-    selectedProfileIds = new Set();
-    selectedProfileFormats = {};
-    selectedFormatId = "";
-    formatsExpanded = false;
-    analysisProgress = null;
-    errorMessage = "";
+  function selectPlatform(next: PlatformId) {
+    if (next === platform) return;
+    // 切换平台不再清空任何解析成果：快照当前作用域，恢复目标平台的作用域
+    saveCurrentSnapshot();
+    platform = next;
+    batchConsoleExpanded = false;
+    if (next !== "youtube" && workflowMode === "playlist") workflowMode = "single";
+    restoreScopeSnapshot(scopeOf(platform, workflowMode));
   }
 
-  function startProgressPolling(sessionId: string) {
+  function selectWorkflowMode(next: WorkflowMode) {
+    if (next === workflowMode) return;
+    batchConsoleExpanded = false;
+    saveCurrentSnapshot();
+    workflowMode = next;
+    restoreScopeSnapshot(scopeOf(platform, next));
+  }
+
+  function startProgressPolling(scope: string, sessionId: string) {
     let stopped = false;
     let reading = false;
     const read = async () => {
@@ -264,7 +298,7 @@
       reading = true;
       try {
         const next = await getAnalysisProgress(sessionId);
-        if (!stopped && next) analysisProgress = next;
+        if (!stopped && next) modeAnalysis[scope].progress = next;
       } catch {
         // A progress read is advisory; the parser result remains authoritative.
       } finally {
@@ -315,11 +349,20 @@
     }
   }
 
-  async function loadPreviewCover(asset: VideoAsset) {
+  async function loadPreviewCover(asset: VideoAsset, scope: string) {
     const candidates = Array.from(
       new Set([...(asset.coverUrls ?? []), asset.coverUrl].filter((value): value is string => Boolean(value)))
     );
     if (candidates.length === 0) return;
+
+    // 解析在后台完成时，封面写进该作用域的快照，切回即可看到
+    const liveMatch = () => scopeOf(platform, workflowMode) === scope && preview?.assetId === asset.assetId && preview.sourceUrl === asset.sourceUrl;
+    const matchesSnapshot = () => {
+      const snapshot = workspaceSnapshots.get(scope);
+      return snapshot?.preview?.assetId === asset.assetId && snapshot.preview.sourceUrl === asset.sourceUrl
+        ? snapshot
+        : null;
+    };
 
     let lastError = "没有可用封面。";
     for (const candidate of candidates) {
@@ -329,195 +372,154 @@
           lastError = "候选封面是空白图片。";
           continue;
         }
-        if (preview?.assetId === asset.assetId && preview.sourceUrl === asset.sourceUrl) {
+        if (liveMatch() && preview) {
           preview = { ...preview, coverUrl: candidate };
           previewCoverUrl = thumbnail;
           previewCoverFailed = false;
+        } else {
+          const snapshot = matchesSnapshot();
+          if (snapshot?.preview) {
+            snapshot.preview = { ...snapshot.preview, coverUrl: candidate };
+            snapshot.previewCoverUrl = thumbnail;
+            snapshot.previewCoverFailed = false;
+          }
         }
         return;
       } catch (error) {
         lastError = resolveErrorMessage(error);
       }
     }
-    if (preview?.assetId === asset.assetId && preview.sourceUrl === asset.sourceUrl) {
+    if (liveMatch()) {
       previewCoverFailed = true;
       pushToast("error", `作品已解析，但缩略图加载失败：${lastError}`);
+    } else {
+      const snapshot = matchesSnapshot();
+      if (snapshot) snapshot.previewCoverFailed = true;
     }
   }
 
-  function hydrateYouTubeBatchFormats(batch: ProfileBatch, ownerMode: WorkflowMode): Promise<number> {
+  function hydrateYouTubeBatchFormats(batch: ProfileBatch, ownerScope: string): Promise<number> {
     // 同一批次只跑一个补全会话：切走时会话在后台继续，切回后直接加入进行中的会话
     const key = (batch.hydrationKey ??= crypto.randomUUID());
     const existing = youtubeHydrations.get(key);
     if (existing) return existing;
-    const session = runYouTubeBatchHydration(batch, ownerMode, key).catch(() => 0);
+    const session = runYouTubeBatchHydration(batch, ownerScope, key).catch(() => 0);
     youtubeHydrations.set(key, session);
     void session.then(() => youtubeHydrations.delete(key));
     return session;
   }
 
-  async function runYouTubeBatchHydration(batch: ProfileBatch, ownerMode: WorkflowMode, key: string): Promise<number> {
-    const generation = ++hydrationGeneration;
-    // 已加载的条目保持原样（恢复或加入会话时避免重复请求）
-    const pendingItems = batch.items.map((item) =>
-      item.formatStatus === "loaded" ? item : { ...item, formatStatus: "pending" as const }
-    );
-    let wrapper: ProfileBatch = { ...batch, items: pendingItems };
-    profile = wrapper;
-
-    let cursor = 0;
-    let completed = 0;
-    let failed = 0;
-    let orphaned = false;
-
-    // 进度条与文案均显示真实完成数；条目被拾取时同样触发刷新，
-    // 不会卡在（0/N）等待首个 yt-dlp 进程返回
-    const reportProgress = () => {
-      if (profile?.hydrationKey !== key) return;
-      analysisProgress = {
-        current: completed,
-        total: pendingItems.length,
-        message: `正在读取真实清晰度（已完成 ${completed}/${pendingItems.length}）…`
-      };
-    };
-    reportProgress();
-
-    // 把结果提交到用户能看到的地方：仍停留在该模式则更新实时 profile，
-    // 否则写入该模式的快照，切回时即可看到最新进度；两处都不再有该批次则中止
-    const commit = (index: number, nextItem: VideoAsset) => {
-      pendingItems[index] = nextItem;
-      const nextWrapper: ProfileBatch = { ...wrapper, items: pendingItems };
-      const visibleNow = profile?.hydrationKey === key;
-      if (visibleNow) {
-        profile = nextWrapper;
-      } else {
-        const snapshot = workspaceSnapshots.get(ownerMode);
-        if (snapshot?.profile?.hydrationKey === key) {
-          snapshot.profile = nextWrapper;
-        } else {
-          orphaned = true;
-        }
-      }
-      wrapper = nextWrapper;
-      const formats = visibleFormats(nextItem, "active");
-      const selected = formats.find((format) => format.recommended)?.id ?? formats[0]?.id;
-      if (selected && !selectedProfileFormats[nextItem.assetId]) {
-        selectedProfileFormats = { ...selectedProfileFormats, [nextItem.assetId]: selected };
-      }
-      reportProgress();
-    };
-
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-    // 单条目带退避重试：限流/网络抖动等瞬时错误不再直接判死刑
-    const resolveItem = async (item: VideoAsset): Promise<VideoAsset> => {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        if (generation !== hydrationGeneration || orphaned) break;
-        if (attempt > 0) await sleep(900 * attempt + Math.random() * 600);
-        try {
-          const resolved = await analyzeBatchItem(item.sourceUrl);
-          if (resolved.formats.length > 0) {
-            return {
-              ...item,
-              ...resolved,
-              categoryLabel: item.categoryLabel,
-              groupTitle: item.groupTitle,
-              formatStatus: "loaded" as const
-            };
-          }
-        } catch {
-          // 进入下一次重试
-        }
-      }
-      return { ...item, formatStatus: "failed" as const };
-    };
-
-    const worker = async () => {
-      while (generation === hydrationGeneration && !orphaned) {
-        const index = cursor;
-        cursor += 1;
-        const item = pendingItems[index];
-        if (!item) return;
-
-        const nextItem = await resolveItem(item);
-        if (generation !== hydrationGeneration) return;
-        completed += 1;
-        if (nextItem.formatStatus === "failed") failed += 1;
-        commit(index, nextItem);
-      }
-    };
-
-    const workers = Math.min(8, pendingItems.length);
-    // 错开启动工人，削掉瞬时并发峰值，降低触发 YouTube 限流的概率
-    await Promise.all(Array.from({ length: workers }, (_, i) => sleep(i * 160).then(worker)));
-    if (generation === hydrationGeneration) {
-      if (profile?.hydrationKey === key) analysisProgress = null;
-      if (failed > 0) {
-        pushToast("error", `${batch.items.length - failed} 个视频已读取真实清晰度，${failed} 个读取失败，可重新解析后再试。`);
-      }
-    }
-    return failed;
-  }
+  const runYouTubeBatchHydration = createYouTubeBatchHydration({
+    analyzeBatchItem,
+    pickPreferredFormat,
+    currentScope: () => scopeOf(platform, workflowMode),
+    getProfile: () => profile,
+    setProfile: (next) => { profile = next; },
+    getSnapshot: (scope) => workspaceSnapshots.get(scope),
+    setProgress: (scope, progress) => { modeAnalysis[scope].progress = progress; },
+    getSelectedProfileFormats: () => selectedProfileFormats,
+    setSelectedProfileFormats: (next) => { selectedProfileFormats = next; },
+    qualityPreference: () => qualityPreference,
+    pushToast,
+    activeSessionCount: () => youtubeHydrations.size
+  });
 
   async function analyze() {
-    if (!rawInput.trim()) return;
-    const validationError = validateInputTarget(rawInput, platform, workflowMode);
+    const mode = workflowMode;
+    const scope = scopeOf(platform, mode);
+    const input = rawInput.trim();
+    if (!input) return;
+    const validationError = validateInputTarget(input, platform, mode);
     if (validationError) {
-      errorMessage = validationError;
+      modeAnalysis[scope].error = validationError;
       return;
     }
 
-    const generation = ++analysisGeneration;
+    const runtime = modeAnalysis[scope];
+    const generation = ++runtime.generation;
     const sessionId = crypto.randomUUID();
-    const stopProgressPolling = startProgressPolling(sessionId);
-    analyzing = true;
-    analysisProgress = {
+    const stopProgressPolling = startProgressPolling(scope, sessionId);
+    runtime.analyzing = true;
+    runtime.progress = {
       current: 0,
       total: 0,
-      message: workflowMode === "profile"
+      message: mode === "profile"
         ? "正在建立频道作品索引…"
-        : workflowMode === "playlist"
+        : mode === "playlist"
           ? "正在建立合集作品索引…"
           : "正在解析作品链接…"
     };
+    runtime.error = "";
     errorMessage = "";
+    // 发起新解析后收起手动展开的控制台，结果出来后自动回到细条形态
+    batchConsoleExpanded = false;
     try {
-      if (workflowMode === "single") {
-        const asset = await analyzeInput(rawInput.trim(), sessionId);
+      if (mode === "single") {
+        const asset = await analyzeInput(input, sessionId);
+        if (generation !== runtime.generation) return;
         const assetAuthStatus = bootstrap?.platformAuth[asset.platform]?.status ?? "guest";
         const formats = visibleFormats(asset, assetAuthStatus);
-        preview = asset;
-        previewCoverUrl = null;
-        previewCoverFailed = false;
-        platform = asset.platform;
-        formatsExpanded = false;
-        selectedFormatId = formats.find((format) => format.recommended)?.id ?? formats[0]?.id ?? "";
-        void loadPreviewCover(asset);
-      } else {
-        const batch = await analyzeProfileInput(rawInput.trim(), sessionId);
-        if (generation !== analysisGeneration) return;
-        selectedProfileIds = new Set();
-        if (batch.items[0]?.platform === "youtube") {
-          stopProgressPolling();
-          // 清晰度补全在后台持续进行：切换模式不中断，analyze 也不等待它完成
-          void hydrateYouTubeBatchFormats(batch, workflowMode);
+        const nextFormatId = pickPreferredFormat(asset, qualityPreference, assetAuthStatus)?.id ?? formats[0]?.id ?? "";
+        if (scopeOf(platform, workflowMode) === scope) {
+          preview = asset;
+          previewCoverUrl = null;
+          previewCoverFailed = false;
+          platform = asset.platform;
+          formatsExpanded = false;
+          selectedFormatId = nextFormatId;
         } else {
-          profile = batch;
-          selectedProfileFormats = Object.fromEntries(batch.items.map((item) => {
+          // 解析在后台完成：写入该作用域的快照，切回即可看到结果
+          const snapshot = workspaceSnapshots.get(scope);
+          if (snapshot) {
+            snapshot.preview = asset;
+            snapshot.previewCoverUrl = null;
+            snapshot.previewCoverFailed = false;
+            snapshot.formatsExpanded = false;
+            snapshot.selectedFormatId = nextFormatId;
+          }
+        }
+        void loadPreviewCover(asset, scope);
+      } else {
+        const batch = await analyzeProfileInput(input, sessionId);
+        if (generation !== runtime.generation) return;
+        const isYouTube = batch.items[0]?.platform === "youtube";
+        if (scopeOf(platform, workflowMode) === scope) {
+          selectedProfileIds = new Set();
+        } else {
+          const snapshot = workspaceSnapshots.get(scope);
+          if (snapshot) {
+            snapshot.profile = batch;
+            snapshot.selectedProfileIds = new Set();
+          }
+        }
+        if (isYouTube) {
+          stopProgressPolling();
+          // 清晰度补全在后台持续进行：切换平台或模式不中断，analyze 也不等待它完成
+          void hydrateYouTubeBatchFormats(batch, scope);
+        } else {
+          const nextFormats = Object.fromEntries(batch.items.map((item) => {
             const formats = visibleFormats(item, "active");
-            return [item.assetId, formats.find((format) => format.recommended)?.id ?? formats[0]?.id ?? ""];
+            return [item.assetId, pickPreferredFormat(item, qualityPreference, "active")?.id ?? formats[0]?.id ?? ""];
           }));
+          if (scopeOf(platform, workflowMode) === scope) {
+            profile = batch;
+            selectedProfileFormats = nextFormats;
+          } else {
+            const snapshot = workspaceSnapshots.get(scope);
+            if (snapshot) snapshot.selectedProfileFormats = nextFormats;
+          }
         }
       }
     } catch (error) {
-      errorMessage = resolveErrorMessage(error);
+      runtime.error = resolveErrorMessage(error);
     } finally {
       stopProgressPolling();
       await clearAnalysisProgress(sessionId).catch(() => undefined);
       // YouTube 批量清晰度补全仍在后台进行时，保留它的进度展示
-      const hydrating = profile?.items.some((item) => item.formatStatus === "pending") ?? false;
-      if (!hydrating) analysisProgress = null;
-      analyzing = false;
+      const batch = scopeOf(platform, workflowMode) === scope ? profile : workspaceSnapshots.get(scope)?.profile;
+      const hydrating = batch?.items.some((item) => item.formatStatus === "pending") ?? false;
+      if (!hydrating) runtime.progress = null;
+      runtime.analyzing = false;
     }
   }
 
@@ -582,12 +584,12 @@
 
   function toggleProfileItem(id: string, index: number, shift: boolean) {
     const next = new Set(selectedProfileIds);
-    if (shift && lastSelectionIndex !== null && profile) {
+    if (shift && lastSelectionIndex !== null && visibleProfileItems.length > 0) {
       const start = Math.min(lastSelectionIndex, index);
       const end = Math.max(lastSelectionIndex, index);
       const shouldSelect = !next.has(id);
       for (let cursor = start; cursor <= end; cursor += 1) {
-        const candidate = profile.items[cursor]?.assetId;
+        const candidate = visibleProfileItems[cursor]?.assetId;
         if (candidate) shouldSelect ? next.add(candidate) : next.delete(candidate);
       }
     } else if (next.has(id)) next.delete(id);
@@ -606,6 +608,12 @@
   function invertProfileSelection() {
     if (!profile) return;
     selectedProfileIds = new Set(profile.items.filter((item) => !selectedProfileIds.has(item.assetId)).map((item) => item.assetId));
+  }
+
+  // 只补读清晰度失败的条目：补全会话本身会跳过已加载条目，重读少量失败项无需整批重来
+  function retryFailedFormats() {
+    if (!profile || failedFormatCount === 0) return;
+    void hydrateYouTubeBatchFormats(profile, scopeOf(platform, workflowMode)).catch(() => 0);
   }
 
   async function handleTaskControl(task: DownloadTask, action: "pause" | "resume" | "cancel" | "retry") {
@@ -659,13 +667,23 @@
     try { history = await listDownloadHistory(200); }
     finally { historyLoading = false; }
   }
+
+  // macOS 隐藏标题栏（红绿灯悬浮）下，顶栏与侧栏空白区充当窗口拖拽区，双击缩放
+  const {
+    macDesktop,
+    handleMouseDown: handleMacShellMouseDown,
+    handleDblClick: handleMacShellDblClick
+  } = createMacShellDrag();
 </script>
 
 <svelte:head><meta name="theme-color" content="#08070a" /></svelte:head>
 
+<svelte:window onmousedown={handleMacShellMouseDown} ondblclick={handleMacShellDblClick} />
+
 <svelte:boundary onerror={(error) => (errorMessage = resolveErrorMessage(error))}>
-  <div class="app-shell" class:has-titlebar={isFramelessWindows()} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>
+  <div class="app-shell" class:has-titlebar={isFramelessWindows()} class:is-macos={macDesktop} data-platform={platform} data-language={bootstrap?.language ?? "zh-CN"}>
     <div class="app-frame">
+    {#if macDesktop}<div class="mac-titlebar" aria-hidden="true"></div>{/if}
     <TitleBar />
     <aside class="nav-rail" aria-label={$t("app.mainNavigation")}>
       <button class="brand-mark" type="button" title="StreamVerse" aria-label={`StreamVerse ${$t("workspace.title")}`} onclick={() => (view = "download")}><img class="brand-icon" src={appIconUrl} alt="" /></button>
@@ -703,20 +721,30 @@
           {/if}
         </section>
       {:else}
-        <section class="download-workspace">
+        <section class="download-workspace" class:batch-mode={workflowMode !== "single"} class:console-open={workflowMode !== "single" && !consoleCollapsed}>
           <div class="workspace-heading">
             <div><h1>{$t("workspace.title")}</h1></div>
             <div class="platform-switch" role="tablist" aria-label="平台">
               {#each Object.keys(platformMeta) as id}
-                <button class:active={platform === id} style:--platform-color={platformMeta[id as PlatformId].color} type="button" role="tab" aria-selected={platform === id} onclick={() => selectPlatform(id as PlatformId)}><PlatformIcon platform={id as PlatformId} size={14} />{platformMeta[id as PlatformId].label}</button>
+                <button class:active={platform === id} style:--platform-color={platformMeta[id as PlatformId].color} type="button" role="tab" aria-selected={platform === id} onclick={() => selectPlatform(id as PlatformId)}><PlatformIcon platform={id as PlatformId} size={14} />{platformMeta[id as PlatformId].label}{#if platformBusy(id)}<i class="mode-busy-dot" aria-hidden="true"></i>{/if}</button>
               {/each}
             </div>
           </div>
 
+          {#if consoleCollapsed}
+            <button class="console-collapsed-bar" type="button" onclick={() => (batchConsoleExpanded = true)}>
+              <PlatformIcon {platform} size={14} />
+              <strong>{profile?.profileTitle ?? ""}</strong>
+              <span>{$t("batch.fetched")} {profile?.items.length ?? 0}</span>
+              <i class="collapsed-bar-action"><ChevronDown size={14} />{$t("batch.editLink")}</i>
+            </button>
+          {:else}
           <div class="input-console">
             <div class="console-head">
-              <div class="mode-switch" role="tablist" aria-label={$t("workspace.mode")}><button class:active={workflowMode === "single"} type="button" role="tab" onclick={() => selectWorkflowMode("single")}><Download size={15} />{$t("workspace.single")}</button><button class:active={workflowMode === "profile"} type="button" role="tab" onclick={() => selectWorkflowMode("profile")}><SquareStack size={15} />{platform === "youtube" ? $t("workspace.youtubeChannel") : $t("workspace.profile")}</button>{#if platform === "youtube"}<button class:active={workflowMode === "playlist"} type="button" role="tab" onclick={() => selectWorkflowMode("playlist")}><ListVideo size={15} />{$t("workspace.youtubePlaylist")}</button>{/if}</div>
-              <button class="console-savedir" type="button" title={$t("settings.downloadPath")} onclick={openSettings}><FolderOpen size={13} /><span>{bootstrap?.saveDirectory ?? "--"}</span></button>
+              <div class="mode-switch" role="tablist" aria-label={$t("workspace.mode")} style:--platform-color={platformMeta[platform].color}><button class:active={workflowMode === "single"} type="button" role="tab" onclick={() => selectWorkflowMode("single")}><Download size={15} />{$t("workspace.single")}{#if scopeAnalysis("single").analyzing}<i class="mode-busy-dot" aria-hidden="true"></i>{/if}</button><button class:active={workflowMode === "profile"} type="button" role="tab" onclick={() => selectWorkflowMode("profile")}><SquareStack size={15} />{platform === "youtube" ? $t("workspace.youtubeChannel") : $t("workspace.profile")}{#if scopeAnalysis("profile").analyzing}<i class="mode-busy-dot" aria-hidden="true"></i>{/if}</button>{#if platform === "youtube"}<button class:active={workflowMode === "playlist"} type="button" role="tab" onclick={() => selectWorkflowMode("playlist")}><ListVideo size={15} />{$t("workspace.youtubePlaylist")}{#if scopeAnalysis("playlist").analyzing}<i class="mode-busy-dot" aria-hidden="true"></i>{/if}</button>{/if}</div>
+              {#if workflowMode !== "single" && profile}
+                <button class="icon-button console-collapse" type="button" title={$t("batch.collapseConsole")} aria-label={$t("batch.collapseConsole")} onclick={() => (batchConsoleExpanded = false)}><ChevronUp size={15} /></button>
+              {/if}
             </div>
             <div class="signal-input">
               <textarea bind:value={rawInput} rows="2" aria-label={$t("workspace.inputLabel")} placeholder={$t("workspace.placeholder")} onkeydown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") analyze(); }}></textarea>
@@ -724,13 +752,14 @@
             </div>
             <div class="console-actions">
               <div class="console-meta"><span class="meta-chip" style:--platform-color={platformMeta[platform].color}>{platformMeta[platform].label}</span><span class="meta-chip auth" class:active-auth={authStatus === "active"}><i></i>{authStatus === "active" ? $t("auth.active") : $t("auth.guest")}</span></div>
-              <button class="analyze-button" type="button" disabled={analyzing || !rawInput.trim()} onclick={analyze}>{#if analyzing}<LoaderCircle class="spin" size={16} />{:else}<Search size={16} />{/if}<span>{analyzing ? $t("common.analyzing") : $t("common.analyze")}</span></button>
+              <button class="analyze-button" type="button" disabled={currentAnalysis.analyzing || !rawInput.trim()} onclick={analyze}>{#if currentAnalysis.analyzing}<LoaderCircle class="spin" size={16} />{:else}<Search size={16} />{/if}<span>{currentAnalysis.analyzing ? $t("common.analyzing") : $t("common.analyze")}</span></button>
             </div>
           </div>
+          {/if}
 
-          {#if analysisProgress}<AnalysisProgress progress={analysisProgress} />{/if}
+          {#if currentAnalysis.progress}<AnalysisProgress progress={currentAnalysis.progress} />{/if}
 
-          {#if errorMessage}<div class="message-strip error" role="alert">{errorMessage}</div>{/if}
+          {#if currentAnalysis.error || errorMessage}<div class="message-strip error" role="alert">{currentAnalysis.error || errorMessage}</div>{/if}
 
           {#if workflowMode === "single"}
             {#if preview}
@@ -749,10 +778,23 @@
             <div class="batch-workspace">
               <header>
                 <div class="batch-summary"><span class="eyebrow">{profile?.profileTitle ?? $t("batch.awaitingSelection")}</span><strong>{$t("batch.fetched")} {profile?.items.length ?? 0} · {$t("batch.selected")} {selectedCount}</strong></div>
-                <div class="batch-actions"><button class="quiet-button" type="button" disabled={!profile} onclick={selectAllProfileItems}><Check size={15} />{$t("common.selectAll")}</button><button class="quiet-button" type="button" disabled={!profile} onclick={invertProfileSelection}><Menu size={15} />{$t("batch.invertSelection")}</button><button class="primary-button" type="button" disabled={!profile || selectedCount === 0 || operationBusy || !hasSelectedDownloadOptions(downloadOptions)} onclick={downloadBatch}><Download size={16} />{$t("batch.enqueue")}{selectedCount > 0 ? ` · ${selectedCount}` : ""}</button></div>
+                <div class="batch-actions">{#if failedFormatCount > 0}<button class="quiet-button" type="button" disabled={profileHydrating} onclick={retryFailedFormats}><RefreshCw size={14} class={profileHydrating ? "spin" : ""} />{$t("batch.retryFailed")} · {failedFormatCount}</button>{/if}<button class="quiet-button" type="button" disabled={!profile} onclick={selectAllProfileItems}><Check size={15} />{$t("common.selectAll")}</button><button class="quiet-button" type="button" disabled={!profile} onclick={invertProfileSelection}><Menu size={15} />{$t("batch.invertSelection")}</button><button class="primary-button" type="button" disabled={!profile || selectedCount === 0 || operationBusy || !hasSelectedDownloadOptions(downloadOptions)} onclick={downloadBatch}><Download size={16} />{$t("batch.enqueue")}{selectedCount > 0 ? ` · ${selectedCount}` : ""}</button></div>
               </header>
-              {#if profile}<ContentOptions options={downloadOptions} onChange={(next) => (downloadOptions = next)} label={$t("batch.downloadContent")} />{/if}
-              <BatchList items={profile?.items ?? []} selectedIds={selectedProfileIds} selectedFormats={selectedProfileFormats} onToggle={toggleProfileItem} onFormat={(id, formatId) => (selectedProfileFormats = { ...selectedProfileFormats, [id]: formatId })} />
+              {#if profile}
+                <div class="batch-controls-row">
+                  <ContentOptions options={downloadOptions} onChange={(next) => (downloadOptions = next)} label={$t("batch.downloadContent")} />
+                  <label class="batch-filter">
+                    <Search size={13} />
+                    <input type="search" bind:value={batchFilter} placeholder={$t("batch.filterPlaceholder")} aria-label={$t("batch.filterPlaceholder")} />
+                    {#if batchFilter}<button class="batch-filter-clear" type="button" aria-label={$t("common.close")} onclick={() => (batchFilter = "")}><X size={12} /></button>{/if}
+                  </label>
+                </div>
+              {/if}
+              {#if profile && visibleProfileItems.length === 0}
+                <div class="empty-list"><Search size={20} /><span>{$t("batch.noMatch")}「{batchFilter.trim()}」</span></div>
+              {:else}
+                <BatchList items={visibleProfileItems} selectedIds={selectedProfileIds} selectedFormats={selectedProfileFormats} onToggle={toggleProfileItem} onFormat={(id, formatId) => (selectedProfileFormats = { ...selectedProfileFormats, [id]: formatId })} />
+              {/if}
             </div>
           {/if}
         </section>

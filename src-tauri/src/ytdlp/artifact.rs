@@ -1,6 +1,5 @@
-use super::engine::{
-    build_http_client, infer_extension, silent_command, unique_output_dir, unique_output_path,
-};
+use super::engine::{build_http_client, silent_command};
+use super::files::{infer_extension, unique_output_dir, unique_output_path};
 use crate::{platforms, provider_runtime, DownloadContentSelection};
 use reqwest::header::{REFERER, USER_AGENT};
 use std::fs;
@@ -15,6 +14,7 @@ pub(super) struct DownloadArtifacts {
     pub(super) title: String,
     pub(super) author: String,
     pub(super) publish_date: String,
+    pub(super) caption: String,
     pub(super) cover_url: Option<String>,
     pub(super) referer: Option<String>,
     pub(super) user_agent: Option<String>,
@@ -102,9 +102,16 @@ pub(super) fn prepare_output_layout(
     asset_id: &str,
     download_options: &DownloadContentSelection,
     force_bundle: bool,
+    reuse_existing: bool,
 ) -> Result<OutputLayout, String> {
     if force_bundle || download_options.needs_bundle_directory() {
-        let bundle_dir = unique_output_dir(base_dir.join(safe_title));
+        let desired = base_dir.join(safe_title);
+        // 重试时复用上一次的文件夹，保留其中的 .part / .download 分片用于断点续传
+        let bundle_dir = if reuse_existing && desired.is_dir() {
+            desired
+        } else {
+            unique_output_dir(desired)
+        };
         fs::create_dir_all(&bundle_dir).map_err(|error| format!("创建作品文件夹失败：{error}"))?;
         return Ok(OutputLayout {
             base_dir: base_dir.to_path_buf(),
@@ -240,6 +247,12 @@ fn build_text_sidecar(artifacts: &DownloadArtifacts, format_label: Option<&str>)
     }
     if let Some(url) = artifacts.cover_url.as_deref() {
         sections.push(format!("封面链接：{url}"));
+    }
+    let caption = artifacts.caption.trim();
+    if !caption.is_empty() {
+        sections.push(String::new());
+        sections.push("文案：".to_string());
+        sections.push(caption.to_string());
     }
     sections.join("\n")
 }

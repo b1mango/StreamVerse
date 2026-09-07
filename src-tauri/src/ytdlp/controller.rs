@@ -1,5 +1,5 @@
 use crate::{task_store, DownloadTask};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
@@ -9,6 +9,70 @@ static DOWNLOAD_SEMAPHORE: OnceLock<Arc<(Mutex<u32>, Condvar)>> = OnceLock::new(
 static MAX_CONCURRENT: OnceLock<AtomicU64> = OnceLock::new();
 static NETWORK_PROXY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static NETWORK_SPEED_LIMIT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+type DownloadJob = Box<dyn FnOnce() + Send + 'static>;
+
+#[derive(Default)]
+struct DownloadPool {
+    queue: VecDeque<DownloadJob>,
+    workers: usize,
+}
+
+static DOWNLOAD_POOL: OnceLock<Arc<(Mutex<DownloadPool>, Condvar)>> = OnceLock::new();
+
+fn download_pool() -> Arc<(Mutex<DownloadPool>, Condvar)> {
+    Arc::clone(DOWNLOAD_POOL.get_or_init(|| {
+        Arc::new((Mutex::new(DownloadPool::default()), Condvar::new()))
+    }))
+}
+
+fn max_concurrent_downloads() -> usize {
+    MAX_CONCURRENT
+        .get()
+        .map(|value| value.load(Ordering::Relaxed) as usize)
+        .unwrap_or(3)
+}
+
+/// 把下载任务交给有界 worker 池执行：同时存活的下载线程不超过
+/// maxConcurrentDownloads，排队任务只占用队列节点而不再各自占用一个线程。
+/// 真正的并发闸门仍是 acquire_download_slot 的信号量（支持运行时调整上限）。
+pub(super) fn spawn_download_job(job: impl FnOnce() + Send + 'static) {
+    let pool = download_pool();
+    let spawn_worker = {
+        let (lock, _) = pool.as_ref();
+        let mut state = lock.lock().unwrap();
+        state.queue.push_back(Box::new(job));
+        if state.workers < max_concurrent_downloads() {
+            state.workers += 1;
+            true
+        } else {
+            false
+        }
+    };
+    if spawn_worker {
+        let worker_pool = Arc::clone(&pool);
+        thread::spawn(move || download_pool_worker(worker_pool));
+    }
+    let (_, condition) = pool.as_ref();
+    condition.notify_one();
+}
+
+fn download_pool_worker(pool: Arc<(Mutex<DownloadPool>, Condvar)>) {
+    loop {
+        let job = {
+            let (lock, condition) = pool.as_ref();
+            let mut state = lock.lock().unwrap();
+            loop {
+                if let Some(job) = state.queue.pop_front() {
+                    break job;
+                }
+                state = condition.wait(state).unwrap();
+            }
+        };
+        // 单个任务 panic 不应拖垮整个 worker 池
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+    }
+}
 
 #[derive(Clone)]
 pub struct TaskController {
@@ -130,10 +194,7 @@ pub(super) fn throttle_transfer(
 }
 
 pub(super) fn acquire_download_slot() {
-    let max = MAX_CONCURRENT
-        .get()
-        .map(|value| value.load(Ordering::Relaxed) as u32)
-        .unwrap_or(3);
+    let max = max_concurrent_downloads() as u32;
     let semaphore = DOWNLOAD_SEMAPHORE.get_or_init(|| Arc::new((Mutex::new(0), Condvar::new())));
     let (lock, condition) = semaphore.as_ref();
     let mut active = lock.lock().unwrap();

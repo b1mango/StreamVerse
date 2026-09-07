@@ -10,7 +10,7 @@ test("detects platform and workflow from supported links", () => {
   });
   assert.deepEqual(detectInputTarget("https://www.douyin.com/video/123"), {
     platform: "douyin",
-    mode: "single"
+    mode: "unknown"
   });
   assert.deepEqual(detectInputTarget("BV1VPQSBsEdR"), {
     platform: "bilibili",
@@ -58,13 +58,13 @@ test("rejects platform pages that are not a supported video or profile target", 
     validateInputTarget("https://www.bilibili.com/", "bilibili", "single") ?? "",
     /不是当前支持/
   );
-  assert.match(validateInputTarget("https://www.youtube.com/@creator", "youtube", "single") ?? "", /频道主页/);
+  assert.match(validateInputTarget("https://www.youtube.com/@creator", "youtube", "single") ?? "", /主页频道/);
 });
 
 test("keeps YouTube channel and playlist workflows separate", () => {
   assert.match(
     validateInputTarget("https://www.youtube.com/@stanley1510", "youtube", "playlist") ?? "",
-    /频道主页/
+    /主页频道/
   );
   assert.match(
     validateInputTarget("https://www.youtube.com/playlist?list=PL123", "youtube", "profile") ?? "",

@@ -1,6 +1,16 @@
 <script lang="ts" module>
+  const THUMB_CACHE_LIMIT = 200;
   const cache = new Map<string, string>();
   const pending = new Map<string, Promise<string | null>>();
+
+  function cacheThumbnail(url: string, dataUrl: string) {
+    // Map 按插入顺序迭代：超限时淘汰最旧的条目，避免长时间使用内存只增不减
+    cache.set(url, dataUrl);
+    if (cache.size > THUMB_CACHE_LIMIT) {
+      const oldest = cache.keys().next().value;
+      if (oldest) cache.delete(oldest);
+    }
+  }
 </script>
 
 <script lang="ts">
@@ -39,7 +49,7 @@
     if (!request) {
       request = fetchThumbnail(url)
         .then((dataUrl) => {
-          cache.set(url, dataUrl);
+          cacheThumbnail(url, dataUrl);
           return dataUrl;
         })
         .catch(() => null)

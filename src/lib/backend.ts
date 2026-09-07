@@ -32,6 +32,11 @@ export function isFramelessWindows() {
   return hasTauriRuntime() && typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
 }
 
+/** macOS 桌面端：原生红绿灯 + 隐藏标题栏（hiddenTitle + Overlay），需要顶栏拖拽区与毛玻璃适配 */
+export function isMacOS() {
+  return hasTauriRuntime() && typeof navigator !== "undefined" && /Mac OS X|macOS/.test(navigator.userAgent);
+}
+
 function desktopRuntimeRequired(): never {
   throw new Error("浏览器地址仅用于界面预览，无法调用本机解析器。请运行桌面版 StreamVerse 解析真实链接。");
 }

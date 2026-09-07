@@ -8,13 +8,16 @@ from pathlib import Path
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     separator = ";" if sys.platform == "win32" else ":"
+    # macOS 上 onefile 每次启动都要重新自解压并被安全子系统扫描（实测 17-56s），
+    # 改用 onedir：首次扫描后稳定路径可缓存，启动约 0.03s
+    mode = "--onefile" if sys.platform == "win32" else "--onedir"
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--onefile",
+        mode,
         "--name",
         "streamverse-helper",
         "--distpath",

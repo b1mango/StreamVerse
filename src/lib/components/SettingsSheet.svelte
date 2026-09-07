@@ -55,6 +55,7 @@
   let qualityPreference = $state<BootstrapState["qualityPreference"]>("recommended");
   let maxConcurrentDownloads = $state(3);
   let proxyUrl = $state("");
+  let saveError = $state("");
   let speedLimit = $state("");
   let autoRevealInFinder = $state(false);
   let notifyOnComplete = $state(true);
@@ -140,19 +141,24 @@
   }
 
   async function submitSettings() {
-    await onSave({
-      saveDirectory,
-      downloadMode: "manual",
-      qualityPreference,
-      autoRevealInFinder,
-      maxConcurrentDownloads: Math.min(8, Math.max(1, Math.round(maxConcurrentDownloads) || 1)),
-      proxyUrl: proxyUrl.trim() || null,
-      speedLimit: speedLimit.trim() || null,
-      autoUpdate: bootstrap.autoUpdate,
-      theme,
-      notifyOnComplete,
-      language
-    });
+    saveError = "";
+    try {
+      await onSave({
+        saveDirectory,
+        downloadMode: "manual",
+        qualityPreference,
+        autoRevealInFinder,
+        maxConcurrentDownloads: Math.min(8, Math.max(1, Math.round(maxConcurrentDownloads) || 1)),
+        proxyUrl: proxyUrl.trim() || null,
+        speedLimit: speedLimit.trim() || null,
+        autoUpdate: bootstrap.autoUpdate,
+        theme,
+        notifyOnComplete,
+        language
+      });
+    } catch (error) {
+      saveError = resolveErrorMessage(error);
+    }
   }
 
   async function saveManual() {
@@ -288,7 +294,7 @@
       </div>
 
       {#if section !== "about"}
-        <footer class="sheet-footer"><button class="primary-button" type="button" disabled={busy} onclick={submitSettings}>{#if busy}<LoaderCircle class="spin" size={17} />{:else}<Check size={17} />{/if}{$t("settings.save")}</button></footer>
+        <footer class="sheet-footer">{#if saveError}<span class="save-error" role="alert">{saveError}</span>{/if}<button class="primary-button" type="button" disabled={busy} onclick={submitSettings}>{#if busy}<LoaderCircle class="spin" size={17} />{:else}<Check size={17} />{/if}{$t("settings.save")}</button></footer>
       {/if}
     </div>
   </div>

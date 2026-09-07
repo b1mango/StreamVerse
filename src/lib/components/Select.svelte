@@ -94,14 +94,19 @@
     const close = () => {
       open = false;
     };
+    // 弹窗内部（选项列表）的滚动不应关闭弹窗，只有外部滚动才关
+    const onScroll = (event: Event) => {
+      if (popup && event.target instanceof Node && popup.contains(event.target)) return;
+      open = false;
+    };
     window.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", close);
     return () => {
       window.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", close);
     };
   });

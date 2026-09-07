@@ -33,24 +33,31 @@ pub fn analyze_input(
             );
         }
 
-        return provider_runtime::run_helper_json(
+        // helper 真实业务错误（登录态失效、403 等）直接上报，不再被 yt-dlp 兜底的通用报错覆盖；
+        // 只有 sidecar 缺失 / 进程拉起失败 / 输出无法解析时才回退 yt-dlp
+        return match provider_runtime::run_helper_json_classified(
             "douyin-analyze",
             &source_url,
             selected_cookie_file,
             selected_browser,
             None,
             progress_file,
-        )
-        .or_else(|_| {
-            provider_runtime::analyze_generic_url(
-                platform,
-                &source_url,
-                None,
-                selected_cookie_file,
-                None,
-            )
-        })
-        .map_err(normalize_douyin_error);
+        ) {
+            Ok(asset) => Ok(asset),
+            Err(provider_runtime::HelperRunError::Business(error)) => {
+                Err(normalize_douyin_error(error))
+            }
+            Err(provider_runtime::HelperRunError::Infrastructure(_)) => {
+                provider_runtime::analyze_generic_url(
+                    platform,
+                    &source_url,
+                    None,
+                    selected_cookie_file,
+                    None,
+                )
+                .map_err(normalize_douyin_error)
+            }
+        };
     }
 
     provider_runtime::analyze_generic_url(

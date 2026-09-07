@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, readFile, rename, rm } from "node:fs/promises";
+import { chmod, cp, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -58,10 +58,43 @@ async function prepareYtDlp() {
   const spec = lock.ytDlp[platformKey];
   const target = join(outputDir, `yt-dlp-${triple}${extension}`);
   const explicit = process.env.STREAMVERSE_YTDLP_PATH;
-  const previous = join(root, "src-tauri", "gen", "resources", "download-engine", "bin", `yt-dlp${extension}`);
   if (explicit) {
     await copyFile(explicit, target);
-  } else if (existsSync(previous) && await sha256(previous) === spec.sha256) {
+    if (process.platform !== "win32") await chmod(target, 0o755);
+    return;
+  }
+
+  // macOS 使用 yt-dlp_macos.zip（onedir 布局）：onefile 单文件每次启动都要重新自解压
+  // 并触发安全扫描（实测 17-56s），onedir 稳定路径只需首扫一次，之后启动约 0.15s
+  if (spec.layout === "onedir") {
+    const dir = join(outputDir, "yt-dlp-onedir");
+    const exe = join(dir, "yt-dlp");
+    if (existsSync(exe)) {
+      await rm(target, { force: true });
+      return;
+    }
+    const archive = join(outputDir, `.yt-dlp-${platformKey}.zip`);
+    const extractDir = join(outputDir, `.yt-dlp-${platformKey}`);
+    if (!existsSync(archive) || await sha256(archive) !== spec.sha256) {
+      await download(spec.url, archive);
+    }
+    await verify(archive, spec.sha256, `yt-dlp ${lock.ytDlp.version}`);
+    await rm(extractDir, { recursive: true, force: true });
+    await mkdir(extractDir, { recursive: true });
+    await execFileAsync("tar", ["-xf", archive, "-C", extractDir]);
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dir, { recursive: true });
+    await rename(join(extractDir, "yt-dlp_macos"), exe);
+    await rename(join(extractDir, "_internal"), join(dir, "_internal"));
+    await rm(archive, { force: true });
+    await rm(extractDir, { recursive: true, force: true });
+    await chmod(exe, 0o755);
+    await rm(target, { force: true });
+    return;
+  }
+
+  const previous = join(root, "src-tauri", "gen", "resources", "download-engine", "bin", `yt-dlp${extension}`);
+  if (existsSync(previous) && await sha256(previous) === spec.sha256) {
     await copyFile(previous, target);
   } else if (!existsSync(target) || await sha256(target) !== spec.sha256) {
     await download(spec.url, target);
@@ -147,13 +180,37 @@ async function prepareFfmpeg() {
 
 async function prepareHelper() {
   const explicit = process.env.STREAMVERSE_HELPER_PATH;
+  const target = join(outputDir, `streamverse-helper-${triple}${extension}`);
+
+  // macOS 使用 onedir 构建产物（目录），理由同 yt-dlp
+  if (process.platform !== "win32") {
+    const sourceDir = explicit || join(root, "scripts", "dist", "streamverse-helper");
+    const sourceExe = join(sourceDir, "streamverse-helper");
+    if (!existsSync(sourceExe)) {
+      throw new Error("streamverse-helper is missing; run npm run build:helper first.");
+    }
+    const dir = join(outputDir, "streamverse-helper-onedir");
+    // 内容未变化时跳过重拷：重拷会让 macOS 把目录当作新文件重新安全扫描（首跑 +30s）
+    const marker = join(dir, ".source-sha256");
+    const sourceHash = await sha256(sourceExe);
+    if (existsSync(join(dir, "streamverse-helper")) && existsSync(marker)
+        && (await readFile(marker, "utf8")).trim() === sourceHash) {
+      await rm(target, { force: true });
+      return;
+    }
+    await rm(dir, { recursive: true, force: true });
+    await cp(sourceDir, dir, { recursive: true });
+    await chmod(join(dir, "streamverse-helper"), 0o755);
+    await writeFile(marker, `${sourceHash}\n`);
+    await rm(target, { force: true });
+    return;
+  }
+
   const source = explicit || join(root, "scripts", "dist", `streamverse-helper${extension}`);
   if (!existsSync(source)) {
     throw new Error("streamverse-helper is missing; run npm run build:helper first.");
   }
-  const target = join(outputDir, `streamverse-helper-${triple}${extension}`);
   await copyFile(source, target);
-  if (process.platform !== "win32") await chmod(target, 0o755);
 }
 
 await prepareYtDlp();

@@ -41,67 +41,35 @@ MIXIN_KEY_ENC_TAB = [
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 ]
 
+def _batch_format(height: int, label: str, resolution: str, bitrate_kbps: int, recommended: bool = False) -> dict:
+    # 优先 H.264（avc1）视频流：批量成品要在常见播放器里直接可播，
+    # B 站同高度还有 HEVC/AV1 流，yt-dlp 默认排序会选中它们；
+    # 没有 H.264 流时回退到同高度任意编码。码率取 B 站 H.264 分发的
+    # 经验中位值（非标称上限），让前端的文件大小估算贴近真实成品
+    return {
+        "id": (
+            f"bestvideo[height<={height}][vcodec^=avc1]+bestaudio"
+            f"/bestvideo[height<={height}]+bestaudio"
+            f"/best[height<={height}]/best"
+        ),
+        "label": label,
+        "resolution": resolution,
+        "bitrateKbps": bitrate_kbps,
+        "codec": "H.264",
+        "container": "MP4",
+        "noWatermark": True,
+        "requiresLogin": True,
+        "requiresProcessing": True,
+        "recommended": recommended,
+    }
+
+
 BILIBILI_BATCH_FORMATS = [
-    {
-        "id": "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
-        "label": "4K",
-        "resolution": "3840x2160",
-        "bitrateKbps": 16000,
-        "codec": "自适应",
-        "container": "MP4",
-        "noWatermark": True,
-        "requiresLogin": False,
-        "requiresProcessing": True,
-        "recommended": False,
-    },
-    {
-        "id": "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
-        "label": "1440P",
-        "resolution": "2560x1440",
-        "bitrateKbps": 12000,
-        "codec": "自适应",
-        "container": "MP4",
-        "noWatermark": True,
-        "requiresLogin": False,
-        "requiresProcessing": True,
-        "recommended": False,
-    },
-    {
-        "id": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-        "label": "1080P",
-        "resolution": "1920x1080",
-        "bitrateKbps": 8000,
-        "codec": "自适应",
-        "container": "MP4",
-        "noWatermark": True,
-        "requiresLogin": False,
-        "requiresProcessing": True,
-        "recommended": True,
-    },
-    {
-        "id": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-        "label": "720P",
-        "resolution": "1280x720",
-        "bitrateKbps": 4200,
-        "codec": "自适应",
-        "container": "MP4",
-        "noWatermark": True,
-        "requiresLogin": False,
-        "requiresProcessing": True,
-        "recommended": False,
-    },
-    {
-        "id": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
-        "label": "480P",
-        "resolution": "854x480",
-        "bitrateKbps": 1800,
-        "codec": "自适应",
-        "container": "MP4",
-        "noWatermark": True,
-        "requiresLogin": False,
-        "requiresProcessing": True,
-        "recommended": False,
-    },
+    _batch_format(2160, "4K", "3840x2160", 9000),
+    _batch_format(1440, "1440P", "2560x1440", 5000),
+    _batch_format(1080, "1080P", "1920x1080", 2000, recommended=True),
+    _batch_format(720, "720P", "1280x720", 1200),
+    _batch_format(480, "480P", "854x480", 700),
 ]
 
 
@@ -137,7 +105,6 @@ class ProgressTracker:
     def __init__(self) -> None:
         self.current = 0
         self.regular_total = 0
-        self.pending_group_estimate = 0
         self.profile_title = "UP 主"
 
     def set_profile_title(self, profile_title: str) -> None:
@@ -148,34 +115,13 @@ class ProgressTracker:
         self.regular_total = max(self.regular_total, int(total or 0))
         self.emit(f"正在读取 {self.profile_title} 的视频列表…")
 
-    def reserve_group_tasks(self, count: int, per_task_estimate: int = 20) -> None:
-        if count <= 0:
-            return
-        self.pending_group_estimate += count * per_task_estimate
-        self.emit(f"正在读取 {self.profile_title} 的合集/系列…")
-
-    def reserve_group_items(self, count: int) -> None:
-        if count <= 0:
-            return
-        self.pending_group_estimate += count
-        self.emit(f"正在读取 {self.profile_title} 的合集/系列…")
-
     def advance(self, count: int, message: str | None = None) -> None:
         if count > 0:
             self.current += count
         self.emit(message or f"已解析 {self.current} 个视频。")
 
-    def complete_reserved_group_items(self, count: int) -> None:
-        if count > 0:
-            self.pending_group_estimate = max(0, self.pending_group_estimate - count)
-        self.advance(count, f"已解析 {self.current + max(count, 0)} 个视频。")
-
-    def complete_group_task(self, actual_count: int, per_task_estimate: int = 20) -> None:
-        self.pending_group_estimate = max(0, self.pending_group_estimate - per_task_estimate)
-        self.advance(actual_count, f"已解析 {self.current + max(actual_count, 0)} 个视频。")
-
     def total(self) -> int:
-        return max(self.current, self.regular_total + self.pending_group_estimate)
+        return max(self.current, self.regular_total)
 
     def emit(self, message: str) -> None:
         write_progress(self.current, self.total(), message)
@@ -375,32 +321,6 @@ def make_vlist_item(item: dict, profile_title: str) -> dict | None:
     }
 
 
-def make_group_archive_item(
-    item: dict,
-    profile_title: str,
-    category_label: str,
-    group_title: str | None,
-) -> dict | None:
-    bvid = item.get("bvid") or item.get("bv_id")
-    href = item.get("jump_url") or item.get("url")
-    if isinstance(href, str) and href.startswith("//"):
-        href = f"https:{href}"
-    if not href and bvid:
-        href = f"https://www.bilibili.com/video/{bvid}"
-    if not href:
-        return None
-    return {
-        "href": href,
-        "title": normalize_title(str(item.get("title") or ""), bvid or href),
-        "author": profile_title,
-        "durationSeconds": parse_duration_seconds(item.get("duration") or item.get("length")),
-        "publishDate": format_timestamp(item.get("pubdate") or item.get("ctime") or item.get("created")),
-        "coverUrl": normalize_cover_url(item.get("pic") or item.get("cover")),
-        "categoryLabel": category_label,
-        "groupTitle": group_title,
-    }
-
-
 async def fetch_regular_videos(
     client: httpx.AsyncClient,
     mid: str,
@@ -464,157 +384,6 @@ async def fetch_regular_videos(
 
     return items
 
-
-async def fetch_group_archives(
-    client: httpx.AsyncClient,
-    mid: str,
-    profile_title: str,
-    category_label: str,
-    group_title: str | None,
-    season_id: int | None = None,
-    series_id: int | None = None,
-) -> list[dict]:
-    params: dict[str, object] = {
-        "mid": mid,
-        "page_num": 1,
-        "page_size": 100,
-        "sort_reverse": "false",
-    }
-    if season_id:
-        params["season_id"] = season_id
-    if series_id:
-        params["series_id"] = series_id
-
-    data = await fetch_json(
-        client,
-        "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list",
-        "读取 Bilibili 合集/系列视频失败。",
-        params=params,
-    )
-    archives = data.get("archives") or data.get("list") or []
-    if not isinstance(archives, list):
-        return []
-
-    results = []
-    for archive in archives:
-        if isinstance(archive, dict):
-            mapped = make_group_archive_item(archive, profile_title, category_label, group_title)
-            if mapped:
-                results.append(mapped)
-    return results
-
-
-async def fetch_grouped_videos(
-    client: httpx.AsyncClient,
-    mid: str,
-    profile_title: str,
-    tracker: ProgressTracker,
-) -> list[dict]:
-    items: list[dict] = []
-    page_size = 20
-    async def fetch_list_page(page_num: int):
-        return await fetch_json(
-            client,
-            "https://api.bilibili.com/x/polymer/web-space/seasons_series_list",
-            "读取 Bilibili 合集/系列列表失败。",
-            params={
-                "mid": mid,
-                "page_num": page_num,
-                "page_size": page_size,
-                "web_location": "333.999",
-            },
-        )
-
-    def map_archives(archives: list[dict], category_label: str, group_title: str | None) -> list[dict]:
-        mapped_items = []
-        for archive in archives:
-            if isinstance(archive, dict):
-                mapped = make_group_archive_item(archive, profile_title, category_label, group_title)
-                if mapped:
-                    mapped_items.append(mapped)
-        return mapped_items
-
-    first_page = await fetch_list_page(1)
-    first_lists = first_page.get("items_lists") or {}
-    if not isinstance(first_lists, dict):
-        return items
-
-    page = first_lists.get("page") or {}
-    total = int(page.get("total") or 0)
-    total_pages = max(1, (total + page_size - 1) // page_size) if total else 1
-    lists_pages = [first_lists]
-
-    if total_pages > 1:
-        for data in await gather_limited(list(range(2, total_pages + 1)), fetch_list_page):
-            lists = data.get("items_lists") or {}
-            if isinstance(lists, dict):
-                lists_pages.append(lists)
-
-    inline_archive_total = 0
-    deferred_group_total = 0
-    group_batches: list[tuple[str, str | None, list[dict]]] = []
-    archive_tasks = []
-    for lists in lists_pages:
-        seasons = lists.get("seasons_list") or []
-        series = lists.get("series_list") or []
-        for group in seasons:
-            if not isinstance(group, dict):
-                continue
-            meta = group.get("meta") or {}
-            group_title = str(meta.get("name") or "").strip() or None
-            archives = group.get("archives") or []
-            if archives:
-                group_batches.append(("合集", group_title, archives))
-                inline_archive_total += len(archives)
-            elif meta.get("season_id"):
-                deferred_group_total += 1
-                archive_tasks.append(
-                    fetch_group_archives(
-                        client,
-                        mid,
-                        profile_title,
-                        "合集",
-                        group_title,
-                        season_id=int(meta["season_id"]),
-                    )
-                )
-
-        for group in series:
-            if not isinstance(group, dict):
-                continue
-            meta = group.get("meta") or {}
-            group_title = str(meta.get("name") or "").strip() or None
-            archives = group.get("archives") or []
-            if archives:
-                group_batches.append(("系列", group_title, archives))
-                inline_archive_total += len(archives)
-            elif meta.get("series_id"):
-                deferred_group_total += 1
-                archive_tasks.append(
-                    fetch_group_archives(
-                        client,
-                        mid,
-                        profile_title,
-                        "系列",
-                        group_title,
-                        series_id=int(meta["series_id"]),
-                    )
-                )
-
-    tracker.reserve_group_items(inline_archive_total)
-    tracker.reserve_group_tasks(deferred_group_total)
-
-    for category_label, group_title, archives in group_batches:
-        mapped = map_archives(archives, category_label, group_title)
-        items.extend(mapped)
-        tracker.complete_reserved_group_items(len(mapped))
-
-    if archive_tasks:
-        for archives in await asyncio.gather(*archive_tasks):
-            items.extend(archives)
-            tracker.complete_group_task(len(archives))
-
-    return items
 
 
 def merge_items(*groups: list[dict]) -> list[dict]:

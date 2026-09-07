@@ -26,7 +26,11 @@ DESKTOP_UA = (
 )
 DOUYIN_REFERER = "https://www.douyin.com/"
 IMAGE_AWEME_TYPES = {2, 68}
-SINGLE_ANALYZE_MAX_RETRIES = 3
+SINGLE_ANALYZE_MAX_RETRIES = 4
+PROFILE_REQUEST_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
 PROGRESS_FILE = os.environ.get("STREAMVERSE_PROGRESS_FILE")
 
 if str(VENDOR_ROOT) not in sys.path:
@@ -36,10 +40,11 @@ import httpx  # noqa: E402
 from urllib.parse import urlencode  # noqa: E402
 
 from crawlers.douyin.web.endpoints import DouyinAPIEndpoints  # noqa: E402
-from crawlers.douyin.web.models import UserPost  # noqa: E402
+from crawlers.douyin.web.models import PostDetail, UserPost  # noqa: E402
 from crawlers.douyin.web.utils import (  # noqa: E402
     AwemeIdFetcher,
     BogusManager,
+    TokenManager,
     config as utils_config,
 )
 from crawlers.douyin.web.web_crawler import (  # noqa: E402
@@ -421,29 +426,114 @@ def build_caption(detail: dict[str, Any], using_login: bool, has_video_formats: 
     return f"{prefix} 可以直接选择清晰度开始下载。"
 
 
+PROFILE_URL_HINTS = ("/user/", "/share/user")
+SHORT_LINK_HOSTS = ("v.douyin.com", "iesdouyin.com")
+PROFILE_LINK_MESSAGE = "检测到这是抖音主页链接，请切换到「主页批量」模块解析。"
+SINGLE_ANALYZE_TIMEOUT = 10
+SINGLE_ANALYZE_RETRY_DELAY = 0.5
+
+# 与 AwemeIdFetcher 相同的匹配顺序，用于本地提取完整链接的作品 ID
+_AWEME_ID_URL_PATTERNS = (
+    re.compile(r"video/([^/?]*)"),
+    re.compile(r"[?&]vid=(\d+)"),
+    re.compile(r"note/([^/?]*)"),
+    re.compile(r"modal_id=([0-9]+)"),
+)
+
+
+def extract_aweme_id_from_url(url: str) -> str | None:
+    for pattern in _AWEME_ID_URL_PATTERNS:
+        match = pattern.search(url)
+        if match:
+            return match.group(1)
+    return None
+
+
+async def ensure_not_profile_link(url: str) -> str:
+    """拦截主页链接；短链顺带解析重定向并返回最终 URL。"""
+    lowered = url.lower()
+    if any(hint in lowered for hint in PROFILE_URL_HINTS):
+        raise RuntimeError(PROFILE_LINK_MESSAGE)
+
+    if not any(host in lowered for host in SHORT_LINK_HOSTS):
+        return url
+
+    try:
+        async with httpx.AsyncClient(
+            proxy=None, timeout=10, follow_redirects=True
+        ) as client:
+            response = await client.get(url)
+        final_url = str(response.url)
+    except httpx.HTTPError:
+        return url
+
+    if any(hint in final_url.lower() for hint in PROFILE_URL_HINTS):
+        raise RuntimeError(PROFILE_LINK_MESSAGE)
+
+    return final_url
+
+
+async def resolve_aweme_id(url: str) -> str:
+    final_url = await ensure_not_profile_link(url)
+    # 完整链接本地提取作品 ID，省掉一次重定向请求；提取不到再回退到网络请求
+    aweme_id = extract_aweme_id_from_url(final_url)
+    if aweme_id:
+        return aweme_id
+    return await AwemeIdFetcher.get_aweme_id(final_url)
+
+
+async def fetch_one_video_fast(
+    client: httpx.AsyncClient, user_agent: str, aweme_id: str, ms_token: str
+) -> dict[str, Any]:
+    """单作品详情请求，复用共享 client。该接口对空 msToken 的 403 拦截是间歇性的，
+    重试时由调用方轮换真实 msToken（与主页批量路径一致）。"""
+    params = PostDetail(aweme_id=aweme_id)
+    params_dict = params.dict()
+    params_dict["msToken"] = ms_token
+    a_bogus = BogusManager.ab_model_2_endpoint(params_dict, user_agent)
+    endpoint = f"{DouyinAPIEndpoints.POST_DETAIL}?{urlencode(params_dict)}&a_bogus={a_bogus}"
+    response = await client.get(endpoint, follow_redirects=True)
+    response.raise_for_status()
+    return response.json()
+
+
 async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:
     write_progress(0, 4, "正在准备抖音解析环境…")
     patch_cookie_config(build_cookie_header(cookie_file))
+    aweme_id = await resolve_aweme_id(url)
     write_progress(1, 4, "正在读取抖音作品信息…")
 
-    aweme_id = await AwemeIdFetcher.get_aweme_id(url)
     crawler = DouyinWebCrawler()
+    kwargs = await crawler.get_douyin_headers()
+    headers = kwargs["headers"]
+    user_agent = headers["User-Agent"]
+
     response: dict[str, Any] | None = None
     last_error: Exception | None = None
-    for attempt in range(1, SINGLE_ANALYZE_MAX_RETRIES + 1):
-        try:
-            response = await crawler.fetch_one_video(aweme_id)
-            break
-        except Exception as error:
-            last_error = error
-            if attempt >= SINGLE_ANALYZE_MAX_RETRIES:
+    async with httpx.AsyncClient(
+        headers=headers,
+        proxies=kwargs.get("proxies"),
+        timeout=httpx.Timeout(SINGLE_ANALYZE_TIMEOUT),
+        transport=httpx.AsyncHTTPTransport(retries=3),
+    ) as client:
+        for attempt in range(1, SINGLE_ANALYZE_MAX_RETRIES + 1):
+            # 首次请求沿用空 msToken 快速路径；失败后轮换真实 msToken 规避间歇性 403
+            ms_token = "" if attempt == 1 else TokenManager.gen_real_msToken()
+            try:
+                response = await fetch_one_video_fast(
+                    client, user_agent, aweme_id, ms_token
+                )
                 break
-            write_progress(
-                1,
-                4,
-                f"抖音作品信息读取超时，正在进行第 {attempt + 1} 次重试…",
-            )
-            await asyncio.sleep(attempt)
+            except Exception as error:
+                last_error = error
+                if attempt >= SINGLE_ANALYZE_MAX_RETRIES:
+                    break
+                write_progress(
+                    1,
+                    4,
+                    f"抖音作品信息读取超时，正在进行第 {attempt + 1} 次重试…",
+                )
+                await asyncio.sleep(SINGLE_ANALYZE_RETRY_DELAY * attempt)
 
     if response is None:
         raise RuntimeError(f"读取抖音作品信息失败：{last_error}")
@@ -464,30 +554,71 @@ async def analyze(url: str, cookie_file: Path | None) -> dict[str, Any]:
     return asset
 
 
+def extract_cookie_value(cookie_header: str, name: str) -> str:
+    for pair in cookie_header.split("; "):
+        key, separator, value = pair.partition("=")
+        if separator and key.strip() == name:
+            return value.strip()
+    return ""
+
+
+PROFILE_POST_MAX_ATTEMPTS = 4
+
+
 async def _fetch_user_posts_fast(
     client: httpx.AsyncClient,
     user_agent: str,
     sec_user_id: str,
     max_cursor: int,
     count: int = 20,
+    uifid: str = "",
+    verify_fp: str = "",
 ) -> dict[str, Any]:
-    """Fetch user post videos reusing a shared httpx.AsyncClient."""
-    params = UserPost(sec_user_id=sec_user_id, max_cursor=max_cursor, count=count)
-    params_dict = params.dict()
-    params_dict["msToken"] = ""
-    a_bogus = BogusManager.ab_model_2_endpoint(params_dict, user_agent)
-    endpoint = f"{DouyinAPIEndpoints.USER_POST}?{urlencode(params_dict)}&a_bogus={a_bogus}"
-    response = await client.get(endpoint, follow_redirects=True)
-    response.raise_for_status()
-    return response.json()
+    """Fetch user post videos reusing a shared httpx.AsyncClient.
+
+    抖音风控对该接口的 403 拦截是间歇性的（相同参数时好时坏），
+    做应用级重试并轮换 msToken，持续失败才抛出可操作的错误信息。
+    """
+    for attempt in range(1, PROFILE_POST_MAX_ATTEMPTS + 1):
+        params = UserPost(sec_user_id=sec_user_id, max_cursor=max_cursor, count=count)
+        params_dict = params.dict()
+        params_dict["msToken"] = "" if attempt == 1 else TokenManager.gen_real_msToken()
+        extra_headers: dict[str, str] = {}
+        if uifid:
+            params_dict["uifid"] = uifid
+            params_dict["verifyFp"] = verify_fp
+            params_dict["fp"] = verify_fp
+            extra_headers["uifid"] = uifid
+        a_bogus = BogusManager.ab_model_2_endpoint(params_dict, user_agent)
+        endpoint = f"{DouyinAPIEndpoints.USER_POST}?{urlencode(params_dict)}&a_bogus={a_bogus}"
+        response = await client.get(endpoint, follow_redirects=True, headers=extra_headers)
+        if response.status_code != 403:
+            response.raise_for_status()
+            return response.json()
+        if attempt < PROFILE_POST_MAX_ATTEMPTS:
+            await asyncio.sleep(attempt)
+            continue
+        if "Uifid Not Found" in response.text:
+            raise RuntimeError(
+                "抖音网页风控参数缺失，请重新从浏览器导入抖音 Cookie 后再试。"
+            )
+        raise RuntimeError(
+            "抖音网页接口暂时被风控拦截，已自动重试仍失败。请等 1-2 分钟后重试；"
+            "若持续失败，请重新登录抖音并重新导入 Cookie。"
+        )
+
+    raise RuntimeError("抖音主页作品读取失败。")
 
 
 async def analyze_profile(
     url: str, cookie_file: Path | None, limit: int
 ) -> dict[str, Any]:
-    patch_cookie_config(build_cookie_header(cookie_file))
+    cookie_header = build_cookie_header(cookie_file)
+    patch_cookie_config(cookie_header)
     using_login = bool(cookie_file)
     normalized_limit = max(1, min(limit, 2000))
+    uifid = extract_cookie_value(cookie_header, "UIFID")
+    verify_fp = extract_cookie_value(cookie_header, "s_v_web_id")
 
     crawler = DouyinWebCrawler()
     sec_user_id = await crawler.get_sec_user_id(url)
@@ -516,10 +647,13 @@ async def analyze_profile(
     has_more = True
 
     kwargs = await crawler.get_douyin_headers()
-    user_agent = kwargs["headers"]["User-Agent"]
+    # 请求头 UA 必须与签名指纹参数（browser_version=130.0.0.0）一致，否则 a_bogus 校验失败
+    profile_headers = dict(kwargs["headers"])
+    profile_headers["User-Agent"] = PROFILE_REQUEST_UA
+    user_agent = PROFILE_REQUEST_UA
 
     async with httpx.AsyncClient(
-        headers=kwargs["headers"],
+        headers=profile_headers,
         proxies=kwargs.get("proxies"),
         timeout=httpx.Timeout(15),
         limits=httpx.Limits(max_connections=50),
@@ -528,6 +662,7 @@ async def analyze_profile(
         while has_more and len(items) < normalized_limit:
             response = await _fetch_user_posts_fast(
                 client, user_agent, sec_user_id, max_cursor, count=20,
+                uifid=uifid, verify_fp=verify_fp,
             )
 
             aweme_list = response.get("aweme_list") or []

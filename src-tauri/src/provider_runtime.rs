@@ -11,9 +11,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 static RESOURCE_ROOT: OnceLock<PathBuf> = OnceLock::new();
-pub(crate) const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default";
+// default 客户端集合里 web 客户端最慢（需要额外网页请求），排除后解析提速约 40%
+// 且不损失清晰度与音频流；会员/受限内容仍由其余客户端覆盖
+pub(crate) const YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default,-web";
 const YOUTUBE_COLLECTION_EXTRACTOR_ARGS: &str = "youtubetab:skip=webpage,authcheck";
-const YOUTUBE_INFO_CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 60);
+const INFO_CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Deserialize)]
 struct RawInfo {
@@ -102,6 +104,19 @@ pub fn analyze_generic_url(
             command.arg("--proxy").arg(proxy);
         }
     }
+    if platform == "bilibili" {
+        // B 站风控校验 Origin/Referer，缺失时网页请求易被 412 拦截；
+        // 重试退避限制在 2s，避免偶发 412 把解析拖到几十秒
+        command
+            .arg("--add-header")
+            .arg("Origin: https://www.bilibili.com")
+            .arg("--add-header")
+            .arg("Referer: https://www.bilibili.com/")
+            .arg("--retries")
+            .arg("3")
+            .arg("--retry-sleep")
+            .arg("2");
+    }
     let output = command
         .arg(source_url)
         .output()
@@ -111,9 +126,9 @@ pub fn analyze_generic_url(
     }
     let raw: RawInfo = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("解析 yt-dlp 响应失败：{error}"))?;
-    if platform == "youtube" {
+    if matches!(platform, "youtube" | "bilibili") {
         if let Some(asset_id) = raw.id.as_deref() {
-            let _ = cache_youtube_info(asset_id, &output.stdout);
+            let _ = cache_platform_info(platform, asset_id, &output.stdout);
         }
     }
     let formats = map_formats(platform, raw.formats.unwrap_or_default());
@@ -140,33 +155,35 @@ pub fn analyze_generic_url(
     })
 }
 
-fn youtube_info_cache_path(asset_id: &str) -> Option<PathBuf> {
+fn info_cache_path(platform: &str, asset_id: &str) -> Option<PathBuf> {
     let safe_id = asset_id
         .chars()
         .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_'))
         .then_some(asset_id)?;
     Some(
         settings::app_data_root()
-            .join("youtube-info")
+            .join(format!("{platform}-info"))
             .join(format!("{safe_id}.json")),
     )
 }
 
-fn cache_youtube_info(asset_id: &str, payload: &[u8]) -> Result<(), String> {
-    let Some(path) = youtube_info_cache_path(asset_id) else {
+fn cache_platform_info(platform: &str, asset_id: &str, payload: &[u8]) -> Result<(), String> {
+    let Some(path) = info_cache_path(platform, asset_id) else {
         return Ok(());
     };
     let parent = path
         .parent()
-        .ok_or_else(|| "无法确定 YouTube 解析缓存目录。".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("创建 YouTube 解析缓存失败：{error}"))?;
-    fs::write(path, payload).map_err(|error| format!("保存 YouTube 解析缓存失败：{error}"))
+        .ok_or_else(|| "无法确定解析缓存目录。".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("创建解析缓存失败：{error}"))?;
+    fs::write(path, payload).map_err(|error| format!("保存解析缓存失败：{error}"))
 }
 
-pub(crate) fn cached_youtube_info_path(asset_id: &str) -> Option<PathBuf> {
-    let path = youtube_info_cache_path(asset_id)?;
+/// 解析结果缓存（YouTube / B 站）：下载时直接 --load-info-json 复用，
+/// 避免下载前再跑一遍完整解析（B 站还会因此再次暴露于 412 风控）
+pub(crate) fn cached_platform_info_path(platform: &str, asset_id: &str) -> Option<PathBuf> {
+    let path = info_cache_path(platform, asset_id)?;
     let age = path.metadata().ok()?.modified().ok()?.elapsed().ok()?;
-    (age <= YOUTUBE_INFO_CACHE_MAX_AGE).then_some(path)
+    (age <= INFO_CACHE_MAX_AGE).then_some(path)
 }
 
 pub fn analyze_youtube_collection(
@@ -287,6 +304,23 @@ pub(crate) fn append_youtube_extraction_args(command: &mut Command) -> Result<()
     Ok(())
 }
 
+/// helper sidecar 调用的错误分类：
+/// Infrastructure = sidecar 缺失 / 进程拉起失败 / 输出 JSON 无法解析（可由 yt-dlp 兜底）；
+/// Business = helper 正常运行但以非零码退出并给出错误信息（登录态失效、403 等，需原样上报）
+#[derive(Debug)]
+pub enum HelperRunError {
+    Infrastructure(String),
+    Business(String),
+}
+
+impl HelperRunError {
+    pub fn into_message(self) -> String {
+        match self {
+            HelperRunError::Infrastructure(message) | HelperRunError::Business(message) => message,
+        }
+    }
+}
+
 pub fn run_helper_json<T: DeserializeOwned>(
     action: &str,
     source_url: &str,
@@ -295,7 +329,21 @@ pub fn run_helper_json<T: DeserializeOwned>(
     port: Option<u16>,
     progress_file: Option<&Path>,
 ) -> Result<T, String> {
-    let mut command = silent_command(resolve_sidecar("streamverse-helper")?);
+    run_helper_json_classified(action, source_url, cookie_file, browser, port, progress_file)
+        .map_err(HelperRunError::into_message)
+}
+
+pub fn run_helper_json_classified<T: DeserializeOwned>(
+    action: &str,
+    source_url: &str,
+    cookie_file: Option<&str>,
+    browser: Option<&str>,
+    port: Option<u16>,
+    progress_file: Option<&Path>,
+) -> Result<T, HelperRunError> {
+    let mut command = silent_command(
+        resolve_sidecar("streamverse-helper").map_err(HelperRunError::Infrastructure)?,
+    );
     command.arg(action).arg("--url").arg(source_url);
     if action == "douyin-profile" {
         command.arg("--limit").arg("2000");
@@ -310,11 +358,19 @@ pub fn run_helper_json<T: DeserializeOwned>(
     if let Some(path) = progress_file {
         command.env("STREAMVERSE_PROGRESS_FILE", path);
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("启动固定 helper sidecar 失败：{error}"))?;
+    let output = command.output().map_err(|error| {
+        HelperRunError::Infrastructure(format!("启动固定 helper sidecar 失败：{error}"))
+    })?;
     if !output.status.success() {
-        return Err(read_process_error(&output.stderr, "解析 helper 执行失败。"));
+        let message = read_process_error(&output.stderr, "");
+        // 非零退出但没有 stderr 信息时无法区分是业务失败还是 sidecar 本身损坏，
+        // 归为基础环境错误，允许调用方回退 yt-dlp
+        if message.is_empty() {
+            return Err(HelperRunError::Infrastructure(
+                "解析 helper 执行失败。".to_string(),
+            ));
+        }
+        return Err(HelperRunError::Business(message));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let payload = stdout
@@ -322,23 +378,27 @@ pub fn run_helper_json<T: DeserializeOwned>(
         .rev()
         .find(|line| line.trim_start().starts_with('{'))
         .unwrap_or(stdout.trim());
-    serde_json::from_str(payload).map_err(|error| format!("解析 helper 输出失败：{error}"))
+    serde_json::from_str(payload)
+        .map_err(|error| HelperRunError::Infrastructure(format!("解析 helper 输出失败：{error}")))
 }
 
 pub fn resolve_sidecar(name: &str) -> Result<PathBuf, String> {
     let plain = format!("{name}{}", executable_suffix());
     let target = format!("{name}-{}{}", target_triple(), executable_suffix());
+    let onedir = format!("{name}-onedir");
     let mut candidates = Vec::new();
     if let Some(root) = RESOURCE_ROOT.get() {
-        candidates.extend(sidecar_candidates(root, &plain, &target));
+        candidates.extend(sidecar_candidates(root, &onedir, &plain, &target));
     }
     if let Ok(current) = env::current_exe() {
         if let Some(parent) = current.parent() {
-            candidates.extend(sidecar_candidates(parent, &plain, &target));
+            candidates.extend(sidecar_candidates(parent, &onedir, &plain, &target));
         }
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if manifest.is_dir() {
+        // macOS 上 yt-dlp / streamverse-helper 以 onedir 目录形式存在（避免 onefile 每次启动自解压 + 安全扫描）
+        candidates.push(manifest.join("binaries").join(&onedir).join(&plain));
         candidates.push(manifest.join("binaries").join(&target));
     }
     candidates
@@ -347,16 +407,36 @@ pub fn resolve_sidecar(name: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("缺少固定 sidecar：{target}。请重新安装 StreamVerse。"))
 }
 
-fn sidecar_candidates(root: &Path, plain: &str, target: &str) -> Vec<PathBuf> {
+fn sidecar_candidates(root: &Path, onedir: &str, plain: &str, target: &str) -> Vec<PathBuf> {
     vec![
+        root.join(onedir).join(plain),
         root.join(plain),
         root.join(target),
+        root.join("binaries").join(onedir).join(plain),
         root.join("binaries").join(plain),
         root.join("binaries").join(target),
     ]
 }
 
 fn map_formats(platform: &str, formats: Vec<RawFormat>) -> Vec<VideoFormat> {
+    // B 站 DASH 流是音视频分离的：给纯视频格式配上最佳音频流，
+    // 否则 -f 只下载视频流，成品无声、MP3 提取也会失败
+    let bilibili_best_audio_id = (platform == "bilibili")
+        .then(|| {
+            formats
+                .iter()
+                .filter(|raw| raw.vcodec.as_deref().is_none_or(|codec| codec == "none"))
+                .filter(|raw| raw.acodec.as_deref().is_some_and(|codec| codec != "none"))
+                .filter(|raw| raw.format_id.as_deref().is_some_and(|id| !id.is_empty()))
+                .max_by(|left, right| {
+                    left.tbr
+                        .unwrap_or_default()
+                        .partial_cmp(&right.tbr.unwrap_or_default())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .and_then(|raw| raw.format_id.clone())
+        })
+        .flatten();
     let mut best = BTreeMap::<String, (VideoFormat, bool)>::new();
     for raw in formats {
         let id = raw.format_id.unwrap_or_default();
@@ -378,6 +458,11 @@ fn map_formats(platform: &str, formats: Vec<RawFormat>) -> Vec<VideoFormat> {
         let format = VideoFormat {
             id: if platform == "youtube" && requires_processing {
                 youtube_format_selector(&id)
+            } else if platform == "bilibili" && requires_processing {
+                match &bilibili_best_audio_id {
+                    Some(audio_id) => format!("{id}+{audio_id}"),
+                    None => id,
+                }
             } else {
                 id
             },
@@ -562,10 +647,27 @@ fn read_process_error(stderr: &[u8], fallback: &str) -> String {
     let message = String::from_utf8_lossy(stderr);
     let trimmed = message.trim();
     if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.to_string()
+        return fallback.to_string();
     }
+    // yt-dlp 的 stderr 常在真正的错误之后还输出 WARNING/DEBUG 行，
+    // 优先取最后一个 ERROR 行，避免把警告当成失败原因
+    if let Some(line) = trimmed
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with("ERROR"))
+    {
+        return line.to_string();
+    }
+    if let Some(line) = trimmed
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("WARNING:") && !line.starts_with("DEBUG:"))
+    {
+        return line.to_string();
+    }
+    trimmed.to_string()
 }
 
 pub(crate) fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -604,10 +706,34 @@ fn executable_suffix() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_height, map_formats, normalize_codec, normalize_youtube_collection_url,
-        target_triple, youtube_format_selector, youtube_info_cache_path, RawFormat,
+        format_height, info_cache_path, map_formats, normalize_codec, normalize_youtube_collection_url,
+        read_process_error, target_triple, youtube_format_selector, RawFormat,
         YOUTUBE_COLLECTION_EXTRACTOR_ARGS, YOUTUBE_EXTRACTOR_ARGS,
     };
+
+    #[test]
+    fn read_process_error_prefers_last_error_line_over_trailing_warnings() {
+        let stderr = b"WARNING: [youtube] falling back\nERROR: [youtube] HTTP Error 403: Forbidden\nWARNING: post-download notice\n";
+        assert_eq!(
+            read_process_error(stderr, "fallback"),
+            "ERROR: [youtube] HTTP Error 403: Forbidden"
+        );
+    }
+
+    #[test]
+    fn read_process_error_skips_warning_and_debug_lines() {
+        let stderr = "DEBUG: verbose detail\n真正的失败原因\nWARNING: trailing warning\n";
+        assert_eq!(read_process_error(stderr.as_bytes(), "fallback"), "真正的失败原因");
+    }
+
+    #[test]
+    fn read_process_error_falls_back_to_full_output() {
+        assert_eq!(read_process_error(b"", "fallback"), "fallback");
+        assert_eq!(
+            read_process_error(b"WARNING: only warnings\nDEBUG: nothing else", "fallback"),
+            "WARNING: only warnings\nDEBUG: nothing else"
+        );
+    }
 
     #[test]
     fn reports_supported_target_triple() {
@@ -618,8 +744,9 @@ mod tests {
     fn normalizes_media_metadata() {
         assert_eq!(format_height("1920x1080"), 1080);
         assert_eq!(normalize_codec(Some("avc1.640028")), "H.264");
-        assert!(youtube_info_cache_path("../outside").is_none());
-        assert!(youtube_info_cache_path("SnOckdip_cU").is_some());
+        assert!(info_cache_path("youtube", "../outside").is_none());
+        assert!(info_cache_path("youtube", "SnOckdip_cU").is_some());
+        assert!(info_cache_path("bilibili", "BV1GJ411x7h7").is_some());
     }
 
     #[test]
@@ -646,7 +773,47 @@ mod tests {
             youtube_format_selector("396"),
             "396+bestaudio[ext=m4a]/396+bestaudio/396"
         );
-        assert_eq!(YOUTUBE_EXTRACTOR_ARGS, "youtube:player_client=default");
+        assert_eq!(YOUTUBE_EXTRACTOR_ARGS, "youtube:player_client=default,-web");
+    }
+
+    #[test]
+    fn bilibili_dash_formats_pair_best_audio_stream() {
+        let formats = map_formats(
+            "bilibili",
+            vec![
+                RawFormat {
+                    format_id: Some("30080".to_string()),
+                    height: Some(1080),
+                    width: Some(1920),
+                    vcodec: Some("avc1.640032".to_string()),
+                    acodec: Some("none".to_string()),
+                    tbr: Some(2509.0),
+                    protocol: Some("https".to_string()),
+                    ..RawFormat::default()
+                },
+                RawFormat {
+                    format_id: Some("30216".to_string()),
+                    vcodec: Some("none".to_string()),
+                    acodec: Some("mp4a.40.5".to_string()),
+                    tbr: Some(64.0),
+                    protocol: Some("https".to_string()),
+                    ..RawFormat::default()
+                },
+                RawFormat {
+                    format_id: Some("30280".to_string()),
+                    vcodec: Some("none".to_string()),
+                    acodec: Some("mp4a.40.2".to_string()),
+                    tbr: Some(319.0),
+                    protocol: Some("https".to_string()),
+                    ..RawFormat::default()
+                },
+            ],
+        );
+        assert_eq!(formats.len(), 1);
+        assert_eq!(formats[0].id, "30080+30280");
+        assert!(formats[0].requires_processing);
+        assert!(formats[0].recommended);
+        assert_eq!(formats[0].codec, "H.264");
     }
 
     #[test]
