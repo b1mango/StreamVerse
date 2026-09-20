@@ -13,7 +13,7 @@ import httpx
 class DouyinRequestTests(unittest.IsolatedAsyncioTestCase):
     async def test_detail_uses_minimal_parameters_and_open_platform_headers(self):
         def handle(request):
-            self.assertEqual(dict(request.url.params), {'aid': '6383', 'aweme_id': '123'})
+            self.assertEqual(dict(request.url.params), {'aid': '6383', 'version_code': '290100', 'version_name': '29.1.0', 'aweme_id': '123'})
             self.assertEqual(request.headers['origin'], 'https://open.douyin.com')
             self.assertEqual(request.headers['referer'], 'https://open.douyin.com/')
             self.assertEqual(request.headers['uifid'], 'test-id')
@@ -36,7 +36,7 @@ class DouyinRequestTests(unittest.IsolatedAsyncioTestCase):
             if len(requests) == 1:
                 return httpx.Response(403, text='Blocked by ArgusSecurityPlugin Signature Not Found')
             self.assertEqual(dict(request.url.params), {
-                'aid': '6383', 'sec_user_id': 'author', 'max_cursor': '987', 'count': '20'})
+                'aid': '6383', 'version_code': '290100', 'version_name': '29.1.0', 'sec_user_id': 'author', 'max_cursor': '987', 'count': '20'})
             return httpx.Response(200, json={'status_code': 0, 'aweme_list': [{'aweme_id': '2'}],
                                           'max_cursor': 876, 'has_more': True})
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
@@ -52,3 +52,22 @@ class DouyinRequestTests(unittest.IsolatedAsyncioTestCase):
                 await d.fetch_one_video_fast(client, '123')
             self.assertNotIn('超时', str(error.exception))
             self.assertNotIn('https://', str(error.exception))
+
+
+class DouyinDescriptionTests(unittest.TestCase):
+    def test_recovers_complete_caption_instead_of_removing_warning(self):
+        self.assertEqual(d.extract_description({
+            'desc': '标题 正文……版本过低，升级后可展示全部信息',
+            'item_title': '标题', 'caption': '正文 #话题一 #话题二',
+        }), '标题 正文 #话题一 #话题二')
+
+    def test_preserves_normal_description_and_does_not_duplicate_title(self):
+        self.assertEqual(d.extract_description({'desc': '完整原文', 'caption': '其他'}), '完整原文')
+        self.assertEqual(d.extract_description({
+            'desc': '……版本过低，升级后可展示全部信息',
+            'item_title': '标题', 'caption': '标题 正文',
+        }), '标题 正文')
+
+    def test_does_not_claim_recovery_without_full_content(self):
+        desc = '正文……版本过低，升级后可展示全部信息'
+        self.assertEqual(d.extract_description({'desc': desc}), desc)

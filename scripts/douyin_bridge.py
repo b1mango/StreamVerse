@@ -362,6 +362,17 @@ def build_source_url(detail: dict[str, Any], fallback_url: str) -> str:
     return f"https://www.douyin.com/video/{aweme_id}"
 
 
+def extract_description(detail: dict[str, Any]) -> str:
+    """Prefer the complete response; recover split title/caption for old payloads."""
+    desc = str(detail.get("desc") or "").strip()
+    title = str(detail.get("item_title") or "").strip()
+    caption = str(detail.get("caption") or "").strip()
+    legacy_suffix = "版本过低，升级后可展示全部信息"
+    if desc.endswith(legacy_suffix) and caption and not caption.endswith(legacy_suffix):
+        return caption if not title or caption.startswith(title) else f"{title} {caption}"
+    return desc or title or caption
+
+
 def build_asset_from_detail(
     detail: dict[str, Any], source_url: str, using_login: bool
 ) -> dict[str, Any] | None:
@@ -375,7 +386,7 @@ def build_asset_from_detail(
         return None
 
     author = (detail.get("author") or {}).get("nickname") or "未知作者"
-    title = (detail.get("desc") or detail.get("item_title") or "").strip() or aweme_id
+    title = extract_description(detail) or aweme_id
 
     return {
         "awemeId": aweme_id,
@@ -490,9 +501,12 @@ def douyin_web_headers(cookie_header: str) -> dict[str, str]:
 async def fetch_web_json(
     client: httpx.AsyncClient, endpoint: str, params: dict[str, Any]
 ) -> dict[str, Any]:
-    # Argus now rejects the vendored a_bogus protocol. Keep the supported
-    # open-platform request minimal; do not add the legacy fingerprint fields.
-    response = await client.get(endpoint, params={"aid": "6383", **params})
+    # Keep the open-platform request minimal, but declare the client version:
+    # omitting it makes Douyin truncate desc with a legacy-client warning.
+    # These are protocol versions, independent of StreamVerse's app version.
+    response = await client.get(endpoint, params={
+        "aid": "6383", "version_code": "290100", "version_name": "29.1.0", **params,
+    })
     if response.status_code == 403:
         raise RuntimeError("抖音接口拒绝访问（HTTP 403），请稍后重试或更新登录状态。")
     response.raise_for_status()
