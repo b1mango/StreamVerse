@@ -630,7 +630,7 @@ fn cookie_file_path(platform: &str) -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
-fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -655,7 +655,7 @@ fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
     fs::rename(source, target).map_err(|error| format!("原子替换 Cookie 文件失败：{error}"))
 }
 
@@ -859,13 +859,11 @@ mod tests {
         assert!(validate_critical_cookies("youtube", &valid).is_ok());
 
         // SAPISID 家族单独存在即构成登录态（SAPISIDHASH 鉴权），不再强制要求 LOGIN_INFO
-        let sapisid_only =
-            parse_manual_cookies("youtube", "SAPISID=account; SID=legacy").unwrap();
+        let sapisid_only = parse_manual_cookies("youtube", "SAPISID=account; SID=legacy").unwrap();
         assert!(validate_critical_cookies("youtube", &sapisid_only).is_ok());
 
         // 两族 Cookie 都不在场才判定缺少关键 Cookie
-        let missing_critical =
-            parse_manual_cookies("youtube", "SID=legacy; HSID=hint").unwrap();
+        let missing_critical = parse_manual_cookies("youtube", "SID=legacy; HSID=hint").unwrap();
         assert!(validate_critical_cookies("youtube", &missing_critical).is_err());
     }
 

@@ -5,6 +5,7 @@ mod direct;
 mod engine;
 mod errors;
 mod files;
+mod process;
 mod progress;
 
 pub use controller::{

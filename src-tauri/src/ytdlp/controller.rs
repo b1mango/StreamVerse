@@ -1,5 +1,5 @@
 use crate::{task_store, DownloadTask};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
@@ -21,9 +21,10 @@ struct DownloadPool {
 static DOWNLOAD_POOL: OnceLock<Arc<(Mutex<DownloadPool>, Condvar)>> = OnceLock::new();
 
 fn download_pool() -> Arc<(Mutex<DownloadPool>, Condvar)> {
-    Arc::clone(DOWNLOAD_POOL.get_or_init(|| {
-        Arc::new((Mutex::new(DownloadPool::default()), Condvar::new()))
-    }))
+    Arc::clone(
+        DOWNLOAD_POOL
+            .get_or_init(|| Arc::new((Mutex::new(DownloadPool::default()), Condvar::new()))),
+    )
 }
 
 fn max_concurrent_downloads() -> usize {
@@ -213,6 +214,20 @@ pub(super) fn release_download_slot() {
     }
 }
 
+/// Returns capacity on every exit, including a worker panic.
+pub(super) struct DownloadSlot;
+impl DownloadSlot {
+    pub(super) fn acquire() -> Self {
+        acquire_download_slot();
+        Self
+    }
+}
+impl Drop for DownloadSlot {
+    fn drop(&mut self) {
+        release_download_slot();
+    }
+}
+
 pub(super) fn register_controller(
     store: &TaskControllerStore,
     task_id: &str,
@@ -286,4 +301,211 @@ fn find_controller(
         .get(task_id)
         .cloned()
         .ok_or_else(|| format!("当前任务已经结束，无法{action}。"))
+}
+
+// A reservation outlives terminal-state writes and controller removal, so an old
+// worker cannot overwrite a new retry or write to its output files.
+static ACTIVE_DOWNLOADS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+pub(super) struct DownloadReservation {
+    keys: Vec<String>,
+    store: TaskControllerStore,
+    task_id: String,
+    controller: Arc<TaskController>,
+}
+
+impl DownloadReservation {
+    pub(super) fn reserve_output(&mut self, output_key: String) -> Result<(), String> {
+        let key = format!("output:{output_key}");
+        if self.keys.contains(&key) {
+            return Ok(());
+        }
+        let mut active = ACTIVE_DOWNLOADS.get().unwrap().lock().unwrap();
+        if !active.insert(key.clone()) {
+            return Err("输出位置已有活跃下载，请等待任务结束后重试。".into());
+        }
+        self.keys.push(key);
+        Ok(())
+    }
+
+    pub(super) fn acquire(
+        store: &TaskControllerStore,
+        task_id: &str,
+        output_key: String,
+        controller: Arc<TaskController>,
+    ) -> Result<Self, String> {
+        let keys = vec![format!("task:{task_id}"), format!("output:{output_key}")];
+        let mut active = ACTIVE_DOWNLOADS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap();
+        if keys.iter().any(|key| active.contains(key)) {
+            return Err("同一作品或输出位置已有活跃下载，请等待任务结束后重试。".into());
+        }
+        active.extend(keys.iter().cloned());
+        register_controller(store, task_id, Arc::clone(&controller));
+        Ok(Self {
+            keys,
+            store: Arc::clone(store),
+            task_id: task_id.into(),
+            controller,
+        })
+    }
+}
+
+impl Drop for DownloadReservation {
+    fn drop(&mut self) {
+        let mut controllers = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        if controllers
+            .get(&self.task_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.controller))
+        {
+            controllers.remove(&self.task_id);
+        }
+        drop(controllers);
+        let mut active = ACTIVE_DOWNLOADS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for key in &self.keys {
+            active.remove(key);
+        }
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_task_and_output_cannot_replace_active_controller() {
+        let store = new_task_controller_store();
+        let controller = Arc::new(TaskController::new(false, true));
+        let first = DownloadReservation::acquire(
+            &store,
+            "reservation-test-1",
+            "reservation-output-1".into(),
+            Arc::clone(&controller),
+        )
+        .unwrap();
+        assert!(DownloadReservation::acquire(
+            &store,
+            "reservation-test-1",
+            "another-output".into(),
+            Arc::new(TaskController::new(false, true))
+        )
+        .is_err());
+        assert!(DownloadReservation::acquire(
+            &store,
+            "different-task",
+            "reservation-output-1".into(),
+            Arc::new(TaskController::new(false, true))
+        )
+        .is_err());
+        assert!(Arc::ptr_eq(
+            store.lock().unwrap().get("reservation-test-1").unwrap(),
+            &controller
+        ));
+        // Workers currently unregister immediately before writing terminal state.
+        // The reservation must still forbid a retry throughout that interval.
+        unregister_controller(&store, "reservation-test-1");
+        assert!(DownloadReservation::acquire(
+            &store,
+            "reservation-test-1",
+            "reservation-output-1".into(),
+            Arc::clone(&controller)
+        )
+        .is_err());
+        drop(first);
+        let retry = DownloadReservation::acquire(
+            &store,
+            "reservation-test-1",
+            "reservation-output-1".into(),
+            controller,
+        )
+        .unwrap();
+        drop(retry);
+        assert!(store.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reserves_the_allocated_bundle_path_against_other_retries() {
+        let store = new_task_controller_store();
+        let controller = Arc::new(TaskController::new(false, true));
+        let mut first = DownloadReservation::acquire(
+            &store,
+            "allocated-first",
+            "allocated-title".into(),
+            Arc::clone(&controller),
+        )
+        .unwrap();
+        first.reserve_output("allocated-title (2)".into()).unwrap();
+        assert!(DownloadReservation::acquire(
+            &store,
+            "allocated-retry",
+            "allocated-title (2)".into(),
+            Arc::clone(&controller)
+        )
+        .is_err());
+        drop(first);
+        assert!(DownloadReservation::acquire(
+            &store,
+            "allocated-retry",
+            "allocated-title (2)".into(),
+            controller
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn racing_requests_have_exactly_one_owner_and_release_on_unwind() {
+        let store = new_task_controller_store();
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let reserved = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let start = Arc::clone(&start);
+                let reserved = Arc::clone(&reserved);
+                thread::spawn(move || {
+                    start.wait();
+                    let reservation = DownloadReservation::acquire(
+                        &store,
+                        "reservation-race",
+                        "reservation-race-output".into(),
+                        Arc::new(TaskController::new(false, true)),
+                    );
+                    reserved.wait();
+                    reservation.is_ok()
+                })
+            })
+            .collect();
+        assert_eq!(
+            workers
+                .into_iter()
+                .map(|worker| usize::from(worker.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
+        let result = std::panic::catch_unwind(|| {
+            let _reservation = DownloadReservation::acquire(
+                &store,
+                "reservation-race",
+                "reservation-race-output".into(),
+                Arc::new(TaskController::new(false, true)),
+            )
+            .unwrap();
+            panic!("simulated worker failure");
+        });
+        assert!(result.is_err());
+        assert!(store.lock().unwrap().is_empty());
+        assert!(DownloadReservation::acquire(
+            &store,
+            "reservation-race",
+            "reservation-race-output".into(),
+            Arc::new(TaskController::new(false, true))
+        )
+        .is_ok());
+    }
 }

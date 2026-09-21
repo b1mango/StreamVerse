@@ -1,7 +1,6 @@
 use crate::{DownloadRequest, DownloadTask};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,7 +53,9 @@ pub fn load_task_store() -> TaskStore {
         std::thread::sleep(Duration::from_secs(2));
         if flusher.dirty.swap(false, Ordering::AcqRel) {
             let guard = flusher.entries.lock().unwrap();
-            save_entries(&guard);
+            if save_entries(&guard).is_err() {
+                flusher.dirty.store(true, Ordering::Release);
+            }
         }
     });
 
@@ -101,7 +102,10 @@ pub fn set_replay(store: &TaskStore, task_id: &str, replay: DownloadRequest) {
     if let Some(entry) = guard.iter_mut().find(|entry| entry.task.id == task_id) {
         entry.replay = Some(replay);
         entry.task.can_retry = true;
-        save_entries(&guard);
+        store.dirty.store(true, Ordering::Release);
+        if save_entries(&guard).is_ok() {
+            store.dirty.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -135,7 +139,10 @@ where
         .ok_or_else(|| "未找到对应的下载任务。".to_string())?;
     mutator(&mut entry.task);
     let updated = entry.task.clone();
-    save_entries(&guard);
+    store.dirty.store(true, Ordering::Release);
+    if save_entries(&guard).is_ok() {
+        store.dirty.store(false, Ordering::Release);
+    }
     emit_task_event(
         store,
         TaskEvent::Upsert {
@@ -150,7 +157,10 @@ where
 pub fn flush(store: &TaskStore) {
     if store.dirty.swap(false, Ordering::AcqRel) {
         let guard = store.entries.lock().unwrap();
-        save_entries(&guard);
+        store.dirty.store(true, Ordering::Release);
+        if save_entries(&guard).is_ok() {
+            store.dirty.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -161,7 +171,10 @@ pub fn remove_task(store: &TaskStore, task_id: &str) -> Result<(), String> {
     if guard.len() == len_before {
         return Err("未找到对应的下载任务。".to_string());
     }
-    save_entries(&guard);
+    store.dirty.store(true, Ordering::Release);
+    if save_entries(&guard).is_ok() {
+        store.dirty.store(false, Ordering::Release);
+    }
     emit_task_event(
         store,
         TaskEvent::Delete {
@@ -179,7 +192,10 @@ pub fn clear_finished(store: &TaskStore) -> Vec<DownloadTask> {
             "completed" | "failed" | "cancelled"
         )
     });
-    save_entries(&guard);
+    store.dirty.store(true, Ordering::Release);
+    if save_entries(&guard).is_ok() {
+        store.dirty.store(false, Ordering::Release);
+    }
     let result: Vec<DownloadTask> = guard.iter().map(|entry| entry.task.clone()).collect();
     emit_task_event(
         store,
@@ -208,42 +224,35 @@ pub fn normalize_interrupted_tasks(store: &TaskStore) {
     }
 
     if changed {
-        save_entries(&guard);
+        store.dirty.store(true, Ordering::Release);
+        if save_entries(&guard).is_ok() {
+            store.dirty.store(false, Ordering::Release);
+        }
     }
 }
 
 fn load_entries() -> Vec<StoredTaskEntry> {
     let path = tasks_path();
-    let content = fs::read_to_string(path);
-
-    let mut entries = match content {
-        Ok(raw) => serde_json::from_str::<PersistedTaskFile>(&raw)
-            .map(|file| file.entries)
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+    let mut entries = crate::persistence::load_json::<PersistedTaskFile>(&path).entries;
 
     trim_entries(&mut entries);
     entries
 }
 
 #[cfg(not(test))]
-fn save_entries(entries: &[StoredTaskEntry]) {
-    let path = tasks_path();
-
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    if let Ok(content) = serde_json::to_string_pretty(&PersistedTaskFile {
-        entries: entries.to_vec(),
-    }) {
-        let _ = fs::write(path, content);
-    }
+fn save_entries(entries: &[StoredTaskEntry]) -> Result<(), String> {
+    crate::persistence::save_json(
+        &tasks_path(),
+        &PersistedTaskFile {
+            entries: entries.to_vec(),
+        },
+    )
 }
 
 #[cfg(test)]
-fn save_entries(_entries: &[StoredTaskEntry]) {}
+fn save_entries(_entries: &[StoredTaskEntry]) -> Result<(), String> {
+    Ok(())
+}
 
 fn trim_entries(entries: &mut Vec<StoredTaskEntry>) {
     if entries.len() > MAX_TASK_HISTORY {

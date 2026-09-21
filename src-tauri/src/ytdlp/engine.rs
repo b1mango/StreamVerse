@@ -5,9 +5,8 @@ use super::artifact::{
 #[cfg(test)]
 use super::controller::new_task_controller_store;
 use super::controller::{
-    acquire_download_slot, current_proxy_for_platform, current_speed_limit, register_controller,
-    release_download_slot, spawn_download_job, unregister_controller, TaskController,
-    TaskControllerStore,
+    current_proxy_for_platform, current_speed_limit, spawn_download_job, unregister_controller,
+    DownloadReservation, DownloadSlot, TaskController, TaskControllerStore,
 };
 use super::dash::dash_download_worker;
 use super::direct::direct_download_worker;
@@ -35,13 +34,15 @@ use std::thread;
 use std::time::Duration;
 
 pub(super) fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
     {
+        let mut cmd = Command::new(program);
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        return cmd;
     }
-    cmd
+    #[cfg(not(target_os = "windows"))]
+    Command::new(program)
 }
 
 const ALBUM_IMAGE_CONCURRENCY: usize = 4;
@@ -121,7 +122,9 @@ pub fn download_video(
     if platform == "bilibili"
         && download_options.download_video
         && !is_album
-        && cookie_file.filter(|value| !value.trim().is_empty()).is_none()
+        && cookie_file
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
     {
         return Err(
             "B 站视频下载需要登录态，未登录只能获得低清晰度且容易触发风控。请先在设置中导入 B 站登录 Cookie 后重试。"
@@ -133,14 +136,6 @@ pub fn download_video(
     fs::create_dir_all(&output_dir).map_err(|error| format!("创建下载目录失败：{error}"))?;
 
     let safe_title = parser::sanitize_filename(title);
-    let output_layout = prepare_output_layout(
-        &output_dir,
-        &safe_title,
-        asset_id,
-        &download_options,
-        is_album,
-        request.is_retry,
-    )?;
     let use_direct_download = platform != "youtube" && direct_url.is_some();
     let supports_pause = download_options.download_video && use_direct_download && !is_album;
     let supports_cancel = true;
@@ -172,7 +167,40 @@ pub fn download_video(
     }
 
     let controller = Arc::new(TaskController::new(supports_pause, supports_cancel));
-    register_controller(&controller_store, &task_id, Arc::clone(&controller));
+    let output_key = output_dir
+        .canonicalize()
+        .map_err(|error| format!("读取下载目录失败：{error}"))?
+        .join(if is_album || download_options.needs_bundle_directory() {
+            safe_title.clone()
+        } else {
+            format!("{safe_title} [{asset_id}]")
+        });
+    let mut reservation = DownloadReservation::acquire(
+        &controller_store,
+        &task_id,
+        output_key.to_string_lossy().into_owned(),
+        Arc::clone(&controller),
+    )?;
+    let output_layout = prepare_output_layout(
+        &output_dir,
+        &safe_title,
+        asset_id,
+        &download_options,
+        is_album,
+        request.is_retry,
+    )?;
+    if let Some(bundle_dir) = &output_layout.bundle_dir {
+        let actual_dir = bundle_dir
+            .canonicalize()
+            .map_err(|error| format!("读取作品目录失败：{error}"))?;
+        reservation.reserve_output(actual_dir.to_string_lossy().into_owned())?;
+    }
+    if download_options.download_video && !is_album && !use_direct_download {
+        ensure_ytdlp_available()?;
+        if format_id.is_none_or(|value| value.trim().is_empty()) {
+            return Err("当前下载任务缺少可用的视频格式信息。".into());
+        }
+    }
     let task = DownloadTask {
         id: task_id.clone(),
         platform: platform.to_string(),
@@ -227,7 +255,8 @@ pub fn download_video(
 
     if download_options.download_video && is_album {
         spawn_download_job(move || {
-            acquire_download_slot();
+            let _reservation = reservation;
+            let _slot = DownloadSlot::acquire();
             album_download_worker(
                 task_store,
                 controller_store,
@@ -242,13 +271,13 @@ pub fn download_video(
                 ffmpeg_path,
                 controller,
             );
-            release_download_slot();
         });
         return Ok(task);
     }
 
     if !download_options.download_video {
         spawn_download_job(move || {
+            let _reservation = reservation;
             metadata_only_worker(
                 task_store,
                 controller_store,
@@ -271,7 +300,8 @@ pub fn download_video(
         if let Some(direct_url) = direct_url {
             if let Some(audio_direct_url) = audio_direct_url {
                 spawn_download_job(move || {
-                    acquire_download_slot();
+                    let _reservation = reservation;
+                    let _slot = DownloadSlot::acquire();
                     dash_download_worker(
                         task_store,
                         controller_store,
@@ -291,11 +321,11 @@ pub fn download_video(
                         ffmpeg_path,
                         controller,
                     );
-                    release_download_slot();
                 });
             } else {
                 spawn_download_job(move || {
-                    acquire_download_slot();
+                    let _reservation = reservation;
+                    let _slot = DownloadSlot::acquire();
                     direct_download_worker(
                         task_store,
                         controller_store,
@@ -312,7 +342,6 @@ pub fn download_video(
                         ffmpeg_path,
                         controller,
                     );
-                    release_download_slot();
                 });
             }
 
@@ -320,7 +349,6 @@ pub fn download_video(
         }
     }
 
-    ensure_ytdlp_available()?;
     let format_id_text = format_id_text
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "当前下载任务缺少可用的视频格式信息。".to_string())?;
@@ -340,17 +368,22 @@ pub fn download_video(
     let output_template_text = output_template.to_string_lossy().to_string();
 
     spawn_download_job(move || {
-        acquire_download_slot();
+        let _reservation = reservation;
+        let _slot = DownloadSlot::acquire();
+        if controller.is_cancel_requested() {
+            cancel_task_update(&task_store, &task_id);
+            return;
+        }
         let artifacts = artifacts.clone();
         let ytdlp_binary = match resolve_ytdlp_path() {
             Ok(path) => path,
             Err(error) => {
                 fail_task(&task_store, &task_id, error);
-                release_download_slot();
                 return;
             }
         };
         let mut command = silent_command(ytdlp_binary);
+        super::process::configure_download_process(&mut command);
         extend_runtime_path(&mut command);
         command
             .arg("--ignore-config")
@@ -387,13 +420,11 @@ pub fn download_video(
             if let Err(error) = ensure_local_proxy_available(proxy) {
                 unregister_controller(&controller_store, &task_id);
                 fail_task(&task_store, &task_id, error);
-                release_download_slot();
                 return;
             }
         }
         if let Err(error) = append_platform_ytdlp_args(&mut command, &platform_text) {
             fail_task(&task_store, &task_id, error);
-            release_download_slot();
             return;
         }
         append_ffmpeg_args(&mut command, ffmpeg_path.as_deref());
@@ -424,7 +455,6 @@ pub fn download_video(
             Err(error) => {
                 unregister_controller(&controller_store, &task_id);
                 fail_task(&task_store, &task_id, format!("启动下载失败：{error}"));
-                release_download_slot();
                 return;
             }
         };
@@ -460,7 +490,9 @@ pub fn download_video(
         let task_platform = artifacts.platform.clone();
         let task_cover_url = artifacts.cover_url.clone();
 
+        let readers_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stdout_handle = child.stdout.take().map(|stdout| {
+            let readers_stop = Arc::clone(&readers_stop);
             let task_store = Arc::clone(&task_store);
             let output_path = Arc::clone(&output_path);
             let task_id = task_id.clone();
@@ -469,6 +501,7 @@ pub fn download_video(
             let task_platform = task_platform.clone();
             let task_cover_url = task_cover_url.clone();
             thread::spawn(move || {
+                let stdout = super::process::PollingPipe::new(stdout, readers_stop);
                 read_process_output_lines(stdout, |line| {
                     if let Some(progress) = parse_progress_line(&line) {
                         let message = progress_task_message(&task_platform, &progress.speed_text);
@@ -500,6 +533,7 @@ pub fn download_video(
         });
 
         let stderr_handle = child.stderr.take().map(|stderr| {
+            let readers_stop = Arc::clone(&readers_stop);
             let task_store = Arc::clone(&task_store);
             let stderr_lines = Arc::clone(&stderr_lines);
             let task_id = task_id.clone();
@@ -509,6 +543,7 @@ pub fn download_video(
             let task_cover_url = task_cover_url.clone();
 
             thread::spawn(move || {
+                let stderr = super::process::PollingPipe::new(stderr, readers_stop);
                 read_process_output_lines(stderr, |line| {
                     if let Some(progress) = parse_progress_line(&line) {
                         let message = progress_task_message(&task_platform, &progress.speed_text);
@@ -550,21 +585,17 @@ pub fn download_video(
             }
 
             match child.try_wait() {
-                Ok(Some(status)) => break status,
+                Ok(Some(status)) => break Ok(status),
                 Ok(None) => thread::sleep(Duration::from_millis(180)),
-                Err(error) => {
-                    unregister_controller(&controller_store, &task_id);
-                    fail_task(
-                        &task_store,
-                        &task_id,
-                        format!("等待下载进程结束失败：{error}"),
-                    );
-                    release_download_slot();
-                    return;
-                }
+                Err(error) => break Err(error),
             }
         };
 
+        // Kill remaining descendants before draining pipes. Readers poll and have
+        // their own stop flag, including if a descendant escaped the process group.
+        terminate_process_tree(&mut child);
+        let _ = child.wait();
+        readers_stop.store(true, std::sync::atomic::Ordering::Release);
         if let Some(handle) = stdout_handle {
             let _ = handle.join();
         }
@@ -575,10 +606,20 @@ pub fn download_video(
         if cancelled {
             unregister_controller(&controller_store, &task_id);
             cancel_task_update(&task_store, &task_id);
-            release_download_slot();
             return;
         }
 
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                fail_task(
+                    &task_store,
+                    &task_id,
+                    format!("等待下载进程结束失败：{error}"),
+                );
+                return;
+            }
+        };
         if status.success() {
             let reported_path = output_path.lock().unwrap().clone();
             let Some(saved_path) =
@@ -590,7 +631,6 @@ pub fn download_video(
                     &task_id,
                     "yt-dlp 已退出，但没有找到可播放的最终视频文件。".to_string(),
                 );
-                release_download_slot();
                 return;
             };
             let mut artifact_summary = persist_download_artifacts(
@@ -657,7 +697,6 @@ pub fn download_video(
             unregister_controller(&controller_store, &task_id);
             fail_task(&task_store, &task_id, reason);
         }
-        release_download_slot();
     });
 
     Ok(task)
@@ -743,7 +782,11 @@ fn album_download_worker(
                 .collect();
             handles
                 .into_iter()
-                .map(|handle| handle.join().unwrap_or_else(|_| (usize::MAX, Err("图片下载线程异常退出。".to_string()))))
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| (usize::MAX, Err("图片下载线程异常退出。".to_string())))
+                })
                 .collect::<Vec<_>>()
         });
 
@@ -1087,24 +1130,7 @@ fn ensure_local_proxy_available(proxy_url: &str) -> Result<(), String> {
 }
 
 fn terminate_process_tree(child: &mut Child) {
-    let process_id = child.id().to_string();
-    #[cfg(target_os = "windows")]
-    {
-        let _ = silent_command("taskkill")
-            .args(["/PID", process_id.as_str(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = silent_command("pkill")
-            .args(["-TERM", "-P", process_id.as_str()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
+    super::process::terminate_process_tree(child);
 }
 
 fn append_auth_args(
@@ -1233,7 +1259,7 @@ pub(super) fn cancel_task_update(task_store: &task_store::TaskStore, task_id: &s
     let _ = task_store::mutate_task(task_store, task_id, |task| {
         task.status = "cancelled".to_string();
         task.eta_text = "已取消".to_string();
-        task.message = Some("下载已取消，临时文件已清理。".to_string());
+        task.message = Some("下载已取消。".to_string());
     });
 }
 
@@ -1271,6 +1297,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::controller::parse_speed_limit_bytes;
     use super::{
         album_download_worker, append_external_downloader_args, append_platform_ytdlp_args,
         aria2c_connection_args, dash_download_worker, direct_download_worker,
@@ -1278,7 +1305,6 @@ mod tests {
         persist_download_artifacts, prepare_output_layout, read_process_output_lines,
         silent_command, DownloadArtifacts, TaskController,
     };
-    use super::super::controller::parse_speed_limit_bytes;
     use crate::{provider_runtime, task_store, DownloadContentSelection};
     use std::fs;
     use std::io::Cursor;
@@ -1468,7 +1494,8 @@ mod tests {
         let controller_store = new_task_controller_store();
         let options = video_only_options();
         let layout =
-            prepare_output_layout(&output_dir, "测试下载", "aweme-1", &options, false, false).unwrap();
+            prepare_output_layout(&output_dir, "测试下载", "aweme-1", &options, false, false)
+                .unwrap();
 
         direct_download_worker(
             Arc::clone(&task_store),
@@ -1523,7 +1550,11 @@ mod tests {
                         .next()
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap_or("/");
-                    let payload: &[u8] = if path == "/2.jpg" { b"second" } else { b"first" };
+                    let payload: &[u8] = if path == "/2.jpg" {
+                        b"second"
+                    } else {
+                        b"first"
+                    };
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         payload.len()
@@ -1541,7 +1572,8 @@ mod tests {
         let controller_store = new_task_controller_store();
         let options = video_only_options();
         let layout =
-            prepare_output_layout(&output_dir, "测试图册", "album-1", &options, true, false).unwrap();
+            prepare_output_layout(&output_dir, "测试图册", "album-1", &options, true, false)
+                .unwrap();
 
         album_download_worker(
             Arc::clone(&task_store),
@@ -1672,8 +1704,15 @@ mod tests {
         let task_store = task_store::new_empty_task_store();
         let controller_store = new_task_controller_store();
         let options = video_only_options();
-        let layout =
-            prepare_output_layout(&output_dir, "测试合流下载", "aweme-2", &options, false, false).unwrap();
+        let layout = prepare_output_layout(
+            &output_dir,
+            "测试合流下载",
+            "aweme-2",
+            &options,
+            false,
+            false,
+        )
+        .unwrap();
         let ffmpeg_path = provider_runtime::resolve_sidecar("ffmpeg")
             .ok()
             .and_then(|path| path.to_str().map(str::to_string));
@@ -1774,7 +1813,8 @@ mod tests {
         fs::create_dir_all(&output_dir).unwrap();
         let options = bundle_options();
         let layout =
-            prepare_output_layout(&output_dir, "测试下载", "aweme-1", &options, false, false).unwrap();
+            prepare_output_layout(&output_dir, "测试下载", "aweme-1", &options, false, false)
+                .unwrap();
         let video_path = layout.video_path("mp4");
         fs::write(&video_path, b"hello").unwrap();
 
@@ -1847,5 +1887,4 @@ mod tests {
             download_caption: true,
         }
     }
-
 }

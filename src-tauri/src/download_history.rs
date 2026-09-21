@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -167,24 +166,16 @@ fn current_timestamp() -> String {
 
 fn load_entries() -> Vec<DownloadHistoryEntry> {
     let path = history_path();
-    match fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str::<PersistedHistory>(&raw)
-            .map(|file| file.entries)
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+    crate::persistence::load_json::<PersistedHistory>(&path).entries
 }
 
 fn save_history(entries: &[DownloadHistoryEntry]) {
-    let path = history_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(content) = serde_json::to_string_pretty(&PersistedHistory {
-        entries: entries.to_vec(),
-    }) {
-        let _ = fs::write(path, content);
-    }
+    let _ = crate::persistence::save_json(
+        &history_path(),
+        &PersistedHistory {
+            entries: entries.to_vec(),
+        },
+    );
 }
 
 fn history_path() -> PathBuf {

@@ -202,8 +202,16 @@ fn analysis_progress_dir() -> PathBuf {
     settings::app_data_root().join("analysis-progress")
 }
 
-fn analysis_progress_path(session_id: &str) -> PathBuf {
-    analysis_progress_dir().join(format!("{session_id}.json"))
+fn analysis_progress_path(session_id: &str) -> Result<PathBuf, String> {
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("解析会话标识无效。".to_string());
+    }
+    Ok(analysis_progress_dir().join(format!("{session_id}.json")))
 }
 
 fn write_analysis_progress(
@@ -212,11 +220,11 @@ fn write_analysis_progress(
     total: u32,
     message: &str,
 ) -> Result<(), String> {
-    let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
+    let Some(session_id) = session_id else {
         return Ok(());
     };
 
-    let path = analysis_progress_path(session_id);
+    let path = analysis_progress_path(session_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建解析进度目录失败：{error}"))?;
     }
@@ -233,7 +241,7 @@ fn write_analysis_progress(
 
 #[tauri::command]
 fn get_analysis_progress(session_id: String) -> Result<Option<AnalysisProgress>, String> {
-    let path = analysis_progress_path(&session_id);
+    let path = analysis_progress_path(&session_id)?;
     if !path.is_file() {
         return Ok(None);
     }
@@ -246,7 +254,7 @@ fn get_analysis_progress(session_id: String) -> Result<Option<AnalysisProgress>,
 
 #[tauri::command]
 fn clear_analysis_progress(session_id: String) -> Result<(), String> {
-    let path = analysis_progress_path(&session_id);
+    let path = analysis_progress_path(&session_id)?;
     if path.is_file() {
         fs::remove_file(path).map_err(|error| format!("清理解析进度失败：{error}"))?;
     }
@@ -395,17 +403,23 @@ async fn check_for_update(state: tauri::State<'_, AppState>) -> Result<UpdateChe
             .user_agent(concat!("StreamVerse/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(12));
         if let Some(proxy) = settings::effective_proxy_url(proxy_url.as_deref()) {
-            builder = builder
-                .proxy(reqwest::Proxy::all(&proxy).map_err(|error| format!("代理配置无效：{error}"))?);
+            builder = builder.proxy(
+                reqwest::Proxy::all(&proxy).map_err(|error| format!("代理配置无效：{error}"))?,
+            );
         }
-        let client = builder.build().map_err(|error| format!("初始化更新检查失败：{error}"))?;
+        let client = builder
+            .build()
+            .map_err(|error| format!("初始化更新检查失败：{error}"))?;
         let response = client
             .get("https://api.github.com/repos/b1mango/StreamVerse/releases/latest")
             .header("Accept", "application/vnd.github+json")
             .send()
             .map_err(|error| format!("无法连接更新服务器：{error}"))?;
         if !response.status().is_success() {
-            return Err(format!("更新服务器返回错误（HTTP {}）。", response.status()));
+            return Err(format!(
+                "更新服务器返回错误（HTTP {}）。",
+                response.status()
+            ));
         }
         let payload: serde_json::Value = serde_json::from_str(
             &response
@@ -543,7 +557,7 @@ async fn analyze_input(
     let sid = session_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let progress_file = sid.as_deref().map(analysis_progress_path);
+        let progress_file = sid.as_deref().map(analysis_progress_path).transpose()?;
         let _ = write_analysis_progress(sid.as_deref(), 0, 1, "正在解析作品链接…");
         let run = || {
             providers::analyze_input(
@@ -562,8 +576,12 @@ async fn analyze_input(
                         try_refresh_browser_auth(&settings.platform_auth, platform).is_ok()
                     }) =>
             {
-                let _ =
-                    write_analysis_progress(sid.as_deref(), 0, 1, "登录态已自动更新，正在重试解析…");
+                let _ = write_analysis_progress(
+                    sid.as_deref(),
+                    0,
+                    1,
+                    "登录态已自动更新，正在重试解析…",
+                );
                 run()
             }
             other => other,
@@ -592,11 +610,22 @@ async fn analyze_profile_input(
     let settings = state.settings.lock().unwrap().clone();
     let sid = session_id.clone();
     let proxy_url = settings::effective_proxy_url(settings.proxy_url.as_deref());
-    let progress_file = session_id.as_deref().map(analysis_progress_path);
+    let progress_file = session_id
+        .as_deref()
+        .map(analysis_progress_path)
+        .transpose()?;
     // YouTube 合集与频道主页共用这个入口，进度文案按链接形态区分
     let is_playlist = raw_input.contains("playlist");
-    let reading_message = if is_playlist { "正在读取合集视频…" } else { "正在读取主页视频…" };
-    let done_message = if is_playlist { "合集视频解析完成。" } else { "主页视频解析完成。" };
+    let reading_message = if is_playlist {
+        "正在读取合集视频…"
+    } else {
+        "正在读取主页视频…"
+    };
+    let done_message = if is_playlist {
+        "合集视频解析完成。"
+    } else {
+        "主页视频解析完成。"
+    };
     let _ = write_analysis_progress(session_id.as_deref(), 0, 0, reading_message);
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -1641,5 +1670,33 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|candidate| candidate.ends_with("/hqdefault.jpg")));
+    }
+    #[test]
+    fn analysis_session_rejects_paths_before_io() {
+        for id in [
+            "",
+            " ",
+            "../outside",
+            "..\\outside",
+            "/tmp/out",
+            "a/b",
+            "a:b",
+            ".",
+            "你好",
+        ] {
+            assert!(super::analysis_progress_path(id).is_err(), "{id}");
+            assert!(super::get_analysis_progress(id.to_string()).is_err());
+            assert!(super::clear_analysis_progress(id.to_string()).is_err());
+            assert!(super::write_analysis_progress(Some(id), 0, 1, "test").is_err());
+        }
+        assert!(super::analysis_progress_path(&"a".repeat(129)).is_err());
+        let id = "2032bd3d-bb0d-436b-9eff-947260de6001";
+        assert_eq!(
+            super::analysis_progress_path(id)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            format!("{id}.json").as_str()
+        );
     }
 }

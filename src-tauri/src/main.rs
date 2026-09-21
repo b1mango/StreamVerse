@@ -6,6 +6,7 @@ mod download_history;
 mod formats;
 mod media_contract;
 mod parser;
+mod persistence;
 mod platforms;
 mod provider_runtime;
 mod providers;
