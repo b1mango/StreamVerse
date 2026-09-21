@@ -226,7 +226,7 @@ h1, h2, h3, p { margin: 0; }
 .cover-placeholder { display: grid; place-items: center; width: 100%; height: 100%; color: var(--platform-accent); background: var(--surface); }
 .cover-placeholder .platform-icon { width: 52px; height: 52px; }
 .result-detail { min-width: 0; align-self: center; }
-.result-detail h2 { margin-top: 8px; font: 600 21px/1.28 var(--font-sans); overflow-wrap: anywhere; }
+.result-detail h2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; max-height: calc(3 * 1.28 * 21px); margin-top: 8px; font: 600 21px/1.28 var(--font-sans); overflow-wrap: anywhere; }
 .result-detail > p { margin-top: 8px; color: var(--muted); font-size: 12px; }
 
 .format-list { margin-top: 20px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); }
