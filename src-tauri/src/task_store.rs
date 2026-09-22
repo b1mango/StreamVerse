@@ -152,18 +152,6 @@ where
     Ok(updated)
 }
 
-/// Force any pending dirty writes to disk immediately.
-#[allow(dead_code)]
-pub fn flush(store: &TaskStore) {
-    if store.dirty.swap(false, Ordering::AcqRel) {
-        let guard = store.entries.lock().unwrap();
-        store.dirty.store(true, Ordering::Release);
-        if save_entries(&guard).is_ok() {
-            store.dirty.store(false, Ordering::Release);
-        }
-    }
-}
-
 pub fn remove_task(store: &TaskStore, task_id: &str) -> Result<(), String> {
     let mut guard = store.entries.lock().unwrap();
     let len_before = guard.len();

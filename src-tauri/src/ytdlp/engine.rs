@@ -1585,6 +1585,126 @@ mod tests {
         assert_eq!(reader.join().unwrap(), b"output:final.mp4\n");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cancel_request_kills_process_group_and_releases_reader_threads() {
+        // 接近真实 worker 路径：独立进程组启动带孙进程的长驻命令，
+        // PollingPipe 读者 + wait_for_child_exit + 真实 terminate_process_tree
+        fn spawn_pipe_reader<R>(
+            pipe: R,
+            stop: Arc<std::sync::atomic::AtomicBool>,
+            done: Arc<std::sync::atomic::AtomicU8>,
+        ) -> thread::JoinHandle<()>
+        where
+            R: Read + std::os::fd::AsRawFd + Send + 'static,
+        {
+            thread::spawn(move || {
+                let mut pipe = super::super::process::PollingPipe::new(pipe, stop);
+                let _ = pipe.read_to_end(&mut Vec::new());
+                done.fetch_add(1, std::sync::atomic::Ordering::Release);
+            })
+        }
+
+        let mut command = std::process::Command::new("sh");
+        super::super::process::configure_download_process(&mut command);
+        let mut child = command
+            .args(["-c", "sleep 30 & wait"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i32;
+
+        let task_store = task_store::new_empty_task_store();
+        let task_id = "task-cancel-integration";
+        super::upsert_task(
+            &task_store,
+            crate::DownloadTask {
+                id: task_id.to_string(),
+                platform: "douyin".to_string(),
+                title: "取消集成测试".to_string(),
+                progress: 1,
+                speed_text: "-".to_string(),
+                format_label: "视频".to_string(),
+                status: "downloading".to_string(),
+                eta_text: "准备中".to_string(),
+                message: None,
+                output_path: None,
+                supports_pause: false,
+                supports_cancel: true,
+                can_retry: true,
+                cover_url: None,
+            },
+        );
+
+        let readers_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers_done = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let readers = vec![
+            spawn_pipe_reader(
+                child.stdout.take().unwrap(),
+                Arc::clone(&readers_stop),
+                Arc::clone(&readers_done),
+            ),
+            spawn_pipe_reader(
+                child.stderr.take().unwrap(),
+                Arc::clone(&readers_stop),
+                Arc::clone(&readers_done),
+            ),
+        ];
+
+        let controller = TaskController::new(false, true);
+        let canceller = thread::spawn({
+            let controller = controller.clone();
+            move || {
+                thread::sleep(Duration::from_millis(200));
+                controller.request_cancel();
+            }
+        });
+
+        let (cancelled, status) = super::wait_for_child_exit(
+            &mut child,
+            &controller,
+            &readers_stop,
+            &readers_done,
+            2,
+            super::terminate_process_tree,
+        );
+        canceller.join().unwrap();
+
+        assert!(cancelled);
+        assert!(!status.unwrap().success());
+
+        // 与 worker 取消分支一致：写取消终态
+        super::cancel_task_update(&task_store, task_id);
+
+        // 读者线程必须在有界时间内退出
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while readers_done.load(std::sync::atomic::Ordering::Acquire) < 2
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(readers_done.load(std::sync::atomic::Ordering::Acquire), 2);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+
+        // 整个进程组（含孙进程 sleep）都被终止；zombie 被回收可能有短暂延迟，轮询兜底
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = unsafe { libc::kill(-pgid, 0) };
+            if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "取消后进程组仍有存活进程");
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let tasks = task_store::list_tasks(&task_store);
+        let task = tasks.iter().find(|task| task.id == task_id).unwrap();
+        assert_eq!(task.status, "cancelled");
+    }
+
     #[test]
     fn ignores_invalid_speed_limits() {
         assert_eq!(parse_speed_limit_bytes(Some("0")), None);

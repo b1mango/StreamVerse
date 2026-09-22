@@ -1,7 +1,7 @@
 use rookie::enums::Cookie;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -637,6 +637,8 @@ pub(crate) fn atomic_replace(source: &Path, target: &Path) -> Result<(), String>
     };
     let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    // MOVEFILE_WRITE_THROUGH 让移动在返回前写穿到磁盘，rename 本身的持久性
+    // 已由该标志保证，无需像 Unix 分支那样再 fsync 父目录。
     let result = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -656,7 +658,15 @@ pub(crate) fn atomic_replace(source: &Path, target: &Path) -> Result<(), String>
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn atomic_replace(source: &Path, target: &Path) -> Result<(), String> {
-    fs::rename(source, target).map_err(|error| format!("原子替换 Cookie 文件失败：{error}"))
+    fs::rename(source, target).map_err(|error| format!("原子替换 Cookie 文件失败：{error}"))?;
+    // rename 只改目录项，需 fsync 父目录才能保证替换本身落盘（否则断电可能丢整个文件）。
+    // fsync 失败时替换已完成，仅降低断电持久性，故尽力而为、不改变调用方语义。
+    if let Some(parent) = target.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

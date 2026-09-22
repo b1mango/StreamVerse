@@ -202,16 +202,22 @@ fn analysis_progress_dir() -> PathBuf {
     settings::app_data_root().join("analysis-progress")
 }
 
-fn analysis_progress_path(session_id: &str) -> Result<PathBuf, String> {
-    if session_id.is_empty()
-        || session_id.len() > 128
+/// 空白（含全空白）会话标识视为无会话：返回 Ok(None)，调用方跳过进度持久化；
+/// 非空白但含非法字符的标识仍然拒绝，防止路径穿越。
+fn analysis_progress_path(session_id: &str) -> Result<Option<PathBuf>, String> {
+    if session_id.trim().is_empty() {
+        return Ok(None);
+    }
+    if session_id.len() > 128
         || !session_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
         return Err("解析会话标识无效。".to_string());
     }
-    Ok(analysis_progress_dir().join(format!("{session_id}.json")))
+    Ok(Some(
+        analysis_progress_dir().join(format!("{session_id}.json")),
+    ))
 }
 
 fn write_analysis_progress(
@@ -224,7 +230,9 @@ fn write_analysis_progress(
         return Ok(());
     };
 
-    let path = analysis_progress_path(session_id)?;
+    let Some(path) = analysis_progress_path(session_id)? else {
+        return Ok(());
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建解析进度目录失败：{error}"))?;
     }
@@ -241,7 +249,9 @@ fn write_analysis_progress(
 
 #[tauri::command]
 fn get_analysis_progress(session_id: String) -> Result<Option<AnalysisProgress>, String> {
-    let path = analysis_progress_path(&session_id)?;
+    let Some(path) = analysis_progress_path(&session_id)? else {
+        return Ok(None);
+    };
     if !path.is_file() {
         return Ok(None);
     }
@@ -254,7 +264,9 @@ fn get_analysis_progress(session_id: String) -> Result<Option<AnalysisProgress>,
 
 #[tauri::command]
 fn clear_analysis_progress(session_id: String) -> Result<(), String> {
-    let path = analysis_progress_path(&session_id)?;
+    let Some(path) = analysis_progress_path(&session_id)? else {
+        return Ok(());
+    };
     if path.is_file() {
         fs::remove_file(path).map_err(|error| format!("清理解析进度失败：{error}"))?;
     }
@@ -557,7 +569,11 @@ async fn analyze_input(
     let sid = session_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let progress_file = sid.as_deref().map(analysis_progress_path).transpose()?;
+        let progress_file = sid
+            .as_deref()
+            .map(analysis_progress_path)
+            .transpose()?
+            .flatten();
         let _ = write_analysis_progress(sid.as_deref(), 0, 1, "正在解析作品链接…");
         let run = || {
             providers::analyze_input(
@@ -613,7 +629,8 @@ async fn analyze_profile_input(
     let progress_file = session_id
         .as_deref()
         .map(analysis_progress_path)
-        .transpose()?;
+        .transpose()?
+        .flatten();
     // YouTube 合集与频道主页共用这个入口，进度文案按链接形态区分
     let is_playlist = raw_input.contains("playlist");
     let reading_message = if is_playlist {
@@ -1674,8 +1691,6 @@ mod tests {
     #[test]
     fn analysis_session_rejects_paths_before_io() {
         for id in [
-            "",
-            " ",
             "../outside",
             "..\\outside",
             "/tmp/out",
@@ -1694,9 +1709,25 @@ mod tests {
         assert_eq!(
             super::analysis_progress_path(id)
                 .unwrap()
+                .unwrap()
                 .file_name()
                 .unwrap(),
             format!("{id}.json").as_str()
         );
+    }
+    #[test]
+    fn blank_analysis_session_is_tolerated_as_no_session() {
+        // 空白/全空白 id 视为无会话：跳过进度而不是让整个解析失败
+        for id in ["", " ", "  \t  "] {
+            assert!(super::analysis_progress_path(id).unwrap().is_none(), "{id}");
+            assert!(super::get_analysis_progress(id.to_string()).unwrap().is_none());
+            super::clear_analysis_progress(id.to_string()).unwrap();
+            super::write_analysis_progress(Some(id), 0, 1, "test").unwrap();
+        }
+        super::write_analysis_progress(None, 0, 1, "test").unwrap();
+        // 非空白但含非法字符（含两侧带空白的 id）仍然拒绝
+        for id in ["a b", " abc ", "../outside"] {
+            assert!(super::analysis_progress_path(id).is_err(), "{id}");
+        }
     }
 }
