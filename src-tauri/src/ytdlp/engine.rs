@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(super) fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     #[cfg(target_os = "windows")]
@@ -491,8 +491,10 @@ pub fn download_video(
         let task_cover_url = artifacts.cover_url.clone();
 
         let readers_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers_done = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let stdout_handle = child.stdout.take().map(|stdout| {
             let readers_stop = Arc::clone(&readers_stop);
+            let readers_done = Arc::clone(&readers_done);
             let task_store = Arc::clone(&task_store);
             let output_path = Arc::clone(&output_path);
             let task_id = task_id.clone();
@@ -529,11 +531,13 @@ pub fn download_video(
                         *guard = Some(path.trim().to_string());
                     }
                 });
+                readers_done.fetch_add(1, std::sync::atomic::Ordering::Release);
             })
         });
 
         let stderr_handle = child.stderr.take().map(|stderr| {
             let readers_stop = Arc::clone(&readers_stop);
+            let readers_done = Arc::clone(&readers_done);
             let task_store = Arc::clone(&task_store);
             let stderr_lines = Arc::clone(&stderr_lines);
             let task_id = task_id.clone();
@@ -574,28 +578,19 @@ pub fn download_video(
                         }
                     }
                 });
+                readers_done.fetch_add(1, std::sync::atomic::Ordering::Release);
             })
         });
 
-        let mut cancelled = false;
-        let status = loop {
-            if controller.is_cancel_requested() {
-                cancelled = true;
-                terminate_process_tree(&mut child);
-            }
-
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) => thread::sleep(Duration::from_millis(180)),
-                Err(error) => break Err(error),
-            }
-        };
-
-        // Kill remaining descendants before draining pipes. Readers poll and have
-        // their own stop flag, including if a descendant escaped the process group.
-        terminate_process_tree(&mut child);
-        let _ = child.wait();
-        readers_stop.store(true, std::sync::atomic::Ordering::Release);
+        let expected_readers = u8::from(stdout_handle.is_some()) + u8::from(stderr_handle.is_some());
+        let (cancelled, status) = wait_for_child_exit(
+            &mut child,
+            &controller,
+            &readers_stop,
+            &readers_done,
+            expected_readers,
+            terminate_process_tree,
+        );
         if let Some(handle) = stdout_handle {
             let _ = handle.join();
         }
@@ -1133,6 +1128,51 @@ fn terminate_process_tree(child: &mut Child) {
     super::process::terminate_process_tree(child);
 }
 
+/// Waits for the download child, terminating its process tree at most once.
+/// Once `try_wait` reaps the child its PID/PGID can be reused by an unrelated
+/// process, so a late group-kill is only safe while readers still report no
+/// EOF, meaning descendants keep the group alive. Otherwise `readers_stop`
+/// drains and releases the reader threads on its own.
+fn wait_for_child_exit(
+    child: &mut Child,
+    controller: &TaskController,
+    readers_stop: &std::sync::atomic::AtomicBool,
+    readers_done: &std::sync::atomic::AtomicU8,
+    expected_readers: u8,
+    terminate: impl Fn(&mut Child),
+) -> (bool, std::io::Result<std::process::ExitStatus>) {
+    let mut cancelled = false;
+    let mut terminated = false;
+    let status = loop {
+        if controller.is_cancel_requested() && !terminated {
+            cancelled = true;
+            terminated = true;
+            terminate(child);
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => thread::sleep(Duration::from_millis(180)),
+            Err(error) => break Err(error),
+        }
+    };
+
+    if !terminated {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while readers_done.load(std::sync::atomic::Ordering::Acquire) < expected_readers
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        if readers_done.load(std::sync::atomic::Ordering::Acquire) < expected_readers {
+            terminate(child);
+        }
+    }
+    let _ = child.wait();
+    readers_stop.store(true, std::sync::atomic::Ordering::Release);
+    (cancelled, status)
+}
+
 fn append_auth_args(
     command: &mut Command,
     _cookie_browser: Option<&str>,
@@ -1415,6 +1455,134 @@ mod tests {
         let status = child.wait().unwrap();
 
         assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_exit_skips_process_tree_termination() {
+        let mut command = std::process::Command::new("sh");
+        super::super::process::configure_download_process(&mut command);
+        let mut child = command
+            .args(["-c", "printf 'output:done.mp4\\n'"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let readers_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers_done = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let pipe = super::super::process::PollingPipe::new(
+            child.stdout.take().unwrap(),
+            Arc::clone(&readers_stop),
+        );
+        let done = Arc::clone(&readers_done);
+        let reader = thread::spawn(move || {
+            let mut pipe = pipe;
+            let mut output = Vec::new();
+            pipe.read_to_end(&mut output).unwrap();
+            done.fetch_add(1, std::sync::atomic::Ordering::Release);
+            output
+        });
+        let terminations = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&terminations);
+        let (cancelled, status) = super::wait_for_child_exit(
+            &mut child,
+            &TaskController::new(false, true),
+            &readers_stop,
+            &readers_done,
+            1,
+            move |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+
+        assert!(!cancelled);
+        assert!(status.unwrap().success());
+        assert_eq!(terminations.load(Ordering::Relaxed), 0);
+        assert_eq!(reader.join().unwrap(), b"output:done.mp4\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_terminates_process_tree_only_once() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let controller = TaskController::new(false, true);
+        controller.request_cancel();
+        let terminations = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&terminations);
+        // terminate 不真正杀死进程（模拟进程卡在不可中断状态）：等待循环空转
+        // 多轮期间只能调用一次 terminate，由外部延迟杀死子进程让循环退出
+        let killer = thread::spawn({
+            let pid = child.id() as i32;
+            move || {
+                thread::sleep(Duration::from_millis(600));
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        });
+        let readers_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers_done = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let (cancelled, status) = super::wait_for_child_exit(
+            &mut child,
+            &controller,
+            &readers_stop,
+            &readers_done,
+            0,
+            move |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+        killer.join().unwrap();
+
+        assert!(cancelled);
+        assert!(!status.unwrap().success());
+        assert_eq!(terminations.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lingering_descendant_still_triggers_single_tree_termination() {
+        let mut command = std::process::Command::new("sh");
+        super::super::process::configure_download_process(&mut command);
+        let mut child = command
+            .args(["-c", "sleep 30 & printf 'output:final.mp4\\n'"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let readers_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers_done = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let pipe = super::super::process::PollingPipe::new(
+            child.stdout.take().unwrap(),
+            Arc::clone(&readers_stop),
+        );
+        let done = Arc::clone(&readers_done);
+        let reader = thread::spawn(move || {
+            let mut pipe = pipe;
+            let mut output = Vec::new();
+            let _ = pipe.read_to_end(&mut output);
+            done.fetch_add(1, std::sync::atomic::Ordering::Release);
+            output
+        });
+        let terminations = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&terminations);
+        let (cancelled, status) = super::wait_for_child_exit(
+            &mut child,
+            &TaskController::new(false, true),
+            &readers_stop,
+            &readers_done,
+            1,
+            move |child| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                super::terminate_process_tree(child);
+            },
+        );
+
+        assert!(!cancelled);
+        assert!(status.unwrap().success());
+        assert_eq!(terminations.load(Ordering::Relaxed), 1);
+        assert_eq!(reader.join().unwrap(), b"output:final.mp4\n");
     }
 
     #[test]

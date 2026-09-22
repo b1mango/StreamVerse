@@ -212,6 +212,25 @@ mod tests {
     fn draining_retains_tail_even_when_consumer_is_slow() {
         use std::io::Write;
         let (read, mut write) = std::os::unix::net::UnixStream::pair().unwrap();
+        // macOS 本地 socket 缓冲默认仅 8192，小于负载时 write_all 会永久阻塞
+        unsafe {
+            let size = 65_536 as libc::c_int;
+            let len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            for fd in [read.as_raw_fd(), write.as_raw_fd()] {
+                for opt in [libc::SO_RCVBUF, libc::SO_SNDBUF] {
+                    assert_eq!(
+                        libc::setsockopt(
+                            fd,
+                            libc::SOL_SOCKET,
+                            opt,
+                            &size as *const _ as *const libc::c_void,
+                            len,
+                        ),
+                        0
+                    );
+                }
+            }
+        }
         let expected = vec![b'x'; 16_384];
         write.write_all(&expected).unwrap();
         let stop = Arc::new(AtomicBool::new(true));

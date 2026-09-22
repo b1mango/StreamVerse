@@ -314,13 +314,23 @@ pub(super) struct DownloadReservation {
     controller: Arc<TaskController>,
 }
 
+// 大小写不敏感文件系统（APFS、Windows）上 Title 与 TITLE 指向同一文件，
+// 输出路径键统一小写归一；acquire 与 reserve_output 必须共用这一个键函数。
+fn output_reservation_key(output_key: &str) -> String {
+    format!("output:{}", output_key.to_lowercase())
+}
+
 impl DownloadReservation {
     pub(super) fn reserve_output(&mut self, output_key: String) -> Result<(), String> {
-        let key = format!("output:{output_key}");
+        let key = output_reservation_key(&output_key);
         if self.keys.contains(&key) {
             return Ok(());
         }
-        let mut active = ACTIVE_DOWNLOADS.get().unwrap().lock().unwrap();
+        let mut active = ACTIVE_DOWNLOADS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !active.insert(key.clone()) {
             return Err("输出位置已有活跃下载，请等待任务结束后重试。".into());
         }
@@ -334,11 +344,11 @@ impl DownloadReservation {
         output_key: String,
         controller: Arc<TaskController>,
     ) -> Result<Self, String> {
-        let keys = vec![format!("task:{task_id}"), format!("output:{output_key}")];
+        let keys = vec![format!("task:{task_id}"), output_reservation_key(&output_key)];
         let mut active = ACTIVE_DOWNLOADS
             .get_or_init(Default::default)
             .lock()
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         if keys.iter().any(|key| active.contains(key)) {
             return Err("同一作品或输出位置已有活跃下载，请等待任务结束后重试。".into());
         }
@@ -454,6 +464,43 @@ mod reservation_tests {
             "allocated-retry",
             "allocated-title (2)".into(),
             controller
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn output_reservation_keys_ignore_case_for_case_insensitive_filesystems() {
+        let store = new_task_controller_store();
+        let mut first = DownloadReservation::acquire(
+            &store,
+            "case-task-1",
+            "/downloads/Case-Title".into(),
+            Arc::new(TaskController::new(false, true)),
+        )
+        .unwrap();
+        assert!(DownloadReservation::acquire(
+            &store,
+            "case-task-2",
+            "/Downloads/case-title".into(),
+            Arc::new(TaskController::new(false, true))
+        )
+        .is_err());
+        first
+            .reserve_output("/downloads/Case-Title (2)".into())
+            .unwrap();
+        assert!(DownloadReservation::acquire(
+            &store,
+            "case-task-3",
+            "/Downloads/case-title (2)".into(),
+            Arc::new(TaskController::new(false, true))
+        )
+        .is_err());
+        drop(first);
+        assert!(DownloadReservation::acquire(
+            &store,
+            "case-task-3",
+            "/Downloads/case-title (2)".into(),
+            Arc::new(TaskController::new(false, true))
         )
         .is_ok());
     }

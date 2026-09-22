@@ -4656,6 +4656,7 @@ name = "streamverse"
 version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
