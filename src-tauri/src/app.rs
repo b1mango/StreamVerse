@@ -186,9 +186,9 @@ struct AnalysisProgress {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     tasks: task_store::TaskStore,
-    settings: Arc<Mutex<settings::AppSettings>>,
+    pub(crate) settings: Arc<Mutex<settings::AppSettings>>,
     controllers: ytdlp::TaskControllerStore,
     history: download_history::DownloadHistoryStore,
 }
@@ -531,15 +531,25 @@ fn is_auth_class_error(message: &str) -> bool {
         "关键 cookie",
         "登录态已失效",
         "需要登录",
+        "未登录",
     ];
     PATTERNS.iter().any(|pattern| lower.contains(pattern))
 }
 
 /// 用设置里“始终授权”的浏览器来源静默重取 Cookie；未授权过则返回 Err。
 fn try_refresh_browser_auth(
+    live_settings: &Mutex<settings::AppSettings>,
     platform_auth: &BTreeMap<String, settings::PlatformAuthSettings>,
     platform: &str,
 ) -> Result<(), String> {
+    let _operation = AUTH_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+    let live = live_settings.lock().unwrap_or_else(|e| e.into_inner());
+    let current = live.platform_auth.get(platform);
+    let expected = platform_auth.get(platform);
+    if !same_auth_source(current, expected) {
+        return Err("登录态来源已改变，已取消旧任务的自动更新。".into());
+    }
+    drop(live);
     let entry = platform_auth
         .get(platform)
         .ok_or_else(|| "该平台未导入浏览器登录态。".to_string())?;
@@ -564,6 +574,7 @@ async fn analyze_input(
     session_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<VideoAsset, String> {
+    let live_settings = state.settings.clone();
     let settings = state.settings.lock().unwrap().clone();
     let proxy_url = settings::effective_proxy_url(settings.proxy_url.as_deref());
     let sid = session_id.clone();
@@ -589,7 +600,8 @@ async fn analyze_input(
             Err(error)
                 if is_auth_class_error(&error)
                     && infer_platform_from_input(&raw_input).is_some_and(|platform| {
-                        try_refresh_browser_auth(&settings.platform_auth, platform).is_ok()
+                        try_refresh_browser_auth(&live_settings, &settings.platform_auth, platform)
+                            .is_ok()
                     }) =>
             {
                 let _ = write_analysis_progress(
@@ -623,6 +635,7 @@ async fn analyze_profile_input(
     session_id: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProfileBatch, String> {
+    let live_settings = state.settings.clone();
     let settings = state.settings.lock().unwrap().clone();
     let sid = session_id.clone();
     let proxy_url = settings::effective_proxy_url(settings.proxy_url.as_deref());
@@ -659,7 +672,8 @@ async fn analyze_profile_input(
             Err(error)
                 if is_auth_class_error(&error)
                     && infer_platform_from_input(&raw_input).is_some_and(|platform| {
-                        try_refresh_browser_auth(&settings.platform_auth, platform).is_ok()
+                        try_refresh_browser_auth(&live_settings, &settings.platform_auth, platform)
+                            .is_ok()
                     }) =>
             {
                 let _ = write_analysis_progress(
@@ -1142,88 +1156,197 @@ fn list_browser_sources() -> Result<Vec<auth::BrowserSource>, String> {
 }
 
 #[tauri::command]
+fn open_platform_login(app: tauri::AppHandle, platform: String) -> Result<(), String> {
+    crate::login_window::open(&app, &platform)
+}
+
+// Serialize browser refresh/import/clear so clearing cannot race a stale refresh.
+pub(crate) static AUTH_OPERATION: Mutex<()> = Mutex::new(());
+
+fn same_auth_source(
+    current: Option<&settings::PlatformAuthSettings>,
+    expected: Option<&settings::PlatformAuthSettings>,
+) -> bool {
+    matches!((current, expected), (Some(a), Some(b))
+        if a.mode == b.mode && a.browser_id == b.browser_id
+            && a.profile_id == b.profile_id && a.consented_at == b.consented_at
+            && a.status == b.status)
+}
+
+#[tauri::command]
+async fn authorize_browser_access(browser_id: String) -> Result<Vec<auth::BrowserSource>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::browser_access::authorize(&browser_id)?;
+        auth::list_browser_sources()
+    })
+    .await
+    .map_err(|_| "目录授权任务异常退出。".to_string())?
+}
+
+fn record_browser_import(
+    settings: &mut settings::AppSettings,
+    result: &auth::CookieImportResult,
+    consent: &str,
+) {
+    if result.status != "active" {
+        return;
+    }
+    let entry = settings
+        .platform_auth
+        .entry(result.platform.clone())
+        .or_default();
+    entry.mode = "browser".into();
+    entry.browser_id = Some(result.browser_id.clone());
+    entry.profile_id = result.profile_id.clone();
+    entry.consented_at = (consent == "always").then(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    });
+    entry.status = "active".into();
+    entry.cookie_browser = None;
+    entry.cookie_file = auth::cookie_file_for(&result.platform);
+}
+
+fn revoke_browser_refresh(
+    live: &Mutex<settings::AppSettings>,
+    platforms: &[String],
+) -> Result<(), String> {
+    let mut guard = live.lock().unwrap_or_else(|e| e.into_inner());
+    let mut updated = guard.clone();
+    for platform in platforms {
+        if let Some(entry) = updated.platform_auth.get_mut(platform) {
+            entry.consented_at = None;
+        }
+    }
+    // Complete revocation before touching cookies, including on failed import.
+    settings::save_settings(&updated)?;
+    *guard = updated;
+    Ok(())
+}
+
+fn commit_browser_results(
+    live: &Mutex<settings::AppSettings>,
+    results: &[auth::CookieImportResult],
+    consent: &str,
+) -> Result<(), String> {
+    if !results.iter().any(|r| r.status == "active") {
+        return Ok(());
+    }
+    let mut guard = live.lock().unwrap_or_else(|e| e.into_inner());
+    let mut updated = guard.clone();
+    for result in results {
+        record_browser_import(&mut updated, result, consent);
+    }
+    settings::save_settings(&updated)?;
+    *guard = updated;
+    Ok(())
+}
+
+#[tauri::command]
 async fn import_browser_cookies(
     request: auth::CookieImportRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<auth::CookieImportResult, String> {
-    let request_for_worker = request.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        auth::import_browser_cookies(&request_for_worker)
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = AUTH_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+        auth::validate_request(&request)?;
+        let platforms = vec![request.platform.clone()];
+        revoke_browser_refresh(&settings, &platforms)?;
+        auth::with_cookie_rollback(&platforms, || {
+            let result = auth::import_browser_cookies(&request)?;
+            commit_browser_results(&settings, std::slice::from_ref(&result), &request.consent)?;
+            Ok(result)
+        })
     })
     .await
-    .map_err(|error| format!("Cookie 导入任务异常退出：{error}"))??;
-    if result.status == "active" && request.consent == "always" {
-        let mut guard = state.settings.lock().unwrap();
-        let entry = guard
-            .platform_auth
-            .entry(request.platform.clone())
-            .or_default();
-        entry.mode = "browser".to_string();
-        entry.browser_id = Some(request.browser_id.clone());
-        entry.profile_id = request.profile_id.clone();
-        entry.consented_at = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
-        entry.status = "active".to_string();
-        entry.cookie_browser = None;
-        entry.cookie_file = auth::cookie_file_for(&request.platform);
-        settings::save_settings(&guard)?;
-    } else if result.status == "active" {
-        let mut guard = state.settings.lock().unwrap();
-        let entry = guard
-            .platform_auth
-            .entry(request.platform.clone())
-            .or_default();
-        entry.mode = "browser".to_string();
-        entry.browser_id = Some(request.browser_id);
-        entry.profile_id = request.profile_id;
-        entry.status = "active".to_string();
-        entry.cookie_file = auth::cookie_file_for(&request.platform);
-    }
-    Ok(result)
+    .map_err(|_| "Cookie 导入任务异常退出。".to_string())?
 }
 
 #[tauri::command]
-fn save_manual_cookies(
+async fn sync_browser_cookies(
+    request: auth::BrowserSyncRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<auth::CookieImportResult>, String> {
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = AUTH_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+        let platforms = auth::validate_sync_request(&request)?;
+        revoke_browser_refresh(&settings, &platforms)?;
+        auth::with_cookie_rollback(&platforms, || {
+            let results = auth::sync_browser_cookies(&request)?;
+            commit_browser_results(&settings, &results, &request.consent)?;
+            Ok(results)
+        })
+    })
+    .await
+    .map_err(|_| "浏览器同步任务异常退出。".to_string())?
+}
+
+#[tauri::command]
+async fn save_manual_cookies(
     platform: String,
     cookie_text: Option<String>,
     cookie_file: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<auth::CookieImportResult, String> {
-    let result = match (cookie_text, cookie_file) {
-        (Some(content), None) => auth::save_manual_cookies(&platform, &content)?,
-        (None, Some(path)) => auth::import_cookie_file(&platform, Path::new(&path))?,
-        _ => return Err("请选择 cookies.txt，或粘贴 Cookie 内容。".to_string()),
-    };
-    let mut guard = state.settings.lock().unwrap();
-    let entry = guard.platform_auth.entry(platform.clone()).or_default();
-    entry.mode = "manual".to_string();
-    entry.browser_id = None;
-    entry.profile_id = None;
-    entry.consented_at = Some(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    );
-    entry.status = "active".to_string();
-    entry.cookie_browser = None;
-    entry.cookie_file = auth::cookie_file_for(&platform);
-    settings::save_settings(&guard)?;
-    Ok(result)
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = AUTH_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+        auth::validate_platform(&platform)?;
+        if cookie_text.is_some() == cookie_file.is_some() {
+            return Err("请选择 cookies.txt，或粘贴 Cookie 内容。".into());
+        }
+        let platforms = vec![platform.clone()];
+        revoke_browser_refresh(&settings, &platforms)?;
+        auth::with_cookie_rollback(&platforms, || {
+            let result = match (cookie_text, cookie_file) {
+                (Some(content), None) => auth::save_manual_cookies(&platform, &content)?,
+                (None, Some(path)) => auth::import_cookie_file(&platform, Path::new(&path))?,
+                _ => unreachable!(),
+            };
+            let mut guard = settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut updated = guard.clone();
+            let entry = updated.platform_auth.entry(platform.clone()).or_default();
+            entry.mode = "manual".into();
+            entry.browser_id = None;
+            entry.profile_id = None;
+            entry.consented_at = None;
+            entry.status = "active".into();
+            entry.cookie_browser = None;
+            entry.cookie_file = auth::cookie_file_for(&platform);
+            settings::save_settings(&updated)?;
+            *guard = updated;
+            Ok(result)
+        })
+    })
+    .await
+    .map_err(|_| "保存登录态任务异常退出。".to_string())?
 }
 
 #[tauri::command]
-fn clear_platform_auth(platform: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    auth::clear_platform_auth(&platform)?;
-    let mut guard = state.settings.lock().unwrap();
-    guard
-        .platform_auth
-        .insert(platform, settings::PlatformAuthSettings::default());
-    settings::save_settings(&guard)
+async fn clear_platform_auth(
+    platform: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = AUTH_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+        auth::validate_platform(&platform)?;
+        let mut guard = settings.lock().unwrap_or_else(|e| e.into_inner());
+        // Revoke consent before deleting the file; stale jobs cannot recreate it.
+        let mut updated = guard.clone();
+        updated
+            .platform_auth
+            .insert(platform.clone(), settings::PlatformAuthSettings::default());
+        settings::save_settings(&updated)?;
+        *guard = updated;
+        auth::clear_platform_auth(&platform)
+    })
+    .await
+    .map_err(|_| "清除登录态任务异常退出。".to_string())?
 }
 
 #[tauri::command]
@@ -1615,6 +1738,9 @@ pub(crate) fn run() {
             retry_download_task,
             save_settings,
             list_browser_sources,
+            authorize_browser_access,
+            sync_browser_cookies,
+            open_platform_login,
             import_browser_cookies,
             save_manual_cookies,
             clear_platform_auth,
@@ -1638,6 +1764,56 @@ pub(crate) fn run() {
 #[cfg(test)]
 mod tests {
     use super::{fallback_profile_format, sample_preview};
+
+    #[test]
+    fn cleared_or_changed_source_cannot_refresh_from_old_snapshot() {
+        let old = crate::settings::PlatformAuthSettings {
+            mode: "browser".into(),
+            browser_id: Some("chrome".into()),
+            profile_id: Some("profile-one".into()),
+            consented_at: Some(123),
+            status: "active".into(),
+            ..Default::default()
+        };
+        assert!(super::same_auth_source(Some(&old), Some(&old)));
+        assert!(!super::same_auth_source(
+            Some(&Default::default()),
+            Some(&old)
+        ));
+        let mut changed = old.clone();
+        changed.profile_id = Some("profile-two".into());
+        assert!(!super::same_auth_source(Some(&changed), Some(&old)));
+        changed = old.clone();
+        changed.consented_at = None;
+        assert!(!super::same_auth_source(Some(&changed), Some(&old)));
+    }
+
+    #[test]
+    fn one_time_import_revokes_previous_auto_refresh_consent() {
+        let mut settings = crate::settings::AppSettings::default();
+        let result = crate::auth::CookieImportResult {
+            platform: "bilibili".into(),
+            browser_id: "chrome".into(),
+            profile_id: Some("real-profile-id".into()),
+            status: "active".into(),
+            imported_count: 1,
+            requires_elevation: false,
+            message: String::new(),
+        };
+        super::record_browser_import(&mut settings, &result, "always");
+        assert!(settings.platform_auth["bilibili"].consented_at.is_some());
+        super::record_browser_import(&mut settings, &result, "once");
+        assert!(settings.platform_auth["bilibili"].consented_at.is_none());
+        let mut failed = result.clone();
+        failed.status = "failed".into();
+        failed.profile_id = Some("different".into());
+        super::record_browser_import(&mut settings, &failed, "always");
+        assert_eq!(
+            settings.platform_auth["bilibili"].profile_id,
+            result.profile_id
+        );
+    }
+
     use crate::provider_runtime::{thumbnail_candidates, thumbnail_referer};
 
     #[test]
@@ -1689,6 +1865,15 @@ mod tests {
             .any(|candidate| candidate.ends_with("/hqdefault.jpg")));
     }
     #[test]
+    fn bilibili_raw_not_logged_in_message_is_auth_class() {
+        // bilibili API 的 code -101 文案可能被原样透传，必须命中登录态分类
+        // 才能触发静默重取 Cookie + 重试
+        assert!(super::is_auth_class_error("账号未登录"));
+        assert!(super::is_auth_class_error(
+            "当前 Bilibili 登录态已失效。请在设置中重新导入已登录 Bilibili 的 Cookie，或直接选择已登录浏览器。"
+        ));
+    }
+    #[test]
     fn analysis_session_rejects_paths_before_io() {
         for id in [
             "../outside",
@@ -1720,7 +1905,9 @@ mod tests {
         // 空白/全空白 id 视为无会话：跳过进度而不是让整个解析失败
         for id in ["", " ", "  \t  "] {
             assert!(super::analysis_progress_path(id).unwrap().is_none(), "{id}");
-            assert!(super::get_analysis_progress(id.to_string()).unwrap().is_none());
+            assert!(super::get_analysis_progress(id.to_string())
+                .unwrap()
+                .is_none());
             super::clear_analysis_progress(id.to_string()).unwrap();
             super::write_analysis_progress(Some(id), 0, 1, "test").unwrap();
         }

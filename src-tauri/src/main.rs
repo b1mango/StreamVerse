@@ -2,8 +2,10 @@
 
 mod app;
 mod auth;
+mod browser_access;
 mod download_history;
 mod formats;
+mod login_window;
 mod media_contract;
 mod parser;
 mod persistence;

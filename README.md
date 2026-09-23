@@ -19,7 +19,8 @@
 - 抖音、Bilibili、YouTube 单视频解析与多清晰度下载
 - 抖音/Bilibili 主页批量，YouTube 频道与播放列表批量
 - 视频、MP3 音频、无水印图册、封面和文案下载
-- 浏览器 Cookie 自动读取、手动 Cookie 与 `cookies.txt` 导入
+- 复用浏览器现有登录态，同一 Profile 可同步抖音、Bilibili、YouTube；支持手动 Cookie 与 `cookies.txt` 导入
+- macOS Chrome / Edge 支持首次确认浏览器目录的局部授权；可能另需钥匙串确认，扫码登录位于“其他方式”末尾
 - 实时进度、速度与剩余时间，支持暂停、继续、取消和重试
 - Windows 内置 yt-dlp、FFmpeg、Deno、aria2 和解析 helper
 

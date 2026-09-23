@@ -1,5 +1,5 @@
 export type AuthStatus = "guest" | "active" | "expired" | "needsElevation";
-export type AuthMode = "none" | "browser" | "manual";
+export type AuthMode = "none" | "browser" | "manual" | "webview";
 export type DownloadMode = "manual";
 export type PlatformId = "douyin" | "bilibili" | "youtube";
 export type ThemeMode = "dark" | "light";
@@ -100,6 +100,8 @@ export interface BrowserSource {
   label: string;
   isDefault: boolean;
   profiles: BrowserProfile[];
+  /** Profile 枚举未完成；兜底项不可作为真实 Profile 使用。 */
+  degraded: boolean;
 }
 
 export interface CookieImportRequest {
@@ -110,11 +112,18 @@ export interface CookieImportRequest {
   allowElevation?: boolean;
 }
 
+export interface BrowserCookieSyncRequest {
+  browserId: string;
+  profileId: string | null;
+  consent: "once" | "always";
+  platforms: PlatformId[];
+}
+
 export interface CookieImportResult {
   platform: PlatformId;
   browserId: string;
   profileId?: string | null;
-  status: AuthStatus;
+  status: AuthStatus | "failed";
   importedCount: number;
   requiresElevation: boolean;
   message: string;

@@ -34,6 +34,8 @@
   import Thumb from "./lib/components/Thumb.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
   import {
+    authorizeBrowserAccess,
+    syncBrowserCookies,
     analyzeBatchItem,
     analyzeInput,
     analyzeProfileInput,
@@ -56,7 +58,9 @@
     removeDownloadTask,
     saveManualCookies,
     saveSettings,
-    subscribeTaskEvents
+    subscribeTaskEvents,
+    openPlatformLogin,
+    subscribeLoginImported
   } from "./lib/backend";
   import { setLanguage, t } from "./lib/i18n";
   import { createDefaultDownloadOptions, formatDuration, hasSelectedDownloadOptions, pickPreferredFormat, resolveErrorMessage, visibleFormats } from "./lib/media";
@@ -68,6 +72,7 @@
     AnalysisProgress as AnalysisProgressState,
     BootstrapState,
     BrowserSource,
+    BrowserCookieSyncRequest,
     CookieImportResult,
     DownloadHistoryEntry,
     DownloadTask,
@@ -196,6 +201,7 @@
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenLogin: (() => void) | undefined;
     void (async () => {
       bootstrap = await getBootstrapState();
       document.documentElement.dataset.theme = bootstrap.theme;
@@ -203,8 +209,15 @@
       setLanguage(bootstrap.language);
       preview = null;
       unlisten = await subscribeTaskEvents(applyTaskEvent);
+      unlistenLogin = await subscribeLoginImported((platform) => {
+        // 应用内登录窗口导入成功：刷新登录态展示
+        bootstrap!.platformAuth[platform] = { mode: "webview", status: "active", consentedAt: Math.floor(Date.now() / 1000) };
+      });
     })().catch((error) => (errorMessage = resolveErrorMessage(error)));
-    return () => unlisten?.();
+    return () => {
+      unlisten?.();
+      unlistenLogin?.();
+    };
   });
 
   function applyTaskEvent(event: TaskEvent) {
@@ -652,10 +665,55 @@
     operationBusy = true;
     try {
       const result = await importBrowserCookies({ platform: platformId, browserId, profileId, consent, allowElevation });
+      if (bootstrap) bootstrap.platformAuth[platformId].consentedAt = null;
       if (bootstrap && result.status === "active") {
-        bootstrap.platformAuth[platformId] = { mode: "browser", browserId, profileId, status: "active", consentedAt: consent === "always" ? Math.floor(Date.now() / 1000) : null };
+        bootstrap.platformAuth[result.platform] = { mode: "browser", browserId: result.browserId, profileId: result.profileId, status: "active", consentedAt: consent === "always" ? Math.floor(Date.now() / 1000) : null };
       }
       return result;
+    } finally {
+      operationBusy = false;
+    }
+  }
+
+  async function handleAuthorizeBrowser(browserId: string): Promise<BrowserSource[]> {
+    operationBusy = true;
+    try {
+      const sources = await authorizeBrowserAccess(browserId);
+      browserSources = sources;
+      return sources;
+    } finally {
+      operationBusy = false;
+    }
+  }
+
+  async function handleSyncBrowser(request: BrowserCookieSyncRequest): Promise<CookieImportResult[]> {
+    operationBusy = true;
+    try {
+      const results = await syncBrowserCookies(request);
+      if (bootstrap) for (const id of request.platforms) bootstrap.platformAuth[id].consentedAt = null;
+      for (const result of results) {
+        if (bootstrap && result.status === "active") {
+          bootstrap.platformAuth[result.platform] = {
+            mode: "browser", browserId: result.browserId, profileId: result.profileId,
+            status: "active", consentedAt: request.consent === "always" ? Math.floor(Date.now() / 1000) : null
+          };
+        }
+      }
+      return results;
+    } finally {
+      operationBusy = false;
+    }
+  }
+
+  async function handleClearAuth(platformId: PlatformId) {
+    if (operationBusy) return;
+    operationBusy = true;
+    try {
+      await clearPlatformAuth(platformId);
+      if (bootstrap) bootstrap.platformAuth[platformId] = { mode: "none", status: "guest" };
+    } catch (error) {
+      pushToast("error", resolveErrorMessage(error));
+      throw error;
     } finally {
       operationBusy = false;
     }
@@ -805,7 +863,23 @@
     </div>
 
     {#if bootstrap}
-      <SettingsSheet open={settingsOpen} {bootstrap} {browserSources} busy={operationBusy} onClose={() => (settingsOpen = false)} onSave={handleSaveSettings} onPickDirectory={() => pickSaveDirectory(bootstrap!.saveDirectory)} onPickCookieFile={pickCookieFile} onImportBrowser={handleImportBrowser} onSaveManual={async (platformId, value) => { const result = await saveManualCookies(platformId, { cookieText: value }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onImportCookieFile={async (platformId, path) => { const result = await saveManualCookies(platformId, { cookieFile: path }); bootstrap!.platformAuth[platformId] = { mode: "manual", status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }} onClearAuth={async (platformId) => { await clearPlatformAuth(platformId); bootstrap!.platformAuth[platformId] = { mode: "none", status: "guest" }; }} />
+      <SettingsSheet
+        open={settingsOpen}
+        {bootstrap}
+        {browserSources}
+        busy={operationBusy}
+        onClose={() => (settingsOpen = false)}
+        onSave={handleSaveSettings}
+        onPickDirectory={() => pickSaveDirectory(bootstrap!.saveDirectory)}
+        onPickCookieFile={pickCookieFile}
+        onImportBrowser={handleImportBrowser}
+        onAuthorizeBrowser={handleAuthorizeBrowser}
+        onSyncBrowser={handleSyncBrowser}
+        onSaveManual={async (platformId, value) => { const result = await saveManualCookies(platformId, { cookieText: value }); if (result.status === "active") bootstrap!.platformAuth[result.platform] = { mode: "manual", browserId: result.browserId, profileId: result.profileId, status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }}
+        onImportCookieFile={async (platformId, path) => { const result = await saveManualCookies(platformId, { cookieFile: path }); if (result.status === "active") bootstrap!.platformAuth[result.platform] = { mode: "manual", browserId: result.browserId, profileId: result.profileId, status: "active", consentedAt: Math.floor(Date.now() / 1000) }; return result; }}
+        onClearAuth={handleClearAuth}
+        onOpenLogin={async (platformId) => { await openPlatformLogin(platformId); }}
+      />
     {/if}
 
     <div class="toast-stack" aria-live="polite">

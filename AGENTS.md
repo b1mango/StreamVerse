@@ -1,5 +1,11 @@
 # StreamVerse 项目规则
 
+## 全局规则来源
+
+- 全局开发与协作规则采用 `https://github.com/b1mango/Agent-settings` 远程 `main` 的 `rules/AGENTS.md` 与 `rules/编程准则.md`。
+- `rules/提示词库.md` 仅选用模板时读取；`skills/` 为按需参考技能库，入口 `skills/README.md`，不强制逐项调用。
+- 以下为项目专属约定；与用户最新授权冲突时，以用户要求为准。
+
 ## 构建
 
 - Windows 构建：`RUSTUP_TOOLCHAIN=1.95 npm run tauri:build`（Rust 工具链固定 1.95）。
@@ -27,6 +33,6 @@
 
 ## Git
 
-- 改动默认不提交；用户明确要求提交或推送时才执行。
+- 本地按完成的任务提交，保护其他工作中的改动；只有用户明确要求推送时才推送。
 - 推送走本机代理：`git -c http.proxy=http://127.0.0.1:7897 push origin HEAD:main`。
 

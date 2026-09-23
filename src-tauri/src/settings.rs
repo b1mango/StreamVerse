@@ -71,10 +71,7 @@ impl Default for AppSettings {
 }
 
 pub fn load_settings() -> AppSettings {
-    let mut settings = fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<AppSettings>(&raw).ok())
-        .unwrap_or_default();
+    let mut settings: AppSettings = crate::persistence::load_json(&settings_path());
     settings
         .platform_auth
         .retain(|platform, _| AUTH_PLATFORM_IDS.contains(&platform.as_str()));
@@ -90,18 +87,7 @@ pub fn load_settings() -> AppSettings {
 }
 
 pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("创建设置目录失败：{error}"))?;
-    }
-    let content =
-        serde_json::to_vec_pretty(settings).map_err(|error| format!("序列化设置失败：{error}"))?;
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, content).map_err(|error| format!("写入设置失败：{error}"))?;
-    if path.exists() {
-        fs::remove_file(&path).map_err(|error| format!("替换设置失败：{error}"))?;
-    }
-    fs::rename(temporary, path).map_err(|error| format!("保存设置失败：{error}"))
+    crate::persistence::save_json(&settings_path(), settings)
 }
 
 pub fn platform_auth_for(

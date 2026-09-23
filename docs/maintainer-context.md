@@ -1,5 +1,17 @@
 # StreamVerse 维护上下文
 
+## 2026-09-23 浏览器局部授权与批量同步
+
+- 全局规则采用 Agent-settings 远程 main 的 rules，skills 按需参考。
+- macOS Chrome/Edge 原生目录选择授权 + 只读书签；列表/读取/续期按操作恢复权限。独立 GUI 探针证实 macOS 27 从 EPERM 转为两个 Cookie 数据库可读，并可退出重启恢复。
+- 同一真实 Profile 同步三个平台；域名/有效期过滤，失败平台保留旧 Cookie。授权先撤销，结果提交失败回滚 Cookie，设置原子持久化；清除后旧来源不能自动续期。
+- 扫码降至其他方式末尾，保留 cookies.txt。
+- Rust GUI 探针复用正式授权代码与 rookie，主 Profile 的 Bilibili/抖音/YouTube 关键 Cookie 均读取成功，退出重启后只读书签恢复并解密成功。
+- Rust 109 项、脚本 9 项通过，svelte-check 0 错误/警告；独立审查发现的授权/保存一致性问题已修复。
+- 尚未完成：正式 App 三平台在线解析、跨版本升级后书签稳定性、Windows GUI。控制正式 App 的工具授权未获响应，未重试。关键 Cookie 存在不等于平台服务端仍接受登录态，在线解析仍待用户验证。
+- 测试包 App/DMG 已生成。现有图标后处理写入 FinderInfo 导致严格签名检查失败，本轮仅移除两个产物中 App 根目录该属性；校验随后通过，未改其他在途图标脚本，下次构建需留意此问题。
+
+
 ## 2026-09-21 抖音解析修复（本地 1.0.1 补丁）
 
 - 复现旧请求返回 Argus `Uifid Not Found` / `Signature Not Found`；轮换 msToken 无法解决。

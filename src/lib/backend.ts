@@ -5,6 +5,7 @@ import type {
   BatchItemSelection,
   BootstrapState,
   BrowserSource,
+  BrowserCookieSyncRequest,
   CookieImportRequest,
   CookieImportResult,
   DownloadHistoryEntry,
@@ -104,6 +105,16 @@ export async function subscribeTaskEvents(onEvent: (event: TaskEvent) => void) {
   return listen<TaskEvent>("task-event", ({ payload }) => onEvent(payload));
 }
 
+export async function openPlatformLogin(platform: PlatformId): Promise<void> {
+  return invoke("open_platform_login", { platform });
+}
+
+export async function subscribeLoginImported(onImported: (platform: PlatformId) => void) {
+  if (!hasTauriRuntime()) return () => undefined;
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<string>("login-imported", ({ payload }) => onImported(payload as PlatformId));
+}
+
 export async function controlTask(taskId: string, action: "pause" | "resume" | "cancel" | "retry") {
   return invoke<DownloadTask>(`${action}_download_task`, { taskId });
 }
@@ -134,15 +145,26 @@ export async function listBrowserSources(): Promise<BrowserSource[]> {
       id: "edge",
       label: "Microsoft Edge",
       isDefault: true,
-      profiles: [{ id: "edge-default", label: "Default", isDefault: true }]
+      profiles: [{ id: "edge-default", label: "Default", isDefault: true }],
+      degraded: false
     },
     {
       id: "chrome",
       label: "Google Chrome",
       isDefault: false,
-      profiles: [{ id: "chrome-default", label: "Personal", isDefault: true }]
+      profiles: [{ id: "chrome-default", label: "Personal", isDefault: true }],
+      degraded: false
     }
   ];
+}
+
+export async function authorizeBrowserAccess(browserId: string): Promise<BrowserSource[]> {
+  return invoke("authorize_browser_access", { browserId });
+}
+
+export async function syncBrowserCookies(request: BrowserCookieSyncRequest): Promise<CookieImportResult[]> {
+  if (hasTauriRuntime()) return invoke("sync_browser_cookies", { request });
+  return desktopRuntimeRequired();
 }
 
 export async function importBrowserCookies(request: CookieImportRequest): Promise<CookieImportResult> {
@@ -165,7 +187,7 @@ export async function pickCookieFile(): Promise<string | null> {
 export async function saveManualCookies(
   platform: PlatformId,
   source: { cookieText?: string; cookieFile?: string }
-) {
+): Promise<CookieImportResult> {
   return hasTauriRuntime()
     ? invoke<CookieImportResult>("save_manual_cookies", {
         platform,
