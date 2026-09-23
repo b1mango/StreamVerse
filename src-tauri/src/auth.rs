@@ -17,6 +17,7 @@ pub struct BrowserSource {
     /// true = 未能枚举真实 Profile，列表仅含展示用兜底入口。
     /// 批量同步必须重新枚举并选择真实 Profile ID。
     pub degraded: bool,
+    pub directory_authorized: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -71,7 +72,8 @@ pub fn list_browser_sources() -> Result<Vec<BrowserSource>, String> {
         if !matches!(id.as_str(), "chrome" | "edge" | "firefox" | "safari") {
             continue;
         }
-        let _access = crate::browser_access::restore(&id);
+        let access = crate::browser_access::restore(&id);
+        let directory_authorized = access.is_some();
         let enumerated = if id == "chrome" {
             rookie::chrome_profiles()
         } else {
@@ -102,6 +104,7 @@ pub fn list_browser_sources() -> Result<Vec<BrowserSource>, String> {
             label: browser.display_name,
             profiles,
             degraded,
+            directory_authorized,
         });
     }
     sources.sort_by_key(|source| !source.is_default);

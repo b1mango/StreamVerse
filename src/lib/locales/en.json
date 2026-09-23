@@ -250,6 +250,12 @@
   "settings.authorizeDirectory": "Authorize browser directory",
   "settings.directoryAccessHint": "On first use, click above and confirm read-only access to the browser data directory in the system folder picker. Then select a profile. Reading cookies may prompt for Keychain access; Full Disk Access (FDA) is not required. Confirm directory access again if the authorization becomes invalid.",
   "settings.selectProfile": "Select an available, real profile",
+  "settings.reauthorizeDirectory": "Reauthorize browser directory",
+  "settings.directoryAccessGranted": "Read-only access to this browser directory is granted. Select a profile to sync your session.",
+  "settings.directoryAccessPending": "No directory authorization is saved for this browser. Click above and confirm the preselected folder.",
+  "settings.directoryAuthorized": "Browser directory authorized and profiles loaded. Select a profile to sync your session.",
+  "settings.directoryAuthorizedDegraded": "Browser directory authorized, but no usable profile was found. Make sure this browser has a profile.",
+  "settings.directoryAccessUnconfirmed": "Directory authorization could not be confirmed. Please try again.",
   "settings.syncAllPlatforms": "Sync all three platforms",
   "settings.otherMethods": "Other methods",
   "settings.alwaysSelected": "Remember consent for all three platforms’ domains"

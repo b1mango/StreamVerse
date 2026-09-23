@@ -146,14 +146,16 @@ export async function listBrowserSources(): Promise<BrowserSource[]> {
       label: "Microsoft Edge",
       isDefault: true,
       profiles: [{ id: "edge-default", label: "Default", isDefault: true }],
-      degraded: false
+      degraded: false,
+      directoryAuthorized: false
     },
     {
       id: "chrome",
       label: "Google Chrome",
       isDefault: false,
       profiles: [{ id: "chrome-default", label: "Personal", isDefault: true }],
-      degraded: false
+      degraded: false,
+      directoryAuthorized: false
     }
   ];
 }

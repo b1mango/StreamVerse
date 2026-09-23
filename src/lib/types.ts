@@ -103,6 +103,7 @@ export interface BrowserSource {
   /** Profile 枚举未完成；兜底项不可作为真实 Profile 使用。 */
   degraded: boolean;
 }
+  directoryAuthorized: boolean;
 
 export interface CookieImportRequest {
   platform: PlatformId;

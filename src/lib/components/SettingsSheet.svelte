@@ -184,7 +184,8 @@
       const source = sources.find((item) => item.id === targetBrowser);
       // Restore a saved real profile; otherwise require a choice when multiple profiles exist.
       profileId = preferredProfile(source, targetPlatform, false);
-      authMessage = profileId ? "" : $t(source && !source.degraded && source.profiles.some((item) => item.id.trim()) ? "settings.selectProfile" : "settings.browserDegraded");
+      if (!source?.directoryAuthorized) throw new Error($t("settings.directoryAccessUnconfirmed"));
+      authMessage = $t(source.degraded ? "settings.directoryAuthorizedDegraded" : "settings.directoryAuthorized");
     });
   }
 
@@ -338,7 +339,8 @@
             </label>
             {#if selectedBrowser()?.degraded}<p class="inline-message" role="status">{$t("settings.browserDegraded")}</p>{/if}
             {#if directoryAuthorization}
-              <button class={selectedBrowser()?.degraded ? "primary-button" : "quiet-button directory-button"} type="button" disabled={authLocked} onclick={authorizeDirectory}><FolderOpen size={17} />{$t("settings.authorizeDirectory")}</button>
+              <button class={selectedBrowser()?.degraded ? "primary-button" : "quiet-button directory-button"} type="button" disabled={authLocked} onclick={authorizeDirectory}><FolderOpen size={17} />{$t(selectedBrowser()?.directoryAuthorized ? "settings.reauthorizeDirectory" : "settings.authorizeDirectory")}</button>
+              <p class="inline-message" role="status">{$t(selectedBrowser()?.directoryAuthorized ? "settings.directoryAccessGranted" : "settings.directoryAccessPending")}</p>
               <p class="inline-message">{$t("settings.directoryAccessHint")}</p>
             {/if}
             <label>Profile
