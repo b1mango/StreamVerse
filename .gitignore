@@ -19,3 +19,6 @@ vendor/douyin_api/**/*.pyc
 scripts/__pycache__/
 scripts/**/*.pyc
 tsconfig.tsbuildinfo
+
+# 项目工作文档统一归档于 Agent-settings，不入本仓库
+docs/roadmap.md
