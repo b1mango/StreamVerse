@@ -34,6 +34,7 @@ USER_AGENT = (
 )
 FETCH_CONCURRENCY = 20
 PROGRESS_FILE = os.environ.get("STREAMVERSE_PROGRESS_FILE")
+LOGIN_EXPIRED_MESSAGE = "当前 Bilibili 登录态已失效。请在设置中重新导入已登录 Bilibili 的 Cookie，或直接选择已登录浏览器。"
 MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
     27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
@@ -272,6 +273,10 @@ def ensure_api_ok(response: httpx.Response, payload: dict, fallback: str) -> dic
     if response.status_code >= 400:
         raise RuntimeError(fallback)
     if code not in (0, None):
+        # SESSDATA 过期/被轮换时 nav 等接口直接返回 -101「账号未登录」；
+        # 归一化为登录态文案，app 侧才能识别并触发静默重取 Cookie + 重试。
+        if code == -101:
+            raise RuntimeError(LOGIN_EXPIRED_MESSAGE)
         message = payload.get("message") or payload.get("msg") or fallback
         raise RuntimeError(str(message))
     data = payload.get("data")
@@ -442,7 +447,8 @@ async def main_async(args: argparse.Namespace) -> int:
     cookies = parse_netscape_cookies(args.cookie_file)
     cookie_value = cookie_header(cookies)
     if not cookie_value or not has_bilibili_login_cookie(cookies):
-        raise RuntimeError("当前保存的 Cookie 里没有有效的 Bilibili 登录态。请在设置中重新导入已登录 Bilibili 的 Cookie，或直接选择已登录浏览器。")
+        # 文案含「登录态已失效」以命中 app 侧登录态分类，触发静默重取浏览器 Cookie + 重试
+        raise RuntimeError("当前 Bilibili 登录态已失效或尚未导入。请在设置中重新导入已登录 Bilibili 的 Cookie，或直接选择已登录浏览器。")
 
     mid = extract_mid(args.url)
     tracker = ProgressTracker()
@@ -461,7 +467,7 @@ async def main_async(args: argparse.Namespace) -> int:
         nav_payload = nav_response.json()
         nav_data = ensure_api_ok(nav_response, nav_payload, "读取 Bilibili 导航信息失败。")
         if not bool(nav_data.get("isLogin")):
-            raise RuntimeError("当前 Bilibili 登录态已失效。请在设置中重新导入已登录 Bilibili 的 Cookie，或直接选择已登录浏览器。")
+            raise RuntimeError(LOGIN_EXPIRED_MESSAGE)
         img_key, sub_key = get_wbi_keys({"data": nav_data})
 
         profile_data_raw = await fetch_json(
