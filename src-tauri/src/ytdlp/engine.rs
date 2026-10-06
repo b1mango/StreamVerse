@@ -1241,12 +1241,35 @@ fn aria2c_connection_args(platform: &str) -> Option<&'static str> {
     }
 }
 
+/// 优先用打包的 aria2c sidecar；macOS 未打包时回退到 Homebrew 等系统安装。
+/// GUI 进程 PATH 极简，系统候选必须用绝对路径，不依赖环境变量。
+fn resolve_aria2c() -> Option<PathBuf> {
+    if let Ok(path) = provider_runtime::resolve_sidecar("aria2c") {
+        return Some(path);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for candidate in ["/opt/homebrew/bin/aria2c", "/usr/local/bin/aria2c"] {
+            let path = PathBuf::from(candidate);
+            let executable = path
+                .metadata()
+                .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false);
+            if executable {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn append_external_downloader_args(command: &mut Command, platform: &str) {
     let Some(connection_args) = aria2c_connection_args(platform) else {
         return;
     };
 
-    if let Ok(aria2_path) = provider_runtime::resolve_sidecar("aria2c") {
+    if let Some(aria2_path) = resolve_aria2c() {
         command
             .arg("--downloader")
             .arg(aria2_path)
@@ -1343,7 +1366,7 @@ mod tests {
         aria2c_connection_args, dash_download_worker, direct_download_worker,
         ensure_local_proxy_available, ffmpeg_available, new_task_controller_store,
         persist_download_artifacts, prepare_output_layout, read_process_output_lines,
-        silent_command, DownloadArtifacts, TaskController,
+        resolve_aria2c, silent_command, DownloadArtifacts, TaskController,
     };
     use crate::{provider_runtime, task_store, DownloadContentSelection};
     use std::fs;
@@ -1388,9 +1411,29 @@ mod tests {
             .map(|value| value.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
-        if provider_runtime::resolve_sidecar("aria2c").is_ok() {
+        if resolve_aria2c().is_some() {
             assert!(joined.contains("--downloader"));
             assert!(joined.contains("-x16 -s16 -j16"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aria2c_resolution_prefers_sidecar_then_system_install() {
+        match provider_runtime::resolve_sidecar("aria2c") {
+            Ok(sidecar) => assert_eq!(resolve_aria2c(), Some(sidecar)),
+            Err(_) => {
+                use std::os::unix::fs::PermissionsExt;
+                let system = ["/opt/homebrew/bin/aria2c", "/usr/local/bin/aria2c"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| {
+                        path.metadata()
+                            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                            .unwrap_or(false)
+                    });
+                assert_eq!(resolve_aria2c(), system);
+            }
         }
     }
 
@@ -1414,7 +1457,7 @@ mod tests {
             .map(|value| value.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
-        if provider_runtime::resolve_sidecar("aria2c").is_ok() {
+        if resolve_aria2c().is_some() {
             assert!(joined.contains("--downloader"));
             assert!(joined.contains("aria2c:-x8 -s8"));
         } else {

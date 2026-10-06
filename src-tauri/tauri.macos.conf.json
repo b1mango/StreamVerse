@@ -20,11 +20,14 @@
   "bundle": {
     "externalBin": [
       "binaries/deno",
-      "binaries/ffmpeg"
+      "binaries/ffmpeg",
+      "binaries/aria2c"
     ],
     "resources": {
       "binaries/yt-dlp-onedir": "yt-dlp-onedir",
-      "binaries/streamverse-helper-onedir": "streamverse-helper-onedir"
+      "binaries/streamverse-helper-onedir": "streamverse-helper-onedir",
+      "third-party/aria2-COPYING": "third-party/aria2-COPYING",
+      "third-party/aria2-1.37.0-source.tar.xz": "third-party/aria2-1.37.0-source.tar.xz"
     }
   }
 }

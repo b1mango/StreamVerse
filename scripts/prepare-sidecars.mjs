@@ -104,15 +104,26 @@ async function prepareYtDlp() {
 }
 
 async function prepareAria2() {
-  if (platformKey !== "windows-x64") return;
-
   const spec = lock.aria2[platformKey];
+  // 该平台无 aria2 分发（官方只发 Windows 预编译，macOS 仅 arm64 有 vendor 自编译）；
+  // 缺失平台的运行时由 engine 的 resolve_aria2c 回退到系统安装
+  if (!spec) return;
+
   const target = join(outputDir, `aria2c-${triple}${extension}`);
   const licenseTarget = join(root, "src-tauri", "third-party", "aria2-COPYING");
   const sourceTarget = join(root, "src-tauri", "third-party", `aria2-${lock.aria2.version}-source.tar.xz`);
   const explicit = process.env.STREAMVERSE_ARIA2_PATH;
   if (explicit) {
     await copyFile(explicit, target);
+  } else if (spec.local) {
+    // macOS：用仓库内 vendor 的官方源码自编译产物（sha256 钉死），不走网络下载
+    const vendored = join(root, spec.local);
+    if (!existsSync(target) || await sha256(target) !== spec.executableSha256 || !existsSync(licenseTarget)) {
+      await verify(vendored, spec.executableSha256, `aria2 ${lock.aria2.version} vendored binary`);
+      await copyFile(vendored, target);
+      await mkdir(dirname(licenseTarget), { recursive: true });
+      await copyFile(join(root, "vendor", "aria2", "COPYING"), licenseTarget);
+    }
   } else if (!existsSync(target) || await sha256(target) !== spec.executableSha256 || !existsSync(licenseTarget)) {
     const archive = join(outputDir, `.aria2-${platformKey}.zip`);
     const extractDir = join(outputDir, `.aria2-${platformKey}`);
@@ -133,6 +144,7 @@ async function prepareAria2() {
     await rm(extractDir, { recursive: true, force: true });
   }
   await verify(target, spec.executableSha256, `aria2 ${lock.aria2.version}`);
+  if (process.platform !== "win32") await chmod(target, 0o755);
   if (!existsSync(sourceTarget) || await sha256(sourceTarget) !== lock.aria2.sourceSha256) {
     await download(lock.aria2.sourceUrl, sourceTarget);
   }

@@ -25,6 +25,11 @@
       "url": "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip",
       "archiveSha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
       "executableSha256": "be2099c214f63a3cb4954b09a0becd6e2e34660b886d4c898d260febfe9d70c2"
+    },
+    "macos-arm64": {
+      "local": "vendor/aria2/aria2c-aarch64-apple-darwin",
+      "executableSha256": "a51c61fcd1f63c32baa1db7b2911d2483a88da197f7241fd628ce86de996626e",
+      "note": "官方只发 Windows 预编译；此为官方 1.37.0 源码（sourceSha256 校验）在本机以 AppleTLS/系统 libz 构建的极简版（仅 HTTP(S)），vendor 入库"
     }
   },
   "deno": {

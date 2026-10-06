@@ -14,4 +14,7 @@ test("sidecar lock pins every supported desktop target", async () => {
   assert.match(lock.aria2.sourceSha256, /^[a-f0-9]{64}$/);
   assert.match(lock.aria2["windows-x64"].archiveSha256, /^[a-f0-9]{64}$/);
   assert.match(lock.aria2["windows-x64"].executableSha256, /^[a-f0-9]{64}$/);
+  // macOS arm64 用 vendor 的官方源码自编译产物（官方无 mac 预编译）
+  assert.match(lock.aria2["macos-arm64"].executableSha256, /^[a-f0-9]{64}$/);
+  assert.equal(lock.aria2["macos-arm64"].local, "vendor/aria2/aria2c-aarch64-apple-darwin");
 });
