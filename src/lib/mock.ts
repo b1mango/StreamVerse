@@ -16,6 +16,8 @@ export const mockState: BootstrapState = {
   autoRevealInFinder: false,
   maxConcurrentDownloads: 3,
   proxyUrl: null,
+  effectiveProxyUrl: null,
+  proxySource: "none",
   speedLimit: null,
   autoUpdate: true,
   theme: "dark",

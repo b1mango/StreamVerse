@@ -107,6 +107,8 @@ struct BootstrapState {
     auto_reveal_in_finder: bool,
     max_concurrent_downloads: u32,
     proxy_url: Option<String>,
+    effective_proxy_url: Option<String>,
+    proxy_source: String,
     speed_limit: Option<String>,
     auto_update: bool,
     theme: String,
@@ -131,6 +133,8 @@ struct SettingsProfile {
     auto_reveal_in_finder: bool,
     max_concurrent_downloads: u32,
     proxy_url: Option<String>,
+    effective_proxy_url: Option<String>,
+    proxy_source: String,
     speed_limit: Option<String>,
     auto_update: bool,
     theme: String,
@@ -1491,6 +1495,8 @@ fn build_bootstrap_state(
     ffmpeg_path: Option<&str>,
 ) -> BootstrapState {
     let settings = state.settings.lock().unwrap().clone();
+    let (effective_proxy_url, proxy_source) =
+        settings::effective_proxy_with_source(settings.proxy_url.as_deref());
     let platform_auth = build_platform_auth_profiles(&settings.platform_auth);
     let tasks = task_store::list_tasks(&state.tasks);
     let completed = tasks
@@ -1521,6 +1527,8 @@ fn build_bootstrap_state(
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
         max_concurrent_downloads: settings.max_concurrent_downloads,
         proxy_url: settings.proxy_url,
+        effective_proxy_url,
+        proxy_source: proxy_source.to_string(),
         speed_limit: settings.speed_limit,
         auto_update: settings.auto_update,
         theme: settings.theme,
@@ -1542,6 +1550,8 @@ fn build_settings_profile(
     settings: &settings::AppSettings,
     ffmpeg_path: Option<&str>,
 ) -> SettingsProfile {
+    let (effective_proxy_url, proxy_source) =
+        settings::effective_proxy_with_source(settings.proxy_url.as_deref());
     SettingsProfile {
         version: env!("CARGO_PKG_VERSION").to_string(),
         auth_state: if settings::has_auth_source(&settings.platform_auth) {
@@ -1557,6 +1567,8 @@ fn build_settings_profile(
         auto_reveal_in_finder: settings.auto_reveal_in_finder,
         max_concurrent_downloads: settings.max_concurrent_downloads,
         proxy_url: settings.proxy_url.clone(),
+        effective_proxy_url,
+        proxy_source: proxy_source.to_string(),
         speed_limit: settings.speed_limit.clone(),
         auto_update: settings.auto_update,
         theme: settings.theme.clone(),

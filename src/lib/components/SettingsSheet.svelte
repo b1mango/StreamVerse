@@ -88,6 +88,9 @@
   // 后端会 clamp 到 1–8，输入超界时提前给出提示
   const concurrentOutOfRange = $derived(maxConcurrentDownloads > 8 || maxConcurrentDownloads < 1);
 
+  // 代理留空 = 自动识别：跟随 bootstrap 中后端探测到的生效代理展示状态
+  const proxyAutoMode = $derived(!proxyUrl.trim());
+
   async function checkUpdate() {
     if (updateStatus === "checking") return;
     updateStatus = "checking";
@@ -379,9 +382,14 @@
             </div>
             {#if concurrentOutOfRange}<p class="inline-message error" role="alert">{$t("settings.maxConcurrentHint")}</p>{/if}
             <div class="two-columns">
-              <label>{$t("settings.proxy")}<input bind:value={proxyUrl} placeholder="http://127.0.0.1:7890" /></label>
+              <label>{$t("settings.proxy")}<input bind:value={proxyUrl} placeholder={$t("settings.proxyPlaceholder")} /></label>
               <label>{$t("settings.speedLimit")}<input bind:value={speedLimit} placeholder="8M" /></label>
             </div>
+            {#if proxyAutoMode && bootstrap.proxySource === "system" && bootstrap.effectiveProxyUrl}
+              <p class="proxy-status">{$t("settings.proxyAutoSystem")} {bootstrap.effectiveProxyUrl}</p>
+            {:else if proxyAutoMode && bootstrap.proxySource === "none"}
+              <p class="proxy-status">{$t("settings.proxyAutoNone")}</p>
+            {/if}
             <label class="toggle-line"><input type="checkbox" bind:checked={autoRevealInFinder} /><span>{$t("settings.autoReveal")}</span></label>
             <label class="toggle-line"><input type="checkbox" bind:checked={notifyOnComplete} /><span>{$t("settings.notifyOnComplete")}</span></label>
           </section>

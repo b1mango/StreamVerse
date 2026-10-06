@@ -240,11 +240,34 @@ fn normalize_proxy_address(value: &str) -> Result<String, String> {
 }
 
 pub fn effective_proxy_url(configured: Option<&str>) -> Option<String> {
-    configured
+    effective_proxy_with_source(configured).0
+}
+
+/// 生效代理与来源：manual = 用户手动配置，system = 自动识别的系统代理，none = 未检测到
+pub fn effective_proxy_with_source(configured: Option<&str>) -> (Option<String>, &'static str) {
+    let manual = configured
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .and_then(|value| normalize_proxy_address(value).ok())
-        .or_else(system_proxy_url)
+        .and_then(|value| normalize_proxy_address(value).ok());
+    if manual.is_some() {
+        // 手动配置优先，此时无需探测系统代理（macOS 会拉起 scutil 子进程）
+        return resolve_proxy_source(manual, None);
+    }
+    resolve_proxy_source(None, system_proxy_url())
+}
+
+/// 来源判定纯函数层：手动 > 系统 > 无
+fn resolve_proxy_source(
+    manual: Option<String>,
+    system: Option<String>,
+) -> (Option<String>, &'static str) {
+    if let Some(url) = manual {
+        (Some(url), "manual")
+    } else if let Some(url) = system {
+        (Some(url), "system")
+    } else {
+        (None, "none")
+    }
 }
 
 fn system_proxy_url() -> Option<String> {
@@ -273,7 +296,12 @@ fn macos_system_proxy_url() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    parse_macos_scutil_proxy(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// 解析 scutil --proxy 输出，按 HTTPS→HTTP→SOCKS 优先级取第一个启用的条目
+#[cfg(target_os = "macos")]
+fn parse_macos_scutil_proxy(text: &str) -> Option<String> {
     let entry = |key: &str| {
         text.lines()
             .filter_map(|line| line.trim().split_once(" : "))
@@ -497,9 +525,12 @@ fn expand_home(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_download_mode, normalize_max_concurrent, normalize_proxy_server,
-        normalize_proxy_url, normalize_quality_preference,
+        effective_proxy_with_source, normalize_download_mode, normalize_max_concurrent,
+        normalize_proxy_server, normalize_proxy_url, normalize_quality_preference,
+        resolve_proxy_source,
     };
+    #[cfg(target_os = "macos")]
+    use super::parse_macos_scutil_proxy;
 
     #[test]
     fn settings_are_intentionally_breaking() {
@@ -538,5 +569,55 @@ mod tests {
         // 无法解析的地址直接拒绝，不再透传给下载器
         assert!(normalize_proxy_url(Some("http://".to_string())).is_err());
         assert!(normalize_proxy_url(Some("ftp://127.0.0.1:21".to_string())).is_err());
+    }
+
+    #[test]
+    fn proxy_source_prefers_manual_then_system() {
+        assert_eq!(
+            resolve_proxy_source(
+                Some("http://127.0.0.1:7890".to_string()),
+                Some("http://10.0.0.2:8080".to_string()),
+            ),
+            (Some("http://127.0.0.1:7890".to_string()), "manual")
+        );
+        assert_eq!(
+            resolve_proxy_source(None, Some("http://10.0.0.2:8080".to_string())),
+            (Some("http://10.0.0.2:8080".to_string()), "system")
+        );
+        assert_eq!(resolve_proxy_source(None, None), (None, "none"));
+    }
+
+    #[test]
+    fn effective_proxy_marks_manual_source_without_system_lookup() {
+        // 手动值合法时直接判定为 manual，不触发系统代理探测
+        assert_eq!(
+            effective_proxy_with_source(Some("127.0.0.1:7890")),
+            (Some("http://127.0.0.1:7890".to_string()), "manual")
+        );
+        // 手动值无法解析时回退到系统探测，结果随运行环境而变，仅断言不会误判为 manual
+        let (_, source) = effective_proxy_with_source(Some("ftp://127.0.0.1:21"));
+        assert_ne!(source, "manual");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_macos_scutil_proxy_output() {
+        // HTTPS 与 HTTP 同时启用时 HTTPS 优先
+        let both_enabled = "<dictionary> {\n  HTTPEnable : 1\n  HTTPProxy : 10.0.0.2\n  HTTPPort : 8080\n  HTTPSEnable : 1\n  HTTPSProxy : 127.0.0.1\n  HTTPSPort : 7897\n}\n";
+        assert_eq!(
+            parse_macos_scutil_proxy(both_enabled).as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        // 仅 SOCKS 启用时使用 socks5 scheme
+        let socks_only =
+            "<dictionary> {\n  SOCKSEnable : 1\n  SOCKSProxy : 127.0.0.1\n  SOCKSPort : 1080\n}\n";
+        assert_eq!(
+            parse_macos_scutil_proxy(socks_only).as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+        // 全部未启用 → 无系统代理
+        let disabled =
+            "<dictionary> {\n  HTTPSEnable : 0\n  HTTPEnable : 0\n  SOCKSEnable : 0\n}\n";
+        assert_eq!(parse_macos_scutil_proxy(disabled), None);
     }
 }

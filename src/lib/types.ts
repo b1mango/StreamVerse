@@ -5,6 +5,7 @@ export type PlatformId = "douyin" | "bilibili" | "youtube";
 export type ThemeMode = "dark" | "light";
 export type LanguageCode = "zh-CN" | "en";
 export type QualityPreference = "recommended" | "highest" | "smallest" | "no_watermark";
+export type ProxySource = "manual" | "system" | "none";
 export type DownloadStatus = "idle" | "analyzing" | "queued" | "downloading" | "paused" | "cancelled" | "completed" | "failed";
 
 export interface DownloadContentSelection {
@@ -102,8 +103,8 @@ export interface BrowserSource {
   profiles: BrowserProfile[];
   /** Profile 枚举未完成；兜底项不可作为真实 Profile 使用。 */
   degraded: boolean;
-}
   directoryAuthorized: boolean;
+}
 
 export interface CookieImportRequest {
   platform: PlatformId;
@@ -149,6 +150,8 @@ export interface BootstrapState {
   autoRevealInFinder: boolean;
   maxConcurrentDownloads: number;
   proxyUrl: string | null;
+  effectiveProxyUrl: string | null;
+  proxySource: ProxySource;
   speedLimit: string | null;
   autoUpdate: boolean;
   theme: ThemeMode;
