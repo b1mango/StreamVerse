@@ -69,7 +69,9 @@ async function prepareYtDlp() {
   if (spec.layout === "onedir") {
     const dir = join(outputDir, "yt-dlp-onedir");
     const exe = join(dir, "yt-dlp");
-    if (existsSync(exe)) {
+    const marker = join(dir, ".archive-sha256");
+    if (existsSync(exe) && existsSync(marker)
+        && (await readFile(marker, "utf8")).trim() === spec.sha256) {
       await rm(target, { force: true });
       return;
     }
@@ -89,6 +91,7 @@ async function prepareYtDlp() {
     await rm(archive, { force: true });
     await rm(extractDir, { recursive: true, force: true });
     await chmod(exe, 0o755);
+    await writeFile(marker, `${spec.sha256}\n`);
     await rm(target, { force: true });
     return;
   }
