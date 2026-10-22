@@ -206,7 +206,8 @@ async function prepareHelper() {
     }
     const dir = join(outputDir, "streamverse-helper-onedir");
     // 内容未变化时跳过重拷：重拷会让 macOS 把目录当作新文件重新安全扫描（首跑 +30s）
-    const marker = join(dir, ".source-sha256");
+    // v2 使旧的绝对符号链接副本重新准备；新副本保留构建产物内的相对链接。
+    const marker = join(dir, ".source-sha256-v2");
     const sourceHash = await sha256(sourceExe);
     if (existsSync(join(dir, "streamverse-helper")) && existsSync(marker)
         && (await readFile(marker, "utf8")).trim() === sourceHash) {
@@ -214,7 +215,7 @@ async function prepareHelper() {
       return;
     }
     await rm(dir, { recursive: true, force: true });
-    await cp(sourceDir, dir, { recursive: true });
+    await cp(sourceDir, dir, { recursive: true, verbatimSymlinks: true });
     await chmod(join(dir, "streamverse-helper"), 0o755);
     await writeFile(marker, `${sourceHash}\n`);
     await rm(target, { force: true });
